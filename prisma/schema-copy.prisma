@@ -1,0 +1,192 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// 菜单项目表
+model GameProject {
+  id          Int      @id @default(autoincrement())
+    name        String   // 项目名称
+    price       Float    // 价格
+    type        OrderType // 订单类型
+    baseAmount  Float?   // 保底哈夫币数额（改为可选）
+    clubRate    Float?   // 俱乐部抽成比例（改为可选）
+    coverImage  String?  // 封面图片
+    description String?  // 项目描述（支持富文本）
+    status      ProjectStatus @default(ACTIVE)
+    billingMode BillingMode @default(GUARANTEED)  // ✅ 新增：项目计费模式
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+}
+
+enum BillingMode {
+  HOURLY       // 小时单
+  GUARANTEED   // 保底单
+}
+
+// 枚举类型
+enum OrderType {
+  EXPERIENCE   // 体验单
+  FUN          // 趣味玩法单
+  ESCORT       // 护航单
+  LUCKY_BAG    // 福袋单
+  BLIND_BOX    // 盲盒单
+  CUSTOM       // 定制单
+  CUSTOMIZED   // 自定义单
+}
+
+enum ProjectStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum RevisitStatus {
+  NOT_REVISITED // 未回访
+  GOOD          // 好评
+  NEUTRAL       // 中评
+  BAD           // 差评
+  COMPLAINT     // 客户投诉
+}
+
+
+model Role {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  description String?
+  permissions Permission[]
+  users       User[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Permission {
+    id          Int      @id @default(autoincrement())
+      key         String   @unique
+      name        String
+      module      String
+      type        PermissionType
+      parentId    Int?
+      children    Permission[] @relation("PermissionTree")
+      parent      Permission? @relation("PermissionTree", fields: [parentId], references: [id])
+      roles       Role[]
+      createdAt   DateTime @default(now())
+      updatedAt   DateTime @updatedAt
+}
+
+enum PermissionType {
+  PAGE
+  BUTTON
+}
+
+model User {
+  id           Int          @id @default(autoincrement())
+  phone        String       @unique
+  password     String
+  name         String?
+  email        String?
+  userType     UserType     @default(REGISTERED_USER)
+  status       UserStatus   @default(ACTIVE)
+  realName     String?
+  idCard       String?
+  avatar       String?
+  album        Json?
+  rating       Int?
+  level        Int          @default(1)
+  balance      Float        @default(0)
+  needResetPwd Boolean      @default(false)
+  lastLoginAt  DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  roleId       Int?
+  recharges    Recharge[]
+  userLogs     UserLog[]
+  staffRating  StaffRating? @relation(fields: [rating], references: [id])
+  Role         Role?        @relation(fields: [roleId], references: [id])
+
+  @@index([rating], map: "users_rating_fkey")
+  @@index([roleId], map: "users_roleId_fkey")
+  @@map("users")
+}
+
+model StaffRating {
+  id          Int          @id @default(autoincrement())
+  name        String       @unique
+  description String?
+  rules       String
+  scope       RatingScope
+  status      RatingStatus @default(ACTIVE)
+  sortOrder   Int          @default(0)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  rate        Float
+  users       User[]
+
+  @@map("staff_ratings")
+}
+
+model Recharge {
+  id        Int            @id @default(autoincrement())
+  amount    Float
+  userId    Int
+  status    RechargeStatus @default(COMPLETED)
+  createdAt DateTime       @default(now())
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId], map: "Recharge_userId_fkey")
+}
+
+model UserLog {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  action     String
+  targetType String
+  targetId   Int?
+  oldData    Json?
+  newData    Json?
+  remark     String?
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId], map: "user_logs_userId_fkey")
+  @@map("user_logs")
+}
+
+enum RatingStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum RatingScope {
+  ONLINE
+  OFFLINE
+  BOTH
+}
+
+enum UserType {
+  SUPER_ADMIN
+  ADMIN
+  STAFF
+  CUSTOMER_SERVICE
+  OPERATION
+  FINANCE
+  REGISTERED_USER
+}
+
+enum UserStatus {
+  ACTIVE
+  FROZEN
+  DISABLED
+}
+
+
+enum RechargeStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}

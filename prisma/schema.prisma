@@ -1,0 +1,517 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// 菜单项目表
+model GameProject {
+  id          Int      @id @default(autoincrement())
+  name        String
+  price       Float
+  type        OrderType
+
+  /// 计费模式：小时单 / 保底单（你已落地）
+  billingMode BillingMode @default(GUARANTEED)
+
+  baseAmount  Float?
+  clubRate    Float?
+  coverImage  String?
+  description String?
+  status      ProjectStatus @default(ACTIVE)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  /// 反向：该项目产生的订单（用于统计/筛选/项目详情）
+  orders      Order[]
+}
+
+
+enum BillingMode {
+  HOURLY // 小时单
+  GUARANTEED // 保底单
+}
+
+// 枚举类型
+enum OrderType {
+  EXPERIENCE // 体验单
+  FUN // 趣味玩法单
+  ESCORT // 护航单
+  LUCKY_BAG // 福袋单
+  BLIND_BOX // 盲盒单
+  CUSTOM // 定制单
+  CUSTOMIZED // 自定义单
+}
+
+enum ProjectStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum RevisitStatus {
+  NOT_REVISITED // 未回访
+  GOOD // 好评
+  NEUTRAL // 中评
+  BAD // 差评
+  COMPLAINT // 客户投诉
+}
+
+model Role {
+  id          Int          @id @default(autoincrement())
+  name        String       @unique
+  description String?
+  permissions Permission[]
+  users       User[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+model Permission {
+  id        Int            @id @default(autoincrement())
+  key       String         @unique
+  name      String
+  module    String
+  type      PermissionType
+  parentId  Int?
+  children  Permission[]   @relation("PermissionTree")
+  parent    Permission?    @relation("PermissionTree", fields: [parentId], references: [id])
+  roles     Role[]
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
+
+enum PermissionType {
+  PAGE
+  BUTTON
+}
+
+model User {
+  id           Int          @id @default(autoincrement())
+  phone        String       @unique
+  password     String
+  name         String?
+  email        String?
+  userType     UserType     @default(REGISTERED_USER)
+  status       UserStatus   @default(ACTIVE)
+  realName     String?
+  idCard       String?
+  avatar       String?
+  album        Json?
+  rating       Int?
+  level        Int          @default(1)
+  balance      Float        @default(0)
+  needResetPwd Boolean      @default(false)
+  lastLoginAt  DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  roleId       Int?
+  recharges    Recharge[]
+  userLogs     UserLog[]
+  staffRating  StaffRating? @relation(fields: [rating], references: [id])
+  Role         Role?        @relation(fields: [roleId], references: [id])
+
+  //dispatchedOrders OrderDispatch[] @ignore // Prisma 不建议这样写；所以这条我不强推
+
+  /// 陪玩接单记录：参与过哪些派单批次
+    orderParticipants OrderParticipant[]
+
+    /// 陪玩结算记录：结单后生成的收益明细
+    orderSettlements  OrderSettlement[]
+
+    /// 作为派单客服创建的订单
+    dispatchedOrders  Order[] @relation("OrderDispatcher")
+
+    /// 作为财务创建的批次结算记录
+    createdBatches    SettlementBatch[] @relation("BatchCreator")
+
+  @@index([rating], map: "users_rating_fkey")
+  @@index([roleId], map: "users_roleId_fkey")
+  @@map("users")
+}
+
+model StaffRating {
+  id          Int          @id @default(autoincrement())
+  name        String       @unique
+  description String?
+  rules       String
+  scope       RatingScope
+  status      RatingStatus @default(ACTIVE)
+  sortOrder   Int          @default(0)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  rate        Float
+  users       User[]
+
+  @@map("staff_ratings")
+}
+
+model Recharge {
+  id        Int            @id @default(autoincrement())
+  amount    Float
+  userId    Int
+  status    RechargeStatus @default(COMPLETED)
+  createdAt DateTime       @default(now())
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId], map: "Recharge_userId_fkey")
+}
+
+model UserLog {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  action     String
+  targetType String
+  targetId   Int?
+  oldData    Json?
+  newData    Json?
+  remark     String?
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId], map: "user_logs_userId_fkey")
+  @@map("user_logs")
+}
+
+enum RatingStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum RatingScope {
+  ONLINE
+  OFFLINE
+  BOTH
+}
+
+enum UserType {
+  SUPER_ADMIN
+  ADMIN
+  STAFF
+  CUSTOMER_SERVICE
+  OPERATION
+  FINANCE
+  REGISTERED_USER
+}
+
+enum UserStatus {
+  ACTIVE
+  FROZEN
+  DISABLED
+}
+
+enum RechargeStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+// ----------订单相关----------
+/// 订单总状态（用于列表筛选与业务流转）
+/// 说明：我们把“每次派单”的细节放在 DispatchStatus，OrderStatus 体现订单整体所处阶段
+enum OrderStatus {
+  WAIT_ASSIGN     // 待派单：订单创建后还没有当前派单批次，或当前批次处于待派单
+  WAIT_ACCEPT     // 待接单：已派单但未全员接单完成
+  ACCEPTED        // 已接单：当前批次全员已接单
+  ARCHIVED        // 已存单：本轮存档，可再次派单（创建下一轮 dispatch）
+  COMPLETED       // 已结单：打手结单，触发自动结算落库
+  WAIT_REVIEW     // 待评价：业务预留
+  REVIEWED        // 已评价：业务预留
+  WAIT_AFTERSALE  // 待售后：业务预留
+  AFTERSALE_DONE  // 已售后：业务预留
+  REFUNDED        // 已退款：业务预留（退款后一般不再派单）
+}
+
+/// 派单批次状态（每一轮派单都有一个状态；一个订单可多轮派单）
+/// 规则：
+/// - 只有 ARCHIVED 才允许创建下一轮 dispatch
+/// - ACCEPTED 的判定是“本轮所有参与者都接单”
+enum DispatchStatus {
+  WAIT_ASSIGN  // 待派单：可增减陪玩（应用层限制）
+  WAIT_ACCEPT  // 待接单：已指派陪玩，等待陪玩接单
+  ACCEPTED     // 已接单：全员接单完成（acceptedAllAt 写入）
+  ARCHIVED     // 已存单：陪玩存单（写入 archivedAt）
+  COMPLETED    // 已结单：陪玩结单（写入 completedAt，并触发自动结算落库）
+}
+
+/// 结算打款状态（财务对账后标记）
+enum PaymentStatus {
+  UNPAID
+  PAID
+}
+
+/// 批次结算类型
+/// - EXPERIENCE_3DAY：体验单/福袋单每 3 个自然日结算
+/// - MONTHLY_REGULAR：正价单次月 5 日前结算上月
+enum SettlementBatchType {
+  EXPERIENCE_3DAY
+  MONTHLY_REGULAR
+}
+
+/// 小时单：中途扣除时间选项（打手存单时选择）
+/// 注意：不允许打手手输负数；这是扣时不是加时
+enum DeductMinutesOption {
+  M10
+  M20
+  M30
+  M40
+  M50
+  M60
+}
+
+// 新增模型：Order
+model Order {
+  id              Int          @id @default(autoincrement())
+
+  /// 自动单号：建议 YYYYMMDD-0001（由代码生成，不靠 DB 自增）
+  autoSerial      String       @unique
+
+  /// 金额：手工录入（你已确认 Q1=A）
+  /// receivableAmount：应收金额（理论金额）
+  /// paidAmount：实付金额（用于结算计算）
+  receivableAmount Float
+  paidAmount       Float
+
+  /// 时间字段：
+  /// orderTime：下单时间（未来接线上商城平台）
+  /// paymentTime：付款时间（未来接支付）
+  /// openedAt：开单时间（默认录入时间）
+  orderTime       DateTime?
+  paymentTime     DateTime?
+  openedAt        DateTime     @default(now())
+
+  /// 保底数额（单位：万）
+  /// 仅保底/护航类项目使用；小时单可为空
+  baseAmountWan   Float?
+
+  /// 小时单“总小时”不再需要手填：
+  /// 因为你要求用 接单时间 -> 存/结单时间 自动计算 billableHours
+  /// 所以小时单的小时数最终落在 OrderDispatch.billableHours 上
+
+  /// 关联项目：仍用 GameProject（必选）
+  projectId       Int
+  project         GameProject  @relation(fields: [projectId], references: [id])
+
+  /// 项目快照：记录当时项目配置（项目可能随时调整）
+  /// 建议存：name/type/billingMode/baseAmount/clubRate/price 等
+  projectSnapshot Json
+
+  /// 客户游戏 ID / 昵称：用于查询消费记录
+  customerGameId  String?
+
+  /// 派单客服：默认录单人
+  dispatcherId    Int
+  dispatcher      User         @relation("OrderDispatcher", fields: [dispatcherId], references: [id])
+
+  /// 回访登记：文本 + 状态
+  revisitDetail   String?
+  revisitStatus   RevisitStatus @default(NOT_REVISITED)
+
+  /// 分佣比例（可调）
+  /// csRate：客服收益比例（默认 1%，体验单可设为 0）
+  /// inviteRate：邀请/推广分佣（默认 5%）
+  csRate          Float?
+  inviteRate      Float?
+  inviter         String?      // 邀请/推广人（可字符串或后期关联用户）
+
+  /// 俱乐部抽成比例（订单级固定抽成）
+  /// customClubRate：录单时可自定义；优先级最高
+  /// clubRate：实际使用的抽成（落库快照，便于对账）
+  customClubRate  Float?
+  clubRate        Float?
+
+  /// 结算汇总（可选，结单自动结算后写入，用于对账与校验）
+  clubEarnings        Float?   // 本单俱乐部收益
+  totalPlayerEarnings Float?   // 陪玩总收益（验证计算是否有错）
+
+  /// 订单状态（用于筛选）
+  status          OrderStatus  @default(WAIT_ASSIGN)
+
+  /// 当前派单批次（为了快速查“这一轮派单/状态”）
+  currentDispatchId Int?
+  currentDispatch   OrderDispatch? @relation("OrderCurrentDispatch", fields: [currentDispatchId], references: [id])
+
+  /// 历史派单批次：一单可多轮派单（存单后再派）
+  dispatches      OrderDispatch[] @relation("OrderDispatches")
+
+  /// 结算明细：结单时落库（按订单+陪玩维度）
+  settlements     OrderSettlement[]
+
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  @@index([projectId])
+  @@index([dispatcherId])
+  @@index([status])
+  @@index([customerGameId])
+}
+
+
+//新增模型：OrderDispatch（派单批次）
+model OrderDispatch {
+  id            Int           @id @default(autoincrement())
+
+  /// 属于哪个订单
+  orderId       Int
+  order         Order         @relation("OrderDispatches", fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// 第几轮派单（从 1 开始递增）
+  /// 规则：只有上一轮 ARCHIVED 才允许创建下一轮
+  round         Int
+
+  /// 本轮状态：待派 -> 待接 -> 已接 -> 存单/结单
+  status        DispatchStatus @default(WAIT_ASSIGN)
+
+  /// 时间：
+  /// assignedAt：派单时间（客服执行派单时写入）
+  /// acceptedAllAt：全员接单完成时间（当本轮所有 participant.acceptedAt 非空时写入）
+  /// archivedAt：存单时间（打手点击存单写入）
+  /// completedAt：结单时间（打手点击结单写入，并触发结算落库）
+  assignedAt    DateTime?
+  acceptedAllAt DateTime?
+  archivedAt    DateTime?
+  completedAt   DateTime?
+
+  /// 小时单：中途扣除时间（整单统一扣除）
+  /// deductMinutes：枚举选项，用于 UI 固定下拉
+  /// deductMinutesValue：冗余数值，方便后端计算/前端展示（10/20/.../60）
+  deductMinutes DeductMinutesOption?
+  deductMinutesValue Int?
+
+  /// 小时单：计费结果（由系统计算并落库）
+  /// billableMinutes：扣除后有效分钟
+  /// billableHours：计费小时（整数小时 + 分钟折算 0/0.5/1）
+  billableMinutes Int?
+  billableHours   Float?
+
+  /// 本轮备注：可存 “换号/异常/说明”
+  remark        String?
+
+  /// 本轮参与者：最多 2 个（应用层限制，不做 DB 强约束）
+  participants  OrderParticipant[]
+
+  /// 反向：哪些订单的 currentDispatch 指向本 dispatch
+  /// 理论上最多 1 个，但 Prisma 反向一般写数组
+  currentForOrders Order[] @relation("OrderCurrentDispatch")
+
+  /// 反向：本轮结单生成的结算明细
+  settlements OrderSettlement[]
+
+  @@unique([orderId, round])
+  @@index([orderId])
+  @@index([status])
+}
+
+//新增模型：OrderParticipant（参与者）
+model OrderParticipant {
+  id            Int      @id @default(autoincrement())
+
+  /// 属于哪一轮派单
+  dispatchId    Int
+  dispatch      OrderDispatch @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
+
+  /// 陪玩/打手（User）
+  userId        Int
+  user          User     @relation(fields: [userId], references: [id])
+
+  /// 接单时间：陪玩确认接单后写入
+  /// 规则：本轮“已接单”必须所有参与者 acceptedAt 都有值
+  acceptedAt    DateTime?
+
+  /// 贡献金额（可选）
+  /// v0.1：结单默认均分；存单按进度比例算（保底/小时），贡献字段先留作未来扩展
+  contributionAmount Float? @default(0)
+
+  /// 保底单：已打保底（单位：万）
+  /// 允许负数：炸单（前端用“炸单额外加保底”选择转成负数）
+  progressBaseWan Float?
+
+  /// 是否有效：存单再派可能替换陪玩（历史记录保留，但不参与后续）
+  isActive      Boolean @default(true)
+
+  @@index([dispatchId])
+  @@index([userId])
+  @@unique([dispatchId, userId])
+}
+
+//新增模型：OrderSettlement（结算明细，按订单+陪玩维度落库）
+model OrderSettlement {
+  id            Int      @id @default(autoincrement())
+
+  /// 属于哪个订单
+  orderId       Int
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// 哪一轮派单产生的结算（结单时落库）
+  dispatchId    Int
+  dispatch      OrderDispatch @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
+
+  /// 哪个陪玩/打手
+  userId        Int
+  user          User     @relation(fields: [userId], references: [id])
+
+  /// 结算类型：
+  /// - EXPERIENCE：体验/福袋（每 3 天批次结算）
+  /// - REGULAR：正价（按月批次结算）
+  /// v0.1 先用 String，后期可改 enum（避免迁移频繁）
+  settlementType String
+
+  /// 计算结果（结单时自动生成）
+  calculatedEarnings Float
+
+  /// 人工调整：客服主管/财务可对“单个陪玩-单个订单”调整收益（你明确要求）
+  /// finalEarnings = calculatedEarnings + manualAdjustment
+  manualAdjustment   Float @default(0)
+  finalEarnings      Float
+
+  /// 拆分记录（用于对账展示，可选）
+  clubEarnings       Float?
+  csEarnings         Float?
+  inviteEarnings     Float?
+
+  /// 打款状态：对账无误后由财务批量标记
+  paymentStatus      PaymentStatus @default(UNPAID)
+  paidAt             DateTime?
+
+  /// 审计：谁调的、什么时候调、为什么调
+  settledAt          DateTime @default(now())
+  adjustedBy         Int?
+  adjustedAt         DateTime?
+  adjustRemark       String?
+
+  @@index([orderId])
+  @@index([dispatchId])
+  @@index([userId])
+  @@index([paymentStatus])
+}
+
+//新增模型：SettlementBatch（批次结算）
+model SettlementBatch {
+  id          Int      @id @default(autoincrement())
+
+  /// 批次类型：体验三日 / 正价月度
+  batchType   SettlementBatchType
+
+  /// 时间范围（自然日维度）
+  periodStart DateTime
+  periodEnd   DateTime
+
+  /// 创建人（财务/客服主管）
+  createdBy   Int
+  creator     User     @relation("BatchCreator", fields: [createdBy], references: [id])
+
+  /// 汇总缓存：用于前端“总收入/俱乐部收入/应结款”展示
+  /// 说明：这些值也可以实时聚合计算；缓存是为了查询快
+  totalIncome Float?       // 实收款统计（通常 sum(Order.paidAmount)）
+  clubIncome  Float?       // 俱乐部提成统计（sum(Order.clubEarnings)）
+  payableToPlayers Float?  // 应结款（sum(OrderSettlement.finalEarnings)）
+
+  createdAt   DateTime @default(now())
+
+  @@index([batchType])
+  @@index([periodStart, periodEnd])
+}
