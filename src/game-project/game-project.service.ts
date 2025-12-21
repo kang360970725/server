@@ -59,4 +59,17 @@ export class GameProjectService {
             data: { status: 'INACTIVE' },
         });
     }
+
+    async options(params: { keyword?: string }) {
+        const where: any = { status: 'ACTIVE' };
+        if (params?.keyword) {
+            where.OR = [{ name: { contains: params.keyword } }];
+        }
+        return this.prisma.gameProject.findMany({
+            where,
+            select: { id: true, name: true, type: true, price: true, baseAmount: true },
+            orderBy: { id: 'desc' },
+            take: 50,
+        });
+    }
 }

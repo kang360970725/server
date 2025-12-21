@@ -1,120 +1,183 @@
+// src/orders/orders.controller.ts
 import {
     Body,
     Controller,
-    Get,
-    Param,
-    ParseIntPipe,
     Post,
-    Query,
-    Request,
     UseGuards,
+    Request,
+    ParseIntPipe,
+    BadRequestException,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { OrdersService } from './orders.service';
-import { CreateOrderDto } from './dto/create-order.dto';
-import { QueryOrdersDto } from './dto/query-orders.dto';
-import { AssignDispatchDto } from './dto/assign-dispatch.dto';
-import { AcceptDispatchDto } from './dto/accept-dispatch.dto';
-import { ArchiveDispatchDto } from './dto/archive-dispatch.dto';
-import { CompleteDispatchDto } from './dto/complete-dispatch.dto';
-import { QuerySettlementBatchDto } from './dto/query-settlement-batch.dto';
-import { MarkPaidDto } from './dto/mark-paid.dto';
 
-@Controller()
+/**
+ * Orders Controller（v0.1）
+ * ✅ 统一使用 POST 接口
+ * ✅ 所有数值参数（page/limit/id/...）统一转 number，避免 Prisma take/skip 报错
+ */
+@Controller('orders')
 @UseGuards(JwtAuthGuard)
 export class OrdersController {
     constructor(private readonly ordersService: OrdersService) {}
 
     /**
-     * 创建订单
+     * 订单列表
+     * POST /orders/list
+     * body: { page?, limit?, serial?, status?, customerGameId?, projectId?, dispatcherId?, playerId? }
      */
-    @Post('orders')
-    createOrder(@Body() dto: CreateOrderDto, @Request() req: any) {
-        return this.ordersService.createOrder(dto, req.user.userId);
-    }
+    @Post('list')
+    async list(@Body() body: any) {
+        const page = Math.max(1, Number(body.page ?? 1));
+        const limit = Math.min(100, Math.max(1, Number(body.limit ?? 20)));
 
-    /**
-     * 订单列表（筛选）
-     */
-    @Get('orders')
-    listOrders(@Query() query: QueryOrdersDto) {
-        return this.ordersService.listOrders(query);
+        return this.ordersService.listOrders({
+            page,
+            limit,
+            serial: body.serial,
+            status: body.status,
+            customerGameId: body.customerGameId,
+            projectId: body.projectId != null ? Number(body.projectId) : undefined,
+            dispatcherId: body.dispatcherId != null ? Number(body.dispatcherId) : undefined,
+            playerId: body.playerId != null ? Number(body.playerId) : undefined,
+        });
     }
 
     /**
      * 订单详情
+     * POST /orders/detail
+     * body: { id }
      */
-    @Get('orders/:id')
-    getOrder(@Param('id', ParseIntPipe) id: number) {
+    @Post('detail')
+    async detail(@Body() body: any) {
+        const id = Number(body.id);
+        if (!id || Number.isNaN(id)) throw new BadRequestException('id 必须为数字');
         return this.ordersService.getOrderDetail(id);
     }
 
     /**
-     * 派单 / 更新本轮参与者
-     * - 仅当前 dispatch.status=WAIT_ASSIGN 允许
+     * 新建订单
+     * POST /orders/create
+     * body: CreateOrderDto（v0.1 先用 any，后续可补 DTO + class-validator）
      */
-    @Post('orders/:id/dispatch')
-    assignDispatch(@Param('id', ParseIntPipe) orderId: number, @Body() dto: AssignDispatchDto, @Request() req: any) {
-        return this.ordersService.assignOrUpdateDispatch(orderId, dto, req.user.userId);
+    @Post('create')
+    async create(@Body() body: any, @Request() req: any) {
+        const operatorId = req.user?.userId;
+        return this.ordersService.createOrder(body, operatorId);
     }
 
     /**
-     * 陪玩接单（某个 dispatch）
+     * 取消订单（预留：v0.1 你如果还没实现 service，可以先不接）
+     * POST /orders/cancel
+     * body: { id, remark? }
      */
-    @Post('orders/dispatch/:dispatchId/accept')
-    acceptDispatch(@Param('dispatchId', ParseIntPipe) dispatchId: number, @Body() dto: AcceptDispatchDto, @Request() req: any) {
-        return this.ordersService.acceptDispatch(dispatchId, req.user.userId, dto);
+    @Post('cancel')
+    async cancel(@Body() body: any, @Request() req: any) {
+        const id = Number(body.id);
+        if (!id || Number.isNaN(id)) throw new BadRequestException('id 必须为数字');
+        return this.ordersService.cancelOrder(id, req.user?.userId, body.remark);
     }
 
     /**
-     * 存单（ARCHIVED）
-     * - 小时单：可传 deductMinutesOption
-     * - 保底单：可传 progresses（每人 progressBaseWan）
-     * - 存单会为这一轮生成结算明细（按你业务：存单也要按贡献结算）
+     * 派单 / 重新派单（创建新一轮 dispatch）
+     * POST /orders/dispatch
+     * body: { orderId, playerIds: number[], remark? }
      */
-    @Post('orders/dispatch/:dispatchId/archive')
-    archiveDispatch(@Param('dispatchId', ParseIntPipe) dispatchId: number, @Body() dto: ArchiveDispatchDto, @Request() req: any) {
-        return this.ordersService.archiveDispatch(dispatchId, req.user.userId, dto);
+    @Post('dispatch')
+    async dispatch(@Body() body: any, @Request() req: any) {
+        const orderId = Number(body.orderId);
+        if (!orderId || Number.isNaN(orderId)) throw new BadRequestException('orderId 必须为数字');
+
+        const playerIdsRaw = body.playerIds;
+        if (!Array.isArray(playerIdsRaw)) throw new BadRequestException('playerIds 必须为数组');
+
+        const playerIds = playerIdsRaw.map((x: any) => Number(x)).filter((x: number) => !Number.isNaN(x));
+        if (playerIds.length < 1 || playerIds.length > 2) {
+            throw new BadRequestException('playerIds 必须为 1~2 个');
+        }
+
+        return this.ordersService.assignDispatch(orderId, playerIds, req.user?.userId, body.remark);
     }
 
     /**
-     * 结单（COMPLETED）——结单即自动结算落库
+     * 陪玩接单（单个参与者确认）
+     * POST /orders/dispatch/accept
+     * body: { dispatchId, remark? }
      */
-    @Post('orders/dispatch/:dispatchId/complete')
-    completeDispatch(@Param('dispatchId', ParseIntPipe) dispatchId: number, @Body() dto: CompleteDispatchDto, @Request() req: any) {
-        return this.ordersService.completeDispatch(dispatchId, req.user.userId, dto);
+    @Post('dispatch/accept')
+    async accept(@Body() body: any, @Request() req: any) {
+        const dispatchId = Number(body.dispatchId);
+        if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
+        return this.ordersService.acceptDispatch(dispatchId, req.user?.userId, body.remark);
     }
 
     /**
-     * 批次结算查询（用于 admin 的体验三日 / 月度结算页面）
+     * 存单（本轮自动结算并落库）
+     * POST /orders/dispatch/archive
+     * body: { dispatchId, deductMinutesOption?, remark?, progresses? }
+     *
+     * progresses: [{ userId, progressBaseWan }]  // 保底单：每个陪玩可填写本轮已打保底（万，可为负）
      */
-    @Get('settlements/batches')
-    querySettlementBatch(@Query() query: QuerySettlementBatchDto) {
-        return this.ordersService.querySettlementBatch(query);
+    @Post('dispatch/archive')
+    async archive(@Body() body: any, @Request() req: any) {
+        const dispatchId = Number(body.dispatchId);
+        if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
+
+        // 交给 service 做更严谨校验（例如扣除时间枚举、progresses 结构）
+        return this.ordersService.archiveDispatch(dispatchId, req.user?.userId, body);
     }
 
     /**
-     * 标记打款（按 settlementIds）
+     * 结单（本轮自动结算并落库）
+     * POST /orders/dispatch/complete
+     * body: { dispatchId, deductMinutesOption?, remark?, progresses? }
      */
-    @Post('settlements/mark-paid')
-    markPaid(@Body() dto: MarkPaidDto, @Request() req: any) {
-        return this.ordersService.markSettlementsPaid(dto, req.user.userId);
+    @Post('dispatch/complete')
+    async complete(@Body() body: any, @Request() req: any) {
+        const dispatchId = Number(body.dispatchId);
+        if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
+
+        return this.ordersService.completeDispatch(dispatchId, req.user?.userId, body);
     }
 
     /**
-     * 陪玩查看自己的接单记录（基于 OrderParticipant）
-     * - 这是你要求的“先默认支持”
+     * 我的接单记录（给陪玩查看自己参与的订单）
+     * POST /orders/my-dispatches
+     * body: { page?, limit?, status? }
+     *
+     * ✅ 后续你可以在前端做“陪玩端/个人中心”使用
      */
-    @Get('me/orders/participations')
-    myParticipations(@Request() req: any) {
-        return this.ordersService.listMyParticipations(req.user.userId);
+    @Post('my-dispatches')
+    async myDispatches(@Body() body: any, @Request() req: any) {
+        const page = Math.max(1, Number(body.page ?? 1));
+        const limit = Math.min(100, Math.max(1, Number(body.limit ?? 20)));
+        const userId = req.user?.userId;
+
+        return this.ordersService.listMyDispatches({
+            userId,
+            page,
+            limit,
+            status: body.status,
+        });
     }
 
-    /**
-     * 陪玩查看自己的结算记录（基于 OrderSettlement）
-     */
-    @Get('me/orders/settlements')
-    mySettlements(@Request() req: any) {
-        return this.ordersService.listMySettlements(req.user.userId);
+    @Post('update-paid-amount')
+    updatePaidAmount(@Body() body: any, @Request() req: any) {
+        return this.ordersService.updatePaidAmount(
+            Number(body.id),
+            Number(body.paidAmount),
+            req.user?.userId,
+            body.remark,
+        );
+    }
+
+    @Post('dispatch/update-participants')
+    updateParticipants(@Body() body: any, @Request() req: any) {
+        return this.ordersService.updateDispatchParticipants(
+            Number(body.dispatchId),
+            (body.playerIds || []).map((x: any) => Number(x)),
+            req.user?.userId,
+            body.remark,
+        );
     }
 }

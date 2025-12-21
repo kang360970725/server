@@ -18,6 +18,7 @@ import { ChangeLevelDto } from './dto/change-level.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { UserType } from '@prisma/client';
+import {UpdateWorkStatusDto} from "./dto/update-work-status.dto";
 
 @Controller('users')
 @UseGuards(JwtAuthGuard)
@@ -87,5 +88,15 @@ export class UsersController {
   @Delete(':id')
   remove(@Param('id', ParseIntPipe) id: number, @Request() req) {
     return this.usersService.remove(id, req.user.userId);
+  }
+
+  @Post('work-status')
+  updateMyWorkStatus(@Body() dto: UpdateWorkStatusDto, @Request() req) {
+    return this.usersService.updateMyWorkStatus(req.user.userId, dto.workStatus);
+  }
+
+  @Post('players/options')
+  getPlayerOptions(@Body() body: any) {
+    return this.usersService.getPlayerOptions(body);
   }
 }

@@ -12,6 +12,11 @@ export class GameProjectController {
         return this.gameProjectService.create(createGameProjectDto);
     }
 
+    @Post('options')
+    options(@Body() body: any) {
+        return this.gameProjectService.options(body);
+    }
+
     @Get()
     findAll() {
         return this.gameProjectService.findAll();

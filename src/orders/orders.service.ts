@@ -198,29 +198,80 @@ export class OrdersService {
         };
     }
 
-    async getOrderDetail(orderId: number) {
+    // async getOrderDetail(orderId: number) {
+    //     const order = await this.prisma.order.findUnique({
+    //         where: { id: orderId },
+    //         include: {
+    //             project: true,
+    //             dispatcher: { select: { id: true, name: true, phone: true } },
+    //             dispatches: {
+    //                 orderBy: { round: 'asc' },
+    //                 include: {
+    //                     participants: { include: { user: { select: { id: true, name: true, phone: true } } } },
+    //                     settlements: true,
+    //                 },
+    //             },
+    //             settlements: {
+    //                 orderBy: { settledAt: 'desc' },
+    //                 include: { user: { select: { id: true, name: true, phone: true } } },
+    //             },
+    //         },
+    //     });
+    //
+    //     if (!order) throw new NotFoundException('订单不存在');
+    //     return order;
+    // }
+
+    async getOrderDetail(id: number) {
         const order = await this.prisma.order.findUnique({
-            where: { id: orderId },
+            where: { id },
             include: {
                 project: true,
                 dispatcher: { select: { id: true, name: true, phone: true } },
-                dispatches: {
-                    orderBy: { round: 'asc' },
+
+                // ✅ 当前派单批次
+                currentDispatch: {
                     include: {
-                        participants: { include: { user: { select: { id: true, name: true, phone: true } } } },
-                        settlements: true,
+                        participants: {
+                            where: { isActive: true }, // ✅ 只取当前有效参与者
+                            include: {
+                                user: { select: { id: true, name: true, phone: true, workStatus: true } }, // ✅ 关键：把 user 带出来
+                            },
+                            orderBy: { id: 'asc' },
+                        },
                     },
                 },
+
+                // ✅ 历史批次（可选：如果你详情页也要展示历史）
+                dispatches: {
+                    orderBy: { round: 'desc' },
+                    include: {
+                        participants: {
+                            include: {
+                                user: { select: { id: true, name: true, phone: true } },
+                            },
+                            orderBy: { id: 'asc' },
+                        },
+                    },
+                },
+
+                // ✅ 结算明细（可选：如果你详情页要展示）
                 settlements: {
-                    orderBy: { settledAt: 'desc' },
-                    include: { user: { select: { id: true, name: true, phone: true } } },
+                    include: {
+                        user: { select: { id: true, name: true, phone: true } },
+                    },
+                    orderBy: { id: 'desc' },
                 },
             },
         });
 
-        if (!order) throw new NotFoundException('订单不存在');
+        if (!order) {
+            throw new NotFoundException('订单不存在');
+        }
+
         return order;
     }
+
 
     // -----------------------------
     // 3) 派单/更新参与者
@@ -345,7 +396,7 @@ export class OrdersService {
     // 4) 接单
     // -----------------------------
 
-    async acceptDispatch(dispatchId: number, userId: number, dto: AcceptDispatchDto) {
+    async acceptDispatch(dispatchId: number, userId: number, dto: AcceptDispatchDto, payload?: string | { remark?: string }) {
         const dispatch = await this.prisma.orderDispatch.findUnique({
             where: { id: dispatchId },
             include: {
@@ -369,6 +420,11 @@ export class OrdersService {
         await this.prisma.orderParticipant.update({
             where: { id: participant.id },
             data: { acceptedAt: new Date() },
+        });
+
+        await this.prisma.user.update({
+            where: { id: userId },
+            data: { workStatus: 'WORKING' as any },
         });
 
         // 判断是否全员接单完成
@@ -395,9 +451,14 @@ export class OrdersService {
             });
         }
 
+        const remark =
+            typeof payload === 'string'
+                ? payload
+                : payload?.remark;
+
         await this.logOrderAction(userId, refreshed.orderId, 'ACCEPT_DISPATCH', {
             dispatchId,
-            remark: dto.remark ?? null,
+            remark: remark ?? null,
         });
 
         return this.getDispatchWithParticipants(dispatchId);
@@ -460,6 +521,12 @@ export class OrdersService {
             dispatchId,
             mode: 'ARCHIVE',
         });
+        // 6) 对应打手改变状态，可再次接单
+        const userIds = dispatch.participants.map(p => p.userId);
+        await this.prisma.user.updateMany({
+            where: { id: { in: userIds } },
+            data: { workStatus: 'IDLE' as any },
+        });
 
         await this.logOrderAction(operatorId, dispatch.orderId, 'ARCHIVE_DISPATCH', {
             dispatchId,
@@ -514,6 +581,13 @@ export class OrdersService {
             orderId: dispatch.orderId,
             dispatchId,
             mode: 'COMPLETE',
+        });
+
+        // 6) 对应打手改变状态，可再次接单
+        const userIds = dispatch.participants.map(p => p.userId);
+        await this.prisma.user.updateMany({
+            where: { id: { in: userIds } },
+            data: { workStatus: 'IDLE' as any },
         });
 
         await this.logOrderAction(operatorId, dispatch.orderId, 'COMPLETE_DISPATCH', {
@@ -1071,4 +1145,269 @@ export class OrdersService {
             },
         });
     }
+
+
+
+
+    //取消订单
+    async cancelOrder(orderId: number, operatorId: number, remark?: string) {
+        if (!orderId) throw new BadRequestException('orderId 必填');
+
+        const order = await this.prisma.order.findUnique({
+            where: { id: orderId },
+            select: { id: true, status: true },
+        });
+
+        if (!order) throw new NotFoundException('订单不存在');
+
+        // v0.1 先做一个保守限制：已结单/已退款不可取消（你后续再按状态机细化）
+        const forbidden = new Set(['COMPLETED', 'REFUNDED']);
+        if (forbidden.has(String(order.status))) {
+            throw new ForbiddenException('当前订单状态不可取消');
+        }
+
+        const updated = await this.prisma.order.update({
+            where: { id: orderId },
+            data: {
+                status: 'CANCELLED' as any, // 你若 enum 没有 CANCELLED，后续我们再统一状态机枚举
+            },
+        });
+
+        // 记录操作日志（你已有 UserLog）
+        if (operatorId) {
+            await this.prisma.userLog.create({
+                data: {
+                    userId: operatorId,
+                    action: 'CANCEL_ORDER',
+                    targetType: 'ORDER',
+                    targetId: orderId,
+                    oldData: { status: order.status } as any,
+                    newData: { status: 'CANCELLED' } as any,
+                    remark: remark || '取消订单',
+                },
+            });
+        }
+
+        return updated;
+    }
+
+
+    // ✅ 派单 / 重新派单（创建新的派单批次）
+    async assignDispatch(orderId: number, playerIds: number[], operatorId: number, remark?: string) {
+        if (!orderId) throw new BadRequestException('orderId 必填');
+        if (!Array.isArray(playerIds)) throw new BadRequestException('playerIds 必须为数组');
+        if (playerIds.length < 1 || playerIds.length > 2) throw new BadRequestException('playerIds 必须为 1~2 个');
+
+        const order = await this.prisma.order.findUnique({
+            where: { id: orderId },
+            include: { dispatches: { select: { id: true, round: true, status: true } } },
+        });
+
+        if (!order) throw new NotFoundException('订单不存在');
+
+        // ✅ v0.1：只允许 WAIT_ASSIGN 或 已存单的订单再次派单（符合你之前规则）
+        const allowOrderStatus = new Set(['WAIT_ASSIGN', 'ARCHIVED']);
+        if (!allowOrderStatus.has(String(order.status))) {
+            throw new ForbiddenException('当前订单状态不可派单');
+        }
+
+        // round 从 1 开始递增
+        const nextRound = (order.dispatches?.reduce((max, d) => Math.max(max, d.round), 0) || 0) + 1;
+
+        // 创建本轮派单
+        const dispatch = await this.prisma.orderDispatch.create({
+            data: {
+                orderId,
+                round: nextRound,
+                status: 'WAIT_ACCEPT' as any, // 本轮进入待接单
+                assignedAt: new Date(),
+                remark: remark || null,
+            },
+        });
+
+        // 创建参与者
+        await this.prisma.orderParticipant.createMany({
+            data: playerIds.map((userId) => ({
+                dispatchId: dispatch.id,
+                userId,
+                isActive: true,
+            })),
+        });
+
+        // 更新订单状态 + currentDispatch 指针
+        await this.prisma.order.update({
+            where: { id: orderId },
+            data: {
+                status: 'WAIT_ACCEPT' as any,
+                currentDispatchId: dispatch.id,
+            },
+        });
+
+        // 记录日志
+        if (operatorId) {
+            await this.prisma.userLog.create({
+                data: {
+                    userId: operatorId,
+                    action: 'ASSIGN_DISPATCH',
+                    targetType: 'ORDER',
+                    targetId: orderId,
+                    oldData: { status: order.status } as any,
+                    newData: { status: 'WAIT_ACCEPT', playerIds, round: nextRound } as any,
+                    remark: remark || `派单 round=${nextRound}`,
+                },
+            });
+        }
+
+        // 返回订单详情（你 service 里应该已有 getOrderDetail/findOne 类似方法）
+        // 如果你叫 findOne，就改成 return this.findOne(orderId)
+        return this.getOrderDetail(orderId);
+    }
+
+
+    // ✅ 我的接单记录（陪玩端/员工端查看自己参与的派单批次）
+    async listMyDispatches(params: { userId: number; page: number; limit: number; status?: string }) {
+        const userId = Number(params.userId);
+        const page = Math.max(1, Number(params.page ?? 1));
+        const limit = Math.min(100, Math.max(1, Number(params.limit ?? 20)));
+        const skip = (page - 1) * limit;
+
+        if (!userId) throw new BadRequestException('userId 缺失');
+
+        const where: any = {
+            participants: { some: { userId } },
+        };
+        if (params.status) where.status = params.status as any;
+
+        const [data, total] = await Promise.all([
+            this.prisma.orderDispatch.findMany({
+                where,
+                skip,
+                take: limit,
+                orderBy: { id: 'desc' },
+                include: {
+                    order: {
+                        include: {
+                            project: true,
+                            dispatcher: { select: { id: true, name: true, phone: true } },
+                        },
+                    },
+                    participants: {
+                        include: {
+                            user: { select: { id: true, name: true, phone: true } },
+                        },
+                    },
+                },
+            }),
+            this.prisma.orderDispatch.count({ where }),
+        ]);
+
+        return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+    }
+
+    async updatePaidAmount(orderId: number, paidAmount: number, operatorId: number, remark?: string) {
+        if (!orderId) throw new BadRequestException('id 必填');
+        if (!Number.isFinite(paidAmount) || paidAmount < 0) throw new BadRequestException('paidAmount 非法');
+
+        const order = await this.prisma.order.findUnique({
+            where: { id: orderId },
+            include: { project: true },
+        });
+        if (!order) throw new NotFoundException('订单不存在');
+
+        // ✅ 判定是否小时单：优先项目快照，其次 project 字段
+        const snapshot: any = order.projectSnapshot || {};
+        const billingMode = snapshot.billingMode || (order.project as any)?.billingMode;
+
+        if (billingMode !== 'HOURLY') {
+            throw new ForbiddenException('仅小时单允许修改实付金额');
+        }
+
+        // ✅ 金额不可随意改：v0.1.2 只允许“增补”，不允许减少（如需减少，后续走退款/售后流程）
+        if (paidAmount < order.paidAmount) {
+            throw new ForbiddenException('实付金额仅允许增加（超时补收），不允许减少');
+        }
+
+        const old = order.paidAmount;
+        const updated = await this.prisma.order.update({
+            where: { id: orderId },
+            data: { paidAmount },
+        });
+
+        if (operatorId) {
+            await this.prisma.userLog.create({
+                data: {
+                    userId: operatorId,
+                    action: 'UPDATE_PAID_AMOUNT',
+                    targetType: 'ORDER',
+                    targetId: orderId,
+                    oldData: { paidAmount: old } as any,
+                    newData: { paidAmount } as any,
+                    remark: remark || `小时单补收：${old} → ${paidAmount}`,
+                },
+            });
+        }
+
+        return updated;
+    }
+
+    async updateDispatchParticipants(dispatchId: number, playerIds: number[], operatorId: number, remark?: string) {
+        if (!dispatchId) throw new BadRequestException('dispatchId 必填');
+        if (!Array.isArray(playerIds) || playerIds.length < 1 || playerIds.length > 2) {
+            throw new BadRequestException('playerIds 必须为 1~2 个');
+        }
+
+        const dispatch = await this.prisma.orderDispatch.findUnique({
+            where: { id: dispatchId },
+            include: {
+                order: true,
+                participants: true,
+            },
+        });
+        if (!dispatch) throw new NotFoundException('派单批次不存在');
+
+        // ✅ 只允许待接单阶段修改参与者
+        const allow = new Set(['WAIT_ACCEPT', 'WAIT_ASSIGN']);
+        if (!allow.has(String(dispatch.status))) {
+            throw new ForbiddenException('当前派单状态不可修改参与者');
+        }
+
+        // ✅ 若已有任一参与者 acceptedAt 非空，则不允许修改
+        if (dispatch.participants.some((p) => !!p.acceptedAt)) {
+            throw new ForbiddenException('已有打手接单，不能修改参与者（请存单后重新派单）');
+        }
+
+        // 旧记录全部置无效
+        await this.prisma.orderParticipant.updateMany({
+            where: { dispatchId },
+            data: { isActive: false },
+        });
+
+        // 创建新参与者（isActive=true）
+        await this.prisma.orderParticipant.createMany({
+            data: playerIds.map((userId) => ({
+                dispatchId,
+                userId,
+                isActive: true,
+            })),
+        });
+
+        // 写日志
+        if (operatorId) {
+            await this.prisma.userLog.create({
+                data: {
+                    userId: operatorId,
+                    action: 'UPDATE_DISPATCH_PARTICIPANTS',
+                    targetType: 'ORDER_DISPATCH',
+                    targetId: dispatchId,
+                    oldData: { playerIds: dispatch.participants.map((p) => p.userId) } as any,
+                    newData: { playerIds } as any,
+                    remark: remark || '更新派单参与者',
+                },
+            });
+        }
+
+        // 返回订单详情用于刷新
+        return this.getOrderDetail(dispatch.orderId);
+    }
+
 }

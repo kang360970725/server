@@ -127,9 +127,21 @@ model User {
     /// 作为财务创建的批次结算记录
     createdBatches    SettlementBatch[] @relation("BatchCreator")
 
+    /// 陪玩接单状态（仅对 userType=STAFF/PLAYER 生效，v0.1.1 先不强约束）
+      workStatus  PlayerWorkStatus @default(IDLE)
+
+      // 索引：用于客服派单快速筛选空闲打手
+      @@index([workStatus])
+
   @@index([rating], map: "users_rating_fkey")
   @@index([roleId], map: "users_roleId_fkey")
   @@map("users")
+}
+
+enum PlayerWorkStatus {
+  IDLE        /// 空闲（可派单）
+  WORKING     /// 接单中（不可派单）
+  RESTING     /// 休息（不可派单）
 }
 
 model StaffRating {

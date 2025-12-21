@@ -6,19 +6,23 @@ import {UsersModule} from './users/users.module';
 import {OrdersModule} from './orders/orders.module';
 import {AuthModule} from './auth/auth.module';
 import {StaffRatingsModule} from './staff-ratings/staff-ratings.module';
+import { SettlementsModule } from './settlements/settlements.module';
 import {PermissionModule} from './permission/permission.module';
 import {RoleModule} from './role/role.module';
 import {GameProjectModule} from './game-project/game-project.module';
+import { MetaModule } from './meta/meta.module';
 
 @Module({
     imports: [
         UsersModule,
         OrdersModule,
+        SettlementsModule,
         AuthModule,
         StaffRatingsModule,
         PermissionModule,
         RoleModule,
-        GameProjectModule
+        GameProjectModule,
+        MetaModule
     ],
     controllers: [AppController],
     providers: [AppService, PrismaService],

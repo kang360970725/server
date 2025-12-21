@@ -4,7 +4,7 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { ChangeLevelDto } from './dto/change-level.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
-import { UserType } from '@prisma/client';
+import { UserType, PlayerWorkStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 
 @Injectable()
@@ -449,6 +449,38 @@ export class UsersService {
         newData,
         remark,
       },
+    });
+  }
+
+  //打手修改状态
+  async updateMyWorkStatus(userId: number, workStatus: any) {
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: { workStatus },
+      select: { id: true, name: true, phone: true, workStatus: true },
+    });
+  }
+
+//  获取空闲的打手
+  async getPlayerOptions(params: { keyword?: string; onlyIdle?: boolean }) {
+    const { keyword, onlyIdle = true } = params || {};
+    const where: any = {
+      userType: UserType.STAFF, // 你当前打手归 STAFF，后续你若拆 PLAYER 再改
+    };
+    if (onlyIdle) where.workStatus = PlayerWorkStatus.IDLE;
+
+    if (keyword) {
+      where.OR = [
+        { name: { contains: keyword } },
+        { phone: { contains: keyword } },
+      ];
+    }
+
+    return this.prisma.user.findMany({
+      where,
+      select: { id: true, name: true, phone: true, workStatus: true },
+      orderBy: [{ workStatus: 'asc' }, { id: 'desc' }],
+      take: 50,
     });
   }
 }
