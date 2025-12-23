@@ -198,30 +198,6 @@ export class OrdersService {
         };
     }
 
-    // async getOrderDetail(orderId: number) {
-    //     const order = await this.prisma.order.findUnique({
-    //         where: { id: orderId },
-    //         include: {
-    //             project: true,
-    //             dispatcher: { select: { id: true, name: true, phone: true } },
-    //             dispatches: {
-    //                 orderBy: { round: 'asc' },
-    //                 include: {
-    //                     participants: { include: { user: { select: { id: true, name: true, phone: true } } } },
-    //                     settlements: true,
-    //                 },
-    //             },
-    //             settlements: {
-    //                 orderBy: { settledAt: 'desc' },
-    //                 include: { user: { select: { id: true, name: true, phone: true } } },
-    //             },
-    //         },
-    //     });
-    //
-    //     if (!order) throw new NotFoundException('订单不存在');
-    //     return order;
-    // }
-
     async getOrderDetail(id: number) {
         const order = await this.prisma.order.findUnique({
             where: { id },
@@ -242,7 +218,7 @@ export class OrdersService {
                     },
                 },
 
-                // ✅ 历史批次（可选：如果你详情页也要展示历史）
+                // ✅ 历史批次（详情页展示派单历史 & 接单明细）
                 dispatches: {
                     orderBy: { round: 'desc' },
                     include: {
@@ -271,7 +247,6 @@ export class OrdersService {
 
         return order;
     }
-
 
     // -----------------------------
     // 3) 派单/更新参与者
@@ -396,7 +371,12 @@ export class OrdersService {
     // 4) 接单
     // -----------------------------
 
-    async acceptDispatch(dispatchId: number, userId: number, dto: AcceptDispatchDto, payload?: string | { remark?: string }) {
+    async acceptDispatch(
+        dispatchId: number,
+        userId: number,
+        dto: AcceptDispatchDto,
+        payload?: string | { remark?: string },
+    ) {
         const dispatch = await this.prisma.orderDispatch.findUnique({
             where: { id: dispatchId },
             include: {
@@ -451,10 +431,7 @@ export class OrdersService {
             });
         }
 
-        const remark =
-            typeof payload === 'string'
-                ? payload
-                : payload?.remark;
+        const remark = typeof payload === 'string' ? payload : payload?.remark;
 
         await this.logOrderAction(userId, refreshed.orderId, 'ACCEPT_DISPATCH', {
             dispatchId,
@@ -479,6 +456,15 @@ export class OrdersService {
     // -----------------------------
 
     async archiveDispatch(dispatchId: number, operatorId: number, dto: ArchiveDispatchDto) {
+        // ✅ A：并发抢占（原子条件判断）
+        // 只有 status=ACCEPTED 的批次允许进入存单；若并发已被处理，count=0 直接拒绝
+        const locked = await this.prisma.orderDispatch.updateMany({
+            where: { id: dispatchId, status: DispatchStatus.ACCEPTED },
+            data: { status: DispatchStatus.ACCEPTED }, // 不改变，只用于原子判断
+        });
+        if (locked.count === 0) {
+            throw new ForbiddenException('该派单批次已被处理或状态已变化，请刷新后重试');
+        }
         const dispatch = await this.prisma.orderDispatch.findUnique({
             where: { id: dispatchId },
             include: {
@@ -509,7 +495,13 @@ export class OrdersService {
             },
         });
 
-        // 4) 更新订单状态为 ARCHIVED（允许再次派单）
+        // ✅ 3.1 本轮参与者结束：全部置为 isActive=false（存单后允许再派，但本轮参与者成为历史）
+        await this.prisma.orderParticipant.updateMany({
+            where: { dispatchId },
+            data: { isActive: false },
+        });
+
+        // 4) 更新订单状态为 ARCHIVED（允许再次派单；但不回到未派单，不清空 currentDispatchId）
         await this.prisma.order.update({
             where: { id: dispatch.orderId },
             data: { status: OrderStatus.ARCHIVED },
@@ -521,8 +513,9 @@ export class OrdersService {
             dispatchId,
             mode: 'ARCHIVE',
         });
+
         // 6) 对应打手改变状态，可再次接单
-        const userIds = dispatch.participants.map(p => p.userId);
+        const userIds = dispatch.participants.map((p) => p.userId);
         await this.prisma.user.updateMany({
             where: { id: { in: userIds } },
             data: { workStatus: 'IDLE' as any },
@@ -541,6 +534,15 @@ export class OrdersService {
     // -----------------------------
 
     async completeDispatch(dispatchId: number, operatorId: number, dto: CompleteDispatchDto) {
+        // ✅ A：并发抢占（原子条件判断）
+        const locked = await this.prisma.orderDispatch.updateMany({
+            where: { id: dispatchId, status: DispatchStatus.ACCEPTED },
+            data: { status: DispatchStatus.ACCEPTED },
+        });
+        if (locked.count === 0) {
+            throw new ForbiddenException('该派单批次已被处理或状态已变化，请刷新后重试');
+        }
+
         const dispatch = await this.prisma.orderDispatch.findUnique({
             where: { id: dispatchId },
             include: {
@@ -553,6 +555,50 @@ export class OrdersService {
         this.ensureDispatchStatus(dispatch, [DispatchStatus.ACCEPTED], '只有已接单的订单才允许结单');
 
         const now = new Date();
+
+        // ✅ 保底单结单兜底：若未传 progresses，则默认用“剩余保底”作为本轮进度，均分写入 participants
+        const billingMode = dispatch.order.project.billingMode;
+
+        if (billingMode === BillingMode.GUARANTEED) {
+            const hasProgresses = Array.isArray((dto as any)?.progresses) && (dto as any).progresses.length > 0;
+
+            if (!hasProgresses) {
+                const base = Number(dispatch.order.baseAmountWan ?? 0);
+
+                if (Number.isFinite(base) && base > 0) {
+                    // 已存单累计进度（仅 ARCHIVED 轮次）
+                    const archived = await this.prisma.orderDispatch.findMany({
+                        where: { orderId: dispatch.orderId, status: DispatchStatus.ARCHIVED },
+                        select: { id: true },
+                    });
+
+                    let archivedProgress = 0;
+                    for (const d of archived) {
+                        archivedProgress += await this.sumDispatchProgressWan(d.id);
+                    }
+                    archivedProgress = this.capProgress(archivedProgress, base);
+
+                    const remaining = Math.max(0, base - archivedProgress);
+
+                    const parts = dispatch.participants || [];
+                    const each = parts.length > 0 ? remaining / parts.length : remaining;
+
+                    // 直接写入本轮 participants.progressBaseWan（允许 0）
+                    for (const p of parts) {
+                        await this.prisma.orderParticipant.update({
+                            where: { id: p.id },
+                            data: { progressBaseWan: each },
+                        });
+                    }
+
+                    // 同时把 dto.progresses 补上，保证后续日志/结算计算一致
+                    (dto as any).progresses = parts.map((p) => ({
+                        userId: p.userId,
+                        progressBaseWan: each,
+                    }));
+                }
+            }
+        }
 
         // 1) 写入 progress（可选）
         await this.applyProgressAndDeduct(dispatch, dto);
@@ -570,6 +616,12 @@ export class OrdersService {
             },
         });
 
+        // ✅ 3.1 本轮参与者结束：全部置为 isActive=false（结单后本轮参与者成为历史）
+        await this.prisma.orderParticipant.updateMany({
+            where: { dispatchId },
+            data: { isActive: false },
+        });
+
         // 4) 更新订单状态为 COMPLETED
         await this.prisma.order.update({
             where: { id: dispatch.orderId },
@@ -584,7 +636,7 @@ export class OrdersService {
         });
 
         // 6) 对应打手改变状态，可再次接单
-        const userIds = dispatch.participants.map(p => p.userId);
+        const userIds = dispatch.participants.map((p) => p.userId);
         await this.prisma.user.updateMany({
             where: { id: { in: userIds } },
             data: { workStatus: 'IDLE' as any },
@@ -639,11 +691,7 @@ export class OrdersService {
      * - 计时：acceptedAllAt -> archivedAt / completedAt（以 action 来决定终点）
      * - 扣时：deductMinutesValue（10/20/.../60）
      */
-    private async computeAndPersistBillingHours(
-        dispatchId: number,
-        action: 'ARCHIVE' | 'COMPLETE',
-        deductMinutesOption?: string,
-    ) {
+    private async computeAndPersistBillingHours(dispatchId: number, action: 'ARCHIVE' | 'COMPLETE', deductMinutesOption?: string) {
         const dispatch = await this.prisma.orderDispatch.findUnique({
             where: { id: dispatchId },
             include: { order: { include: { project: true } } },
@@ -660,10 +708,7 @@ export class OrdersService {
             throw new BadRequestException('小时单缺少全员接单时间，无法计算时长');
         }
 
-        const endTime =
-            action === 'ARCHIVE'
-                ? new Date() // 存单时刻
-                : new Date(); // 结单时刻
+        const endTime = action === 'ARCHIVE' ? new Date() : new Date();
 
         const deductValue = this.mapDeductMinutesValue(deductMinutesOption);
 
@@ -695,13 +740,20 @@ export class OrdersService {
      */
     private mapDeductMinutesValue(option?: string): number {
         switch (option) {
-            case 'M10': return 10;
-            case 'M20': return 20;
-            case 'M30': return 30;
-            case 'M40': return 40;
-            case 'M50': return 50;
-            case 'M60': return 60;
-            default: return 0;
+            case 'M10':
+                return 10;
+            case 'M20':
+                return 20;
+            case 'M30':
+                return 30;
+            case 'M40':
+                return 40;
+            case 'M50':
+                return 50;
+            case 'M60':
+                return 60;
+            default:
+                return 0;
         }
     }
 
@@ -729,23 +781,6 @@ export class OrdersService {
     // 7) 生成结算明细（核心）
     // -----------------------------
 
-    /**
-     * 结算策略（v0.1）：
-     * 1) 订单级费用拆分：
-     *    playerPool = paidAmount - clubEarnings - csEarnings - inviteEarnings
-     *
-     * 2) 分配规则：
-     *    - v0.1 默认均分（你已确认）
-     *    - 存单（ARCHIVE）：
-     *        保底单：按 progress/base 比例结算这一轮
-     *        小时单：按本轮 billableHours / billableHoursFull?（v0.1 没“总小时”，所以存单用“本轮小时”直接视为本轮产出）
-     *    - 结单（COMPLETE）：
-     *        小时单：默认结算剩余全部（等价全量）
-     *        保底单：默认结算“剩余比例”（1 - 已存单累计比例），避免重复结算
-     *
-     * 3) 多轮派单：
-     *    存单允许多轮，每轮都会生成一批 settlement
-     */
     private async createSettlementsForDispatch(params: { orderId: number; dispatchId: number; mode: 'ARCHIVE' | 'COMPLETE' }) {
         const { orderId, dispatchId, mode } = params;
 
@@ -781,14 +816,13 @@ export class OrdersService {
 
         const clubEarnings = clubRate ? order.paidAmount * clubRate : 0;
         const csEarningsTotal = csRate ? order.paidAmount * csRate : 0;
-        const inviteEarningsTotal = (order.inviter && inviteRate) ? order.paidAmount * inviteRate : 0;
+        const inviteEarningsTotal = order.inviter && inviteRate ? order.paidAmount * inviteRate : 0;
 
         const playerPool = order.paidAmount - clubEarnings - csEarningsTotal - inviteEarningsTotal;
 
         // 结算类型：体验/福袋 = EXPERIENCE，否则 REGULAR（用于批次结算页面）
-        const settlementType = (order.project.type === 'EXPERIENCE' || order.project.type === 'LUCKY_BAG')
-            ? 'EXPERIENCE'
-            : 'REGULAR';
+        const settlementType =
+            order.project.type === 'EXPERIENCE' || order.project.type === 'LUCKY_BAG' ? 'EXPERIENCE' : 'REGULAR';
 
         // 计算本轮应该结算的比例 ratio
         const ratio = await this.computeDispatchRatio(order, dispatch, mode);
@@ -851,24 +885,9 @@ export class OrdersService {
         return true;
     }
 
-    /**
-     * 计算本轮应结算比例 ratio（0~1 或允许负数）
-     *
-     * 保底单（GUARANTEED）：
-     * - ARCHIVE：ratio = (本轮 progressBaseWan 之和) / baseAmountWan
-     * - COMPLETE：ratio = 1 - 已存单累计ratio（避免重复结算）
-     *
-     * 小时单（HOURLY）：
-     * - v0.1：没有总小时概念（你要求不手填）
-     * - ARCHIVE：ratio 直接按 “本轮 billableHours / (本轮 billableHours)” => 1（即存单视为本轮结算全量）
-     *          （你后续若需要按“整单总时长”拆分，我们在 v0.2 增加 Order 上的 plannedHours 或从商城订单推导）
-     * - COMPLETE：若之前已存单结算过，则结算剩余 0；否则 1
-     */
     private async computeDispatchRatio(order: any, dispatch: any, mode: 'ARCHIVE' | 'COMPLETE'): Promise<number> {
         const billingMode = order.project.billingMode as BillingMode;
 
-        // 已结算累计（只统计本订单历史 settlements 的 calculatedEarnings / playerPool 很难直接反推 ratio）
-        // v0.1：用“已存单累计progress/base”作为累计依据（保底单）
         if (billingMode === BillingMode.GUARANTEED) {
             const base = order.baseAmountWan ?? null;
             if (!base || base <= 0) {
@@ -878,7 +897,6 @@ export class OrdersService {
 
             if (mode === 'ARCHIVE') {
                 const progress = await this.sumDispatchProgressWan(dispatch.id);
-                // 允许负数（炸单），但进度绝对值不应超过 base（前端应提示，后端也做保护）
                 const capped = this.capProgress(progress, base);
                 return capped / base;
             }
@@ -897,30 +915,23 @@ export class OrdersService {
 
             const archivedRatio = archivedProgress / base;
 
-            // 剩余 = 1 - 已存单累计（允许为 0）
             const remaining = Math.max(0, 1 - archivedRatio);
             return remaining;
         }
 
-        // 小时单
         if (billingMode === BillingMode.HOURLY) {
-            // 如果之前某轮已经存单结算（有 settlement），COMPLETE 只结剩余（可能为0）
             const hasAnySettlement = await this.prisma.orderSettlement.findFirst({
                 where: { orderId: order.id },
                 select: { id: true },
             });
 
             if (mode === 'ARCHIVE') {
-                // v0.1：存单即结算本轮全部（因为本轮小时已是本轮完成度）
                 return 1;
             }
 
-            // COMPLETE：
-            // 如果已经有过存单结算，默认本轮不再重复结算（0）；否则 1
             return hasAnySettlement ? 0 : 1;
         }
 
-        // 兜底：全量
         return 1;
     }
 
@@ -942,18 +953,12 @@ export class OrdersService {
     // 8) 批次结算查询 / 标记打款
     // -----------------------------
 
-    /**
-     * 批次结算查询（v0.1）
-     * - 返回：总收入（实收款统计）、俱乐部收入、应结款、陪玩收益明细列表
-     * - 明细字段：陪玩昵称/结算类型/总接单数/总收益
-     */
     async querySettlementBatch(query: QuerySettlementBatchDto) {
         const batchType = query.batchType ?? 'MONTHLY_REGULAR';
 
         const start = query.periodStart ? new Date(query.periodStart) : this.defaultPeriodStart(batchType);
         const end = query.periodEnd ? new Date(query.periodEnd) : this.defaultPeriodEnd(batchType, start);
 
-        // 1) 找窗口内的 settlements
         const settlements = await this.prisma.orderSettlement.findMany({
             where: {
                 settledAt: { gte: start, lt: end },
@@ -965,23 +970,22 @@ export class OrdersService {
             },
         });
 
-        // 2) 汇总统计
         const totalIncome = settlements.reduce((sum, s) => sum + (s.order?.paidAmount ?? 0), 0);
         const clubIncome = settlements.reduce((sum, s) => sum + (s.order?.clubEarnings ?? 0), 0);
         const payableToPlayers = settlements.reduce((sum, s) => sum + (s.finalEarnings ?? 0), 0);
 
-        // 3) 按陪玩聚合明细
         const map = new Map<number, any>();
         for (const s of settlements) {
             const uid = s.userId;
-            const cur = map.get(uid) ?? {
-                userId: uid,
-                name: s.user?.name ?? '',
-                phone: s.user?.phone ?? '',
-                settlementType: s.settlementType,
-                totalOrders: 0,
-                totalEarnings: 0,
-            };
+            const cur =
+                map.get(uid) ?? ({
+                    userId: uid,
+                    name: s.user?.name ?? '',
+                    phone: s.user?.phone ?? '',
+                    settlementType: s.settlementType,
+                    totalOrders: 0,
+                    totalEarnings: 0,
+                } as any);
             cur.totalOrders += 1;
             cur.totalEarnings += s.finalEarnings ?? 0;
             map.set(uid, cur);
@@ -1003,14 +1007,12 @@ export class OrdersService {
     private defaultPeriodStart(batchType: string): Date {
         const now = new Date();
         if (batchType === 'EXPERIENCE_3DAY') {
-            // v0.1：默认取最近 3 天窗口（自然日的严格切分可在 v0.2 做）
             const d = new Date(now);
             d.setDate(d.getDate() - 3);
             d.setHours(0, 0, 0, 0);
             return d;
         }
 
-        // MONTHLY_REGULAR：默认取上月 1 号
         const firstOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
         const firstOfLastMonth = new Date(firstOfThisMonth.getFullYear(), firstOfThisMonth.getMonth() - 1, 1);
         return firstOfLastMonth;
@@ -1022,14 +1024,9 @@ export class OrdersService {
             end.setDate(end.getDate() + 3);
             return end;
         }
-        // MONTHLY_REGULAR：start 为上月 1 号，则 end 为本月 1 号
         return new Date(start.getFullYear(), start.getMonth() + 1, 1);
     }
 
-    /**
-     * 批量标记打款（按 settlementIds）
-     * - 必须记录审计日志（你强要求）
-     */
     async markSettlementsPaid(dto: MarkPaidDto, operatorId: number) {
         const now = new Date();
 
@@ -1040,14 +1037,11 @@ export class OrdersService {
 
         if (settlements.length === 0) throw new NotFoundException('未找到结算记录');
 
-        // 只更新未打款的
         await this.prisma.orderSettlement.updateMany({
             where: { id: { in: dto.settlementIds }, paymentStatus: PaymentStatus.UNPAID },
             data: { paymentStatus: PaymentStatus.PAID, paidAt: now },
         });
 
-        // 审计：写入 user_logs
-        // 这里按订单聚合记录更清晰
         const grouped = new Map<number, any[]>();
         for (const s of settlements) {
             grouped.set(s.orderId, [...(grouped.get(s.orderId) ?? []), s]);
@@ -1055,7 +1049,7 @@ export class OrdersService {
 
         for (const [orderId, list] of grouped) {
             await this.logOrderAction(operatorId, orderId, 'MARK_PAID', {
-                settlements: list.map(x => ({ id: x.id, userId: x.userId, amount: x.finalEarnings })),
+                settlements: list.map((x) => ({ id: x.id, userId: x.userId, amount: x.finalEarnings })),
                 remark: dto.remark ?? null,
             });
         }
@@ -1121,17 +1115,6 @@ export class OrdersService {
     // 10) 审计日志（UserLog）
     // -----------------------------
 
-    /**
-     * 统一写操作日志
-     * - 你明确要求必须记录：
-     *   1) 评级调整（users 模块已有）
-     *   2) 结算分润、打款
-     *   3) 单个订单对单个陪玩收益的手动修改（v0.2 会实现 adjust API）
-     *
-     * 我这里把订单侧关键动作都写入：
-     * - CREATE_ORDER / CREATE_DISPATCH / ASSIGN_DISPATCH / ACCEPT_DISPATCH / ARCHIVE_DISPATCH / COMPLETE_DISPATCH
-     * - SETTLE_ARCHIVE / SETTLE_COMPLETE / MARK_PAID
-     */
     private async logOrderAction(operatorId: number, orderId: number, action: string, newData: any) {
         await this.prisma.userLog.create({
             data: {
@@ -1146,9 +1129,6 @@ export class OrdersService {
         });
     }
 
-
-
-
     //取消订单
     async cancelOrder(orderId: number, operatorId: number, remark?: string) {
         if (!orderId) throw new BadRequestException('orderId 必填');
@@ -1160,7 +1140,6 @@ export class OrdersService {
 
         if (!order) throw new NotFoundException('订单不存在');
 
-        // v0.1 先做一个保守限制：已结单/已退款不可取消（你后续再按状态机细化）
         const forbidden = new Set(['COMPLETED', 'REFUNDED']);
         if (forbidden.has(String(order.status))) {
             throw new ForbiddenException('当前订单状态不可取消');
@@ -1169,11 +1148,10 @@ export class OrdersService {
         const updated = await this.prisma.order.update({
             where: { id: orderId },
             data: {
-                status: 'CANCELLED' as any, // 你若 enum 没有 CANCELLED，后续我们再统一状态机枚举
+                status: 'CANCELLED' as any,
             },
         });
 
-        // 记录操作日志（你已有 UserLog）
         if (operatorId) {
             await this.prisma.userLog.create({
                 data: {
@@ -1191,8 +1169,8 @@ export class OrdersService {
         return updated;
     }
 
-
     // ✅ 派单 / 重新派单（创建新的派单批次）
+    // ✅ ARCHIVED 状态也允许再次派单；派单后状态流转与新建订单一致（WAIT_ACCEPT）
     async assignDispatch(orderId: number, playerIds: number[], operatorId: number, remark?: string) {
         if (!orderId) throw new BadRequestException('orderId 必填');
         if (!Array.isArray(playerIds)) throw new BadRequestException('playerIds 必须为数组');
@@ -1205,7 +1183,8 @@ export class OrdersService {
 
         if (!order) throw new NotFoundException('订单不存在');
 
-        // ✅ v0.1：只允许 WAIT_ASSIGN 或 已存单的订单再次派单（符合你之前规则）
+        // ✅ v0.1：允许 WAIT_ASSIGN / ARCHIVED 派单
+        // - ARCHIVED：存单后仍保持存单态，但允许创建新 dispatch（round+1），并把 currentDispatch 指向新批次
         const allowOrderStatus = new Set(['WAIT_ASSIGN', 'ARCHIVED']);
         if (!allowOrderStatus.has(String(order.status))) {
             throw new ForbiddenException('当前订单状态不可派单');
@@ -1219,7 +1198,7 @@ export class OrdersService {
             data: {
                 orderId,
                 round: nextRound,
-                status: 'WAIT_ACCEPT' as any, // 本轮进入待接单
+                status: 'WAIT_ACCEPT' as any,
                 assignedAt: new Date(),
                 remark: remark || null,
             },
@@ -1234,7 +1213,7 @@ export class OrdersService {
             })),
         });
 
-        // 更新订单状态 + currentDispatch 指针
+        // 更新订单状态 + currentDispatch 指针（状态流转与新建订单一致）
         await this.prisma.order.update({
             where: { id: orderId },
             data: {
@@ -1258,11 +1237,8 @@ export class OrdersService {
             });
         }
 
-        // 返回订单详情（你 service 里应该已有 getOrderDetail/findOne 类似方法）
-        // 如果你叫 findOne，就改成 return this.findOne(orderId)
         return this.getOrderDetail(orderId);
     }
-
 
     // ✅ 我的接单记录（陪玩端/员工端查看自己参与的派单批次）
     async listMyDispatches(params: { userId: number; page: number; limit: number; status?: string }) {
@@ -1314,7 +1290,6 @@ export class OrdersService {
         });
         if (!order) throw new NotFoundException('订单不存在');
 
-        // ✅ 判定是否小时单：优先项目快照，其次 project 字段
         const snapshot: any = order.projectSnapshot || {};
         const billingMode = snapshot.billingMode || (order.project as any)?.billingMode;
 
@@ -1322,7 +1297,6 @@ export class OrdersService {
             throw new ForbiddenException('仅小时单允许修改实付金额');
         }
 
-        // ✅ 金额不可随意改：v0.1.2 只允许“增补”，不允许减少（如需减少，后续走退款/售后流程）
         if (paidAmount < order.paidAmount) {
             throw new ForbiddenException('实付金额仅允许增加（超时补收），不允许减少');
         }
@@ -1406,8 +1380,6 @@ export class OrdersService {
             });
         }
 
-        // 返回订单详情用于刷新
         return this.getOrderDetail(dispatch.orderId);
     }
-
 }
