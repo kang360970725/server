@@ -781,6 +781,122 @@ export class OrdersService {
     // 7) 生成结算明细（核心）
     // -----------------------------
 
+    // private async createSettlementsForDispatch(params: { orderId: number; dispatchId: number; mode: 'ARCHIVE' | 'COMPLETE' }) {
+    //     const { orderId, dispatchId, mode } = params;
+    //
+    //     const order = await this.prisma.order.findUnique({
+    //         where: { id: orderId },
+    //         include: {
+    //             project: true,
+    //             dispatches: {
+    //                 include: {
+    //                     participants: true,
+    //                 },
+    //             },
+    //         },
+    //     });
+    //     if (!order) throw new NotFoundException('订单不存在');
+    //
+    //     const dispatch = await this.prisma.orderDispatch.findUnique({
+    //         where: { id: dispatchId },
+    //         include: {
+    //             participants: true,
+    //         },
+    //     });
+    //     if (!dispatch) throw new NotFoundException('派单批次不存在');
+    //
+    //     // 参与者（v0.1：默认 1~2 人）
+    //     const participants = dispatch.participants;
+    //     if (!participants || participants.length === 0) throw new BadRequestException('派单批次没有参与者，无法结算');
+    //
+    //     // 订单级分摊：俱乐部/客服/推广
+    //     const clubRate = order.customClubRate ?? order.clubRate ?? null; // clubRate 已在创建时落库
+    //     const csRate = order.csRate ?? 0;
+    //     const inviteRate = order.inviteRate ?? 0;
+    //
+    //     const clubEarnings = clubRate ? order.paidAmount * clubRate : 0;
+    //     const csEarningsTotal = csRate ? order.paidAmount * csRate : 0;
+    //     const inviteEarningsTotal = order.inviter && inviteRate ? order.paidAmount * inviteRate : 0;
+    //
+    //     const playerPool = order.paidAmount - clubEarnings - csEarningsTotal - inviteEarningsTotal;
+    //
+    //     // 结算类型：体验/福袋 = EXPERIENCE，否则 REGULAR（用于批次结算页面）
+    //     const settlementType =
+    //         order.project.type === 'EXPERIENCE' || order.project.type === 'LUCKY_BAG' ? 'EXPERIENCE' : 'REGULAR';
+    //
+    //     // 计算本轮应该结算的比例 ratio
+    //     const ratio = await this.computeDispatchRatio(order, dispatch, mode);
+    //
+    //     // 本轮陪玩总收益
+    //     const dispatchPlayerTotal = playerPool * ratio;
+    //
+    //     // v0.1：均分
+    //     const each = participants.length > 0 ? dispatchPlayerTotal / participants.length : 0;
+    //
+    //     // 写入 settlement（一人一条）
+    //     // 为避免重复生成：如果这个 dispatch 已经有 settlement，就直接拒绝（幂等保护）
+    //     const existing = await this.prisma.orderSettlement.findFirst({
+    //         where: { orderId, dispatchId },
+    //         select: { id: true },
+    //     });
+    //     if (existing) {
+    //         throw new BadRequestException('该派单批次已生成结算记录，禁止重复结算');
+    //     }
+    //
+    //     await this.prisma.$transaction(async (tx) => {
+    //         for (const p of participants) {
+    //             await tx.orderSettlement.create({
+    //                 data: {
+    //                     orderId,
+    //                     dispatchId,
+    //                     userId: p.userId,
+    //                     settlementType,
+    //                     calculatedEarnings: each,
+    //                     manualAdjustment: 0,
+    //                     finalEarnings: each,
+    //                     clubEarnings: clubEarnings ? clubEarnings * ratio : null,
+    //                     csEarnings: csEarningsTotal ? csEarningsTotal * ratio : null,
+    //                     inviteEarnings: inviteEarningsTotal ? inviteEarningsTotal * ratio : null,
+    //                     paymentStatus: PaymentStatus.UNPAID,
+    //                 },
+    //             });
+    //         }
+    //
+    //         // 同时把 order 上的汇总字段落一下（便于对账）
+    //         await tx.order.update({
+    //             where: { id: orderId },
+    //             data: {
+    //                 clubEarnings,
+    //                 clubRate: clubRate ?? null,
+    //                 totalPlayerEarnings: playerPool,
+    //             },
+    //         });
+    //     });
+    //
+    //     // 审计日志（必须记录）
+    //     await this.logOrderAction(order.dispatcherId, orderId, mode === 'ARCHIVE' ? 'SETTLE_ARCHIVE' : 'SETTLE_COMPLETE', {
+    //         dispatchId,
+    //         ratio,
+    //         playerPool,
+    //         dispatchPlayerTotal,
+    //         each,
+    //     });
+    //
+    //     return true;
+    // }
+
+    /**
+     * 生成结算明细（核心）
+     *
+     * 结算口径（按你最新规则）：
+     * - 单次派单 + 本次为结单：直接按订单实付金额 paidAmount 结算全量
+     * - 多次派单：使用 computeDispatchRatio（保底进度/结单结剩余等）计算本轮 ratio
+     * - 分配方式：优先按 participant.contributionAmount 权重；否则均分
+     * - 到手收益 multiplier 优先级：
+     *   1) 订单固定抽成（平台抽成）：each * (1 - 抽成)
+     *   2) 项目固定抽成（平台抽成）：each * (1 - 抽成)
+     *   3) 陪玩分红比例（到手比例）：each * 分红
+     */
     private async createSettlementsForDispatch(params: { orderId: number; dispatchId: number; mode: 'ARCHIVE' | 'COMPLETE' }) {
         const { orderId, dispatchId, mode } = params;
 
@@ -788,11 +904,6 @@ export class OrdersService {
             where: { id: orderId },
             include: {
                 project: true,
-                dispatches: {
-                    include: {
-                        participants: true,
-                    },
-                },
             },
         });
         if (!order) throw new NotFoundException('订单不存在');
@@ -805,85 +916,153 @@ export class OrdersService {
         });
         if (!dispatch) throw new NotFoundException('派单批次不存在');
 
-        // 参与者（v0.1：默认 1~2 人）
-        const participants = dispatch.participants;
-        if (!participants || participants.length === 0) throw new BadRequestException('派单批次没有参与者，无法结算');
+        const participants = dispatch.participants || [];
+        if (participants.length === 0) throw new BadRequestException('派单批次没有参与者，无法结算');
 
-        // 订单级分摊：俱乐部/客服/推广
-        const clubRate = order.customClubRate ?? order.clubRate ?? null; // clubRate 已在创建时落库
-        const csRate = order.csRate ?? 0;
-        const inviteRate = order.inviteRate ?? 0;
-
-        const clubEarnings = clubRate ? order.paidAmount * clubRate : 0;
-        const csEarningsTotal = csRate ? order.paidAmount * csRate : 0;
-        const inviteEarningsTotal = order.inviter && inviteRate ? order.paidAmount * inviteRate : 0;
-
-        const playerPool = order.paidAmount - clubEarnings - csEarningsTotal - inviteEarningsTotal;
-
-        // 结算类型：体验/福袋 = EXPERIENCE，否则 REGULAR（用于批次结算页面）
-        const settlementType =
-            order.project.type === 'EXPERIENCE' || order.project.type === 'LUCKY_BAG' ? 'EXPERIENCE' : 'REGULAR';
-
-        // 计算本轮应该结算的比例 ratio
-        const ratio = await this.computeDispatchRatio(order, dispatch, mode);
-
-        // 本轮陪玩总收益
-        const dispatchPlayerTotal = playerPool * ratio;
-
-        // v0.1：均分
-        const each = participants.length > 0 ? dispatchPlayerTotal / participants.length : 0;
-
-        // 写入 settlement（一人一条）
-        // 为避免重复生成：如果这个 dispatch 已经有 settlement，就直接拒绝（幂等保护）
+        // 幂等保护：同一 dispatch 只能生成一次 settlement
         const existing = await this.prisma.orderSettlement.findFirst({
             where: { orderId, dispatchId },
             select: { id: true },
         });
-        if (existing) {
-            throw new BadRequestException('该派单批次已生成结算记录，禁止重复结算');
+        if (existing) throw new BadRequestException('该派单批次已生成结算记录，禁止重复结算');
+
+        // 结算类型：体验/福袋 = EXPERIENCE，否则 REGULAR
+        const settlementType = (order.project.type === 'EXPERIENCE' || order.project.type === 'LUCKY_BAG')
+            ? 'EXPERIENCE'
+            : 'REGULAR';
+
+        // ---------- 1) 计算 ratio ----------
+        const dispatchCount = await this.prisma.orderDispatch.count({ where: { orderId } });
+
+        let ratio: number;
+        if (dispatchCount === 1 && mode === 'COMPLETE') {
+            // ✅ 规则 1：单次派单 + 本次结单 = 全量结算
+            ratio = 1;
+        } else {
+            // ✅ 规则 2：多次派单仍用你现有 ratio 逻辑（保底进度/结剩余等）
+            ratio = await this.computeDispatchRatio(order, dispatch, mode);
         }
 
+        // ---------- 2) 计算本轮“可分配金额” ----------
+        // ✅ 按你要求：直接基于订单实付金额 paidAmount（不再额外扣 cs/invite 等）
+        const totalForThisDispatch = (order.paidAmount ?? 0) * ratio;
+
+        // ---------- 3) 本轮内按贡献/均分拆给每个参与者 ----------
+        const weights = participants.map((p) => {
+            const w = Number(p.contributionAmount ?? 0);
+            return Number.isFinite(w) && w > 0 ? w : 0;
+        });
+        const weightSum = weights.reduce((a, b) => a + b, 0);
+
+        const baseEachList = participants.map((_, idx) => {
+            if (weightSum > 0) return totalForThisDispatch * (weights[idx] / weightSum);
+            return totalForThisDispatch / participants.length;
+        });
+
+        // ---------- 4) 计算到手 multiplier（优先级：订单抽成 > 项目抽成 > 陪玩分红） ----------
+        const normalizeToRatio = (v: any, fallback: number) => {
+            const n = Number(v);
+            if (!Number.isFinite(n)) return fallback;
+            return n > 1 ? n / 100 : n; // 兼容 10 / 0.1 / 60 / 0.6
+        };
+
+        const orderCutRaw = order.customClubRate ?? null; // 订单固定抽成（平台抽成）
+        // 项目固定抽成优先取快照，避免项目后改影响历史
+        const snap: any = order.projectSnapshot || {};
+        const projectCutRaw = snap.clubRate ?? order.project?.clubRate ?? null;
+
+        // 陪玩分红比例来自 staffRating.rate（例如 60 表示 60%）
+        const userIds = participants.map((p) => p.userId);
+        const users = await this.prisma.user.findMany({
+            where: { id: { in: userIds } },
+            select: { id: true, staffRating: { select: { rate: true } } },
+        });
+        const shareMap = new Map<number, number>();
+        for (const u of users) {
+            shareMap.set(u.id, normalizeToRatio(u.staffRating?.rate, 1)); // 默认 100%
+        }
+
+        const hasOrderCut = orderCutRaw != null && !!orderCutRaw;
+
+        const hasProjectCut = !hasOrderCut && projectCutRaw != null && !!projectCutRaw;
+
+        const orderCut = hasOrderCut ? normalizeToRatio(orderCutRaw, 0) : 0;
+        const projectCut = hasProjectCut ? normalizeToRatio(projectCutRaw, 0) : 0;
+
         await this.prisma.$transaction(async (tx) => {
-            for (const p of participants) {
+            for (let i = 0; i < participants.length; i++) {
+                const p = participants[i];
+                const calculated = baseEachList[i];
+
+                // ✅ multiplier 按优先级
+                let multiplier = 1;
+
+                if (hasOrderCut) {
+                    multiplier = Math.max(0, 1 - orderCut);
+                } else if (hasProjectCut) {
+                    multiplier = Math.max(0, 1 - projectCut);
+                } else {
+                    multiplier = Math.max(0, shareMap.get(p.userId) ?? 1);
+                }
+
+                const final = Math.trunc(calculated * multiplier);
+
                 await tx.orderSettlement.create({
                     data: {
                         orderId,
                         dispatchId,
                         userId: p.userId,
                         settlementType,
-                        calculatedEarnings: each,
-                        manualAdjustment: 0,
-                        finalEarnings: each,
-                        clubEarnings: clubEarnings ? clubEarnings * ratio : null,
-                        csEarnings: csEarningsTotal ? csEarningsTotal * ratio : null,
-                        inviteEarnings: inviteEarningsTotal ? inviteEarningsTotal * ratio : null,
+
+                        // calculatedEarnings：本轮分到的“基础收益”（均分/按贡献后）
+                        calculatedEarnings: calculated,
+
+                        // manualAdjustment：用于奖惩/纠错（后面会手工改 final）
+                        manualAdjustment: final - calculated,
+
+                        // finalEarnings：本轮实际到手
+                        finalEarnings: final,
+
+                        // clubEarnings：这里记录“差额”（平台抽成/未分配部分），用于对账展示
+                        clubEarnings: calculated - final,
+
+                        // 这两项暂不再按新口径扣（不影响你后续财务流程）
+                        csEarnings: null,
+                        inviteEarnings: null,
+
                         paymentStatus: PaymentStatus.UNPAID,
                     },
                 });
             }
 
-            // 同时把 order 上的汇总字段落一下（便于对账）
+            // 汇总回写：用 settlements 聚合避免多轮不一致
+            const agg = await tx.orderSettlement.aggregate({
+                where: { orderId },
+                _sum: { finalEarnings: true, clubEarnings: true },
+            });
+
             await tx.order.update({
                 where: { id: orderId },
                 data: {
-                    clubEarnings,
-                    clubRate: clubRate ?? null,
-                    totalPlayerEarnings: playerPool,
+                    totalPlayerEarnings: Number(agg._sum.finalEarnings ?? 0),
+                    clubEarnings: Number(agg._sum.clubEarnings ?? 0),
                 },
             });
         });
 
-        // 审计日志（必须记录）
         await this.logOrderAction(order.dispatcherId, orderId, mode === 'ARCHIVE' ? 'SETTLE_ARCHIVE' : 'SETTLE_COMPLETE', {
             dispatchId,
             ratio,
-            playerPool,
-            dispatchPlayerTotal,
-            each,
+            dispatchCount,
+            totalForThisDispatch,
+            rule: dispatchCount === 1 && mode === 'COMPLETE' ? 'SINGLE_COMPLETE_FULL' : 'RATIO_BY_PROGRESS',
+            multiplierPriority: hasOrderCut ? 'ORDER_CUT' : hasProjectCut ? 'PROJECT_CUT' : 'PLAYER_SHARE',
         });
 
         return true;
     }
+
+
 
     private async computeDispatchRatio(order: any, dispatch: any, mode: 'ARCHIVE' | 'COMPLETE'): Promise<number> {
         const billingMode = order.project.billingMode as BillingMode;
@@ -1116,6 +1295,12 @@ export class OrdersService {
     // -----------------------------
 
     private async logOrderAction(operatorId: number, orderId: number, action: string, newData: any) {
+        const uid = Number(operatorId);
+        if (!uid) {
+            // 这里建议抛错，能尽快暴露“接口未鉴权/未注入用户”问题
+            throw new ForbiddenException('缺少操作人身份（operatorId），请重新登录后重试');
+            // 如果你不想影响业务主流程，也可以改成：return;
+        }
         await this.prisma.userLog.create({
             data: {
                 userId: operatorId,
@@ -1382,4 +1567,188 @@ export class OrdersService {
 
         return this.getOrderDetail(dispatch.orderId);
     }
+
+    async adjustSettlementFinalEarnings(dto: { settlementId: number; finalEarnings: number; remark?: string }, operatorId: number) {
+        const settlementId = Number(dto.settlementId);
+        const finalEarnings = Number(dto.finalEarnings);
+
+        if (!settlementId) throw new BadRequestException('settlementId 必填');
+        if (!Number.isFinite(finalEarnings)) throw new BadRequestException('finalEarnings 非法');
+
+        const s = await this.prisma.orderSettlement.findUnique({
+            where: { id: settlementId },
+            select: { id: true, orderId: true, calculatedEarnings: true, finalEarnings: true, manualAdjustment: true },
+        });
+        if (!s) throw new NotFoundException('结算记录不存在');
+
+        const manualAdjustment = finalEarnings - Number(s.calculatedEarnings ?? 0);
+
+        const updated = await this.prisma.orderSettlement.update({
+            where: { id: settlementId },
+            data: {
+                finalEarnings,
+                manualAdjustment,
+            },
+        });
+
+        // ✅ 记录日志（你要求关键动作必须记录）
+        await this.logOrderAction(operatorId, s.orderId, 'ADJUST_SETTLEMENT', {
+            settlementId,
+            oldFinalEarnings: s.finalEarnings,
+            newFinalEarnings: finalEarnings,
+            manualAdjustment,
+            remark: dto.remark ?? null,
+        });
+
+        return updated;
+    }
+
+    //退款功能
+    async refundOrder(orderId: number, operatorId: number, remark?: string) {
+        orderId = Number(orderId);
+        operatorId = Number(operatorId);
+        if (!orderId) throw new BadRequestException('orderId 必填');
+        if (!operatorId) throw new ForbiddenException('未登录或无权限操作');
+
+        const order = await this.prisma.order.findUnique({
+            where: { id: orderId },
+            include: {
+                dispatches: { select: { id: true, status: true } },
+                settlements: { select: { id: true, paymentStatus: true, calculatedEarnings: true, finalEarnings: true } },
+            },
+        });
+        if (!order) throw new NotFoundException('订单不存在');
+
+        // 已退款幂等
+        if (order.status === OrderStatus.REFUNDED) return this.getOrderDetail(orderId);
+
+        // 若已打款，不允许退款清零（避免财务对不上）
+        const hasPaid = order.settlements?.some((s) => s.paymentStatus === PaymentStatus.PAID);
+        if (hasPaid) throw new ForbiddenException('存在已打款结算记录，禁止退款（请先走财务冲正流程）');
+
+        const now = new Date();
+
+        await this.prisma.$transaction(async (tx) => {
+            // 1) 订单状态置 REFUNDED（你要“结单状态并标记退款”：这里用 REFUNDED 即“已结单且已退款”）
+            await tx.order.update({
+                where: { id: orderId },
+                data: { status: OrderStatus.REFUNDED },
+            });
+
+            // 2) 当前/历史 dispatch 如果不是终态，可选标记为 COMPLETED（防止继续流转）
+            //    这里按“退款即结束”处理：把非 COMPLETED 的 ACCEPTED/WAIT_ACCEPT/WAIT_ASSIGN/ARCHIVED 统一改为 COMPLETED
+            await tx.orderDispatch.updateMany({
+                where: {
+                    orderId,
+                    status: { in: [DispatchStatus.WAIT_ASSIGN, DispatchStatus.WAIT_ACCEPT, DispatchStatus.ACCEPTED, DispatchStatus.ARCHIVED] },
+                },
+                data: {
+                    status: DispatchStatus.COMPLETED,
+                    completedAt: now,
+                    remark: remark ? `REFUND:${remark}` : 'REFUND',
+                },
+            });
+
+            // 3) 若已经结单产生 settlements：清零陪玩收益（finalEarnings=0，manualAdjustment = -calculatedEarnings）
+            //    这样“清零”且保留 calculatedEarnings 便于追溯
+            if (order.settlements && order.settlements.length > 0) {
+                for (const s of order.settlements) {
+                    await tx.orderSettlement.update({
+                        where: { id: s.id },
+                        data: {
+                            finalEarnings: 0,
+                            manualAdjustment: 0 - Number(s.calculatedEarnings ?? 0),
+                            adjustedBy: operatorId,
+                            adjustedAt: now,
+                            adjustRemark: remark ? `REFUND_CLEAR:${remark}` : 'REFUND_CLEAR',
+                        },
+                    });
+                }
+
+                // 同步汇总
+                await tx.order.update({
+                    where: { id: orderId },
+                    data: {
+                        totalPlayerEarnings: 0,
+                    },
+                });
+            }
+        });
+
+        await this.logOrderAction(operatorId, orderId, 'REFUND_ORDER', {
+            remark: remark ?? null,
+            clearedSettlements: (order.settlements?.length ?? 0) > 0,
+            clearedCount: order.settlements?.length ?? 0,
+        });
+
+        return this.getOrderDetail(orderId);
+    }
+
+    //订单编辑
+    async updateOrderEditable(dto: any, operatorId: number) {
+        operatorId = Number(operatorId);
+        const orderId = Number(dto?.id);
+        if (!orderId) throw new BadRequestException('id 必填');
+        if (!operatorId) throw new ForbiddenException('未登录或无权限操作');
+
+        const order = await this.prisma.order.findUnique({
+            where: { id: orderId },
+            include: { project: true },
+        });
+        if (!order) throw new NotFoundException('订单不存在');
+
+        // 未结单才允许编辑
+        const forbid = new Set<OrderStatus>([OrderStatus.COMPLETED, OrderStatus.REFUNDED]);
+        if (forbid.has(order.status)) throw new ForbiddenException('已结单/已退款订单不允许编辑');
+
+        // 允许编辑的字段（不含陪玩/派单）
+        const data: any = {
+            receivableAmount: dto.receivableAmount != null ? Number(dto.receivableAmount) : undefined,
+            paidAmount: dto.paidAmount != null ? Number(dto.paidAmount) : undefined,
+            baseAmountWan: dto.baseAmountWan != null ? Number(dto.baseAmountWan) : undefined,
+            customerGameId: dto.customerGameId ?? undefined,
+            orderTime: dto.orderTime ? new Date(dto.orderTime) : undefined,
+            paymentTime: dto.paymentTime ? new Date(dto.paymentTime) : undefined,
+            csRate: dto.csRate != null ? Number(dto.csRate) : undefined,
+            inviteRate: dto.inviteRate != null ? Number(dto.inviteRate) : undefined,
+            inviter: dto.inviter ?? undefined,
+            customClubRate: dto.customClubRate != null ? Number(dto.customClubRate) : undefined,
+        };
+
+        // 项目变更：同步 projectSnapshot + clubRate（落库快照）
+        if (dto.projectId && Number(dto.projectId) !== order.projectId) {
+            const project = await this.prisma.gameProject.findUnique({ where: { id: Number(dto.projectId) } });
+            if (!project) throw new NotFoundException('项目不存在');
+
+            data.projectId = project.id;
+
+            data.projectSnapshot = {
+                id: project.id,
+                name: project.name,
+                type: project.type,
+                billingMode: project.billingMode,
+                price: project.price,
+                baseAmount: project.baseAmount ?? null,
+                clubRate: project.clubRate ?? null,
+                coverImage: project.coverImage ?? null,
+            } as any;
+
+            // 注意：clubRate 是“订单级固定抽成快照”，仍遵循优先级：customClubRate > 项目 clubRate
+            data.clubRate = (dto.customClubRate != null ? Number(dto.customClubRate) : (project.clubRate ?? null));
+        }
+
+        const updated = await this.prisma.order.update({
+            where: { id: orderId },
+            data,
+        });
+
+        await this.logOrderAction(operatorId, orderId, 'UPDATE_ORDER', {
+            changes: data,
+            remark: dto.remark ?? null,
+        });
+
+        return this.getOrderDetail(orderId);
+    }
+
+
 }

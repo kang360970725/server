@@ -1,98 +1,202 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# 🐱 蓝猫陪玩系统（BlueCat）
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+蓝猫陪玩系统是一个面向 **陪玩/打手派单业务** 的管理后台与后端 API 系统，覆盖从下单、派单、接单、存单、结单、结算、分润到财务打款的完整业务闭环。
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+> 本项目强调：**强业务建模 + 可追溯审计 + 工程级协作规范 + AI 抗会话中断协作**。
 
-## Description
+---
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## 📌 一、项目概览
 
-## Project setup
+- 🎯 目标：构建一套稳定、可扩展、可审计的陪玩派单与分润系统
+- 👥 使用角色：客服 / 管理员 / 财务 / 陪玩 STAFF
+- 🧱 系统形态：管理后台 + 后端 API
+- 📦 仓库：
+  - 后端：NestJS + Prisma + MySQL
+  - 前端：admin（Umi Max + Ant Design Pro）
 
-```bash
-$ yarn install
+---
+
+## 🛠 二、技术栈
+
+### 后端
+- NestJS
+- Prisma ORM（唯一 ORM）
+- MySQL
+- JWT 鉴权
+- 模块化：`users / game-project / orders / meta / settlement ...`
+
+### 前端
+- Umi Max
+- Ant Design Pro
+- Ant Design
+- request API 封装
+
+---
+
+## 🧩 三、核心业务模型
+
+| 模型 | 说明 |
+|------|------|
+| Order | 订单主体 |
+| OrderDispatch | 派单批次（支持多轮） |
+| OrderParticipant | 派单参与者（陪玩） |
+| OrderSettlement | 结算明细（每人每轮） |
+| UserLog | 审计日志（所有关键动作） |
+
+> 设计原则：**订单 ≠ 派单 ≠ 参与者 ≠ 结算**，强分层，禁止混用。
+
+---
+
+## 🔁 四、状态机（统一版）
+
+### 1️⃣ 订单状态（OrderStatus）
+
+```
+WAIT_ASSIGN
+     ↓
+WAIT_ACCEPT
+     ↓
+ACCEPTED
+     ↓
+ARCHIVED   （允许再次派单）
+     ↓
+COMPLETED  （终态）
+
+任意阶段 → REFUNDED（退款终态）
 ```
 
-## Compile and run the project
+说明：
+- WAIT_ASSIGN：新建订单，尚未派单
+- WAIT_ACCEPT：已派单，等待陪玩接单
+- ACCEPTED：本轮全员已接单
+- ARCHIVED：已存单，可再次派单进入下一轮
+- COMPLETED：已结单，流程结束
+- REFUNDED：已退款，强制终态（可由任意状态进入）
 
-```bash
-# development
-$ yarn run start
+---
 
-# watch mode
-$ yarn run start:dev
+### 2️⃣ 派单批次状态（DispatchStatus）
 
-# production mode
-$ yarn run start:prod
+```
+WAIT_ASSIGN
+     ↓
+WAIT_ACCEPT
+     ↓
+ACCEPTED
+     ↓
+ARCHIVED   （本轮结束，可进入下一轮）
+     ↓
+COMPLETED  （本轮结单终态）
 ```
 
-## Run tests
+说明：
+- 每一轮派单独立流转
+- 一个 Order 可对应多轮 Dispatch
 
-```bash
-# unit tests
-$ yarn run test
+---
 
-# e2e tests
-$ yarn run test:e2e
+### 3️⃣ 陪玩工作状态
 
-# test coverage
-$ yarn run test:cov
+```
+IDLE → WORKING → IDLE
+            ↘
+           RESTING
 ```
 
-## Deployment
+说明：
+- 接单：IDLE → WORKING
+- 存单/结单：WORKING → IDLE
+- 休息：可手动进入 RESTING
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+---
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+## ⚖️ 五、分润/抽成优先级
 
-```bash
-$ yarn install -g @nestjs/mau
-$ mau deploy
+陪玩最终到手收益优先级：
+
+```
+订单固定抽成(customClubRate)
+> 项目固定抽成(project.clubRate)
+> 陪玩评级分红比例(staffRating.rate)
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+计算原则：
+1. 先算订单陪玩分润池
+2. 按人数均分
+3. 再按上述优先级取比例计算陪玩到手收益
 
-## Resources
+---
 
-Check out a few resources that may come in handy when working with NestJS:
+## 📜 六、工程约束（铁律）
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+- ✅ Prisma 为唯一 ORM
+- ✅ 所有 API 使用 POST
+- ✅ 不随意重构稳定模块（users / game-project）
+- ✅ 关键动作必须写入 UserLog：
+  - 派单 / 换人 / 接单 / 存单 / 结单  
+  - 结算 / 调整收益 / 打款 / 退款 / 编辑订单
+- ✅ 枚举统一由 `/meta/enums` 提供
+- ❌ 禁止绕过状态机直接改状态
+- ❌ 禁止直接 SQL / 多 ORM 混用
 
-## Support
+---
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+## 📂 七、文档与抗中断体系
 
-## Stay in touch
+```
+/docs
+  ├─ PROJECT_ANCHOR.md   # 项目锚点（全局上下文）
+  ├─ MODULE_CONTEXT.md   # 模块级上下文模板
+  └─ PROMPT.md           # AI 抗中断 Prompt
+```
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+### ✅ 新会话恢复流程
 
-## License
+1. 发送 `PROMPT.md`
+2. 发送 `PROJECT_ANCHOR.md`
+3. 描述本轮模块上下文
+4. 说：“开始吧”
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+---
+
+## 🧑‍💻 八、开发与贡献指南
+
+### 分支规范
+- `main`：稳定主分支
+- `dev`：日常开发分支
+- `feat/*`、`fix/*`：功能/修复分支
+
+### 提交规范
+```
+feat: 新增打手工作台结单功能
+fix: 修复存单后无法重新派单问题
+refactor: 重构结算比例计算逻辑
+```
+
+### 改动原则
+- 改业务前：先说明**目标 + 约束**
+- 改金额/收益/状态：必须写 UserLog
+- 提交前自测完整流程
+
+---
+
+## 🧪 九、核心流程自测清单
+
+- [ ] 新建订单 → 派单 → 接单
+- [ ] 存单 → 再派单
+- [ ] 结单 → 自动结算
+- [ ] 多轮派单收益正确
+- [ ] 补收实付金额后重算
+- [ ] 调整陪玩收益
+- [ ] 批次结算 + 打款
+- [ ] 退款后收益清零
+
+---
+
+## ❤️ 说明
+
+本项目以 **业务正确性 + 可审计 + 可持续演进** 为核心目标，
+所有关键设计请同步沉淀到 `/docs`。
+
+欢迎共建。

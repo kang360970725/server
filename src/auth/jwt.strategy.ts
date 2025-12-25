@@ -13,6 +13,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: any) {
-    return { userId: payload.sub, phone: payload.phone };
+    // ✅ 统一使用 req.user.id
+    return {
+      id: payload.sub,
+      userId: payload.sub, // 兼容旧代码（如果项目里有地方用 userId）
+      phone: payload.phone,
+    };
   }
 }

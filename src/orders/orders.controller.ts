@@ -6,10 +6,12 @@ import {
     UseGuards,
     Request,
     ParseIntPipe,
-    BadRequestException,
+    BadRequestException, Req, ForbiddenException,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { OrdersService } from './orders.service';
+import {AdjustSettlementDto} from "./dto/adjust-settlement.dto";
+
 
 /**
  * Orders Controller（v0.1）
@@ -180,4 +182,34 @@ export class OrdersController {
             body.remark,
         );
     }
+
+    @Post('settlements/adjust')
+    // @Permissions('ADMIN', 'SUPER_ADMIN', 'FINANCE') // 你按你系统权限改
+    // adjustSettlement(@Body() dto: AdjustSettlementDto, @Req() req: any) {
+    //     return this.ordersService.adjustSettlementFinalEarnings(dto, req.user.id);
+    // }
+    @UseGuards(JwtAuthGuard) // ✅ 必须有，否则 req.user 可能为空
+    adjustSettlement(@Body() dto: AdjustSettlementDto, @Req() req: any) {
+        const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+        if (!operatorId) throw new ForbiddenException('未登录或登录已失效');
+
+        return this.ordersService.adjustSettlementFinalEarnings(dto, operatorId);
+    }
+
+//    退款功能
+    @Post('refund')
+    @UseGuards(JwtAuthGuard)
+    refund(@Body() body: { id: number; remark?: string }, @Req() req: any) {
+        const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+        return this.ordersService.refundOrder(Number(body.id), operatorId, body.remark);
+    }
+
+    //订单编辑功能
+    @Post('update')
+    @UseGuards(JwtAuthGuard)
+    update(@Body() dto: any, @Req() req: any) {
+        const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+        return this.ordersService.updateOrderEditable(dto, operatorId);
+    }
+
 }
