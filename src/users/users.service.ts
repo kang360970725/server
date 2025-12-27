@@ -464,23 +464,70 @@ export class UsersService {
 //  获取空闲的打手
   async getPlayerOptions(params: { keyword?: string; onlyIdle?: boolean }) {
     const { keyword, onlyIdle = true } = params || {};
-    const where: any = {
-      userType: UserType.STAFF, // 你当前打手归 STAFF，后续你若拆 PLAYER 再改
-    };
+    const where: any = { userType: UserType.STAFF };
     if (onlyIdle) where.workStatus = PlayerWorkStatus.IDLE;
 
     if (keyword) {
-      where.OR = [
-        { name: { contains: keyword } },
-        { phone: { contains: keyword } },
-      ];
+      where.OR = [{ name: { contains: keyword } }, { phone: { contains: keyword } }];
     }
 
-    return this.prisma.user.findMany({
+    const users = await this.prisma.user.findMany({
       where,
-      select: { id: true, name: true, phone: true, workStatus: true },
-      orderBy: [{ workStatus: 'asc' }, { id: 'desc' }],
-      take: 50,
+      select: {
+        id: true,
+        name: true,
+        phone: true,
+        workStatus: true,
+        rating: true,
+        staffRating: {           // ✅ 关联等级表
+          select: {
+            name: true,    // 等级名称
+          },
+        },
+      },
+      take: 100,
     });
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+    const ids = users.map((u) => u.id);
+    let countMap: Record<number, number> = {};
+    if (ids.length) {
+      const grouped = await this.prisma.orderParticipant.groupBy({
+        by: ['userId'],
+        where: {
+          userId: { in: ids },
+          isActive: true,
+          dispatch: {
+            OR: [
+              { status: 'ARCHIVED' as any, archivedAt: { gte: start, lte: end } },
+              { status: 'COMPLETED' as any, completedAt: { gte: start, lte: end } },
+            ],
+          },
+        },
+        _count: { _all: true },
+      });
+
+      countMap = grouped.reduce((acc: any, g: any) => {
+        acc[Number(g.userId)] = Number(g._count?._all ?? 0);
+        return acc;
+      }, {});
+    }
+
+    return users
+        .map((u) => ({ ...u,
+          ratingName: u?.staffRating?.name ?? '-',   // ✅ 等级名称
+          todayHandledCount: countMap[Number(u.id)] ?? 0}))
+        .sort((a, b) => {
+          const ca = Number(a.todayHandledCount ?? 0);
+          const cb = Number(b.todayHandledCount ?? 0);
+          if (ca !== cb) return ca - cb;         // ✅ 接单最少优先
+          const ra = Number(a.rating ?? 0);
+          const rb = Number(b.rating ?? 0);
+          if (rb !== ra) return rb - ra;
+          return Number(a.id) - Number(b.id);
+        });
   }
+
 }

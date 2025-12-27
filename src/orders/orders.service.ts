@@ -8,7 +8,7 @@ import { ArchiveDispatchDto } from './dto/archive-dispatch.dto';
 import { CompleteDispatchDto } from './dto/complete-dispatch.dto';
 import { QuerySettlementBatchDto } from './dto/query-settlement-batch.dto';
 import { MarkPaidDto } from './dto/mark-paid.dto';
-import { BillingMode, DispatchStatus, OrderStatus, PaymentStatus } from '@prisma/client';
+import { BillingMode, DispatchStatus, OrderStatus, PaymentStatus, PlayerWorkStatus } from '@prisma/client';
 
 /**
  * OrdersService v0.1
@@ -414,7 +414,8 @@ export class OrdersService {
         });
         if (!refreshed) throw new NotFoundException('派单批次不存在');
 
-        const allAccepted = refreshed.participants.length > 0 && refreshed.participants.every((p) => !!p.acceptedAt);
+        const active = (refreshed.participants || []).filter((p: any) => p?.isActive !== false && !p?.rejectedAt);
+        const allAccepted = active.length > 0 && active.every((p: any) => !!p.acceptedAt);
 
         if (allAccepted && refreshed.status !== DispatchStatus.ACCEPTED) {
             await this.prisma.orderDispatch.update({
@@ -440,6 +441,128 @@ export class OrdersService {
 
         return this.getDispatchWithParticipants(dispatchId);
     }
+
+    /**
+     * 陪玩拒单（待接单阶段）
+     * - 必填拒单原因
+     * - participant 标记 rejectedAt + rejectReason，并置 isActive=false 进入历史
+     */
+    async rejectDispatch(dispatchId: number, userId: number, reason: string) {
+        dispatchId = Number(dispatchId);
+        userId = Number(userId);
+        reason = String(reason ?? '').trim();
+
+        if (!dispatchId) throw new BadRequestException('dispatchId 必填');
+        if (!userId) throw new ForbiddenException('未登录或无权限操作');
+        if (!reason) throw new BadRequestException('reason 必填');
+
+        const dispatch = await this.prisma.orderDispatch.findUnique({
+            where: { id: dispatchId },
+            include: { order: true, participants: true },
+        });
+        if (!dispatch) throw new NotFoundException('派单批次不存在');
+
+        if (dispatch.status !== DispatchStatus.WAIT_ACCEPT) {
+            throw new ForbiddenException('当前派单状态不可拒单');
+        }
+
+        const participant = dispatch.participants.find((p: any) => Number(p.userId) === userId && p.isActive !== false);
+        if (!participant) throw new ForbiddenException('你不在本轮派单参与者中');
+        if (participant.acceptedAt) throw new ForbiddenException('已接单，不能拒单');
+        if (participant.rejectedAt) throw new ForbiddenException('已拒单，无需重复操作');
+
+        const now = new Date();
+
+        await this.prisma.orderParticipant.update({
+            where: { id: participant.id },
+            data: {
+                rejectedAt: now,
+                rejectReason: reason,
+                isActive: false,
+            } as any,
+        });
+
+        // 拒单后保持空闲
+        await this.prisma.user.update({
+            where: { id: userId },
+            data: { workStatus: PlayerWorkStatus.IDLE as any },
+        });
+
+        await this.logOrderAction(userId, dispatch.orderId, 'REJECT_DISPATCH', {
+            dispatchId,
+            reason,
+        });
+
+        return this.getDispatchWithParticipants(dispatchId);
+    }
+
+    /**
+     * 修改存单记录保底进度（仅 ARCHIVED 轮次允许）
+     * - 如本轮已有结算明细：会重算本轮结算（未打款才允许）
+     */
+    async updateArchivedParticipantProgress(
+        dispatchId: number,
+        participantId: number,
+        progressBaseWan: number,
+        operatorId: number,
+        remark?: string,
+    ) {
+        dispatchId = Number(dispatchId);
+        participantId = Number(participantId);
+        operatorId = Number(operatorId);
+        progressBaseWan = Number(progressBaseWan);
+
+        if (!dispatchId) throw new BadRequestException('dispatchId 必填');
+        if (!participantId) throw new BadRequestException('participantId 必填');
+        if (!Number.isFinite(progressBaseWan)) throw new BadRequestException('progressBaseWan 非法');
+        if (!operatorId) throw new ForbiddenException('未登录或无权限操作');
+
+        const dispatch = await this.prisma.orderDispatch.findUnique({
+            where: { id: dispatchId },
+            include: {
+                order: true,
+                participants: true,
+                settlements: { select: { id: true, paymentStatus: true } },
+            },
+        });
+        if (!dispatch) throw new NotFoundException('派单批次不存在');
+        if (dispatch.status !== DispatchStatus.ARCHIVED) throw new ForbiddenException('仅存单(ARCHIVED)批次允许修改进度');
+
+        const p = dispatch.participants.find((x: any) => Number(x.id) === participantId);
+        if (!p) throw new NotFoundException('参与者记录不存在');
+
+        // 已打款的不允许重算
+        const hasPaid = (dispatch.settlements || []).some((s: any) => s.paymentStatus === PaymentStatus.PAID);
+        if (hasPaid) throw new ForbiddenException('本轮存在已打款结算记录，禁止修改进度（请走财务冲正流程）');
+
+        const before = p.progressBaseWan ?? null;
+
+        await this.prisma.orderParticipant.update({
+            where: { id: participantId },
+            data: { progressBaseWan } as any,
+        });
+
+        // 重算本轮结算（删除旧的再生成新的）
+        if ((dispatch.settlements || []).length > 0) {
+            await this.prisma.orderSettlement.deleteMany({ where: { dispatchId } });
+            await this.createSettlementsForDispatch({
+                orderId: dispatch.orderId,
+                dispatchId,
+                mode: 'ARCHIVE',
+            });
+        }
+
+        await this.logOrderAction(operatorId, dispatch.orderId, 'UPDATE_ARCHIVED_PROGRESS', {
+            dispatchId,
+            participantId,
+            before,
+            after: progressBaseWan,
+            remark: remark ?? null,
+        });
+
+        return this.getOrderDetail(dispatch.orderId);
+    }
+
 
     private async getDispatchWithParticipants(dispatchId: number) {
         return this.prisma.orderDispatch.findUnique({
@@ -1367,6 +1490,23 @@ export class OrdersService {
         });
 
         if (!order) throw new NotFoundException('订单不存在');
+
+        // ✅ 防重复派单：若存在当前派单批次且仍处于待接/已接阶段，则禁止再次创建新一轮派单
+        if (order.currentDispatchId) {
+            const cur = await this.prisma.orderDispatch.findUnique({
+                where: { id: order.currentDispatchId },
+                include: { participants: true },
+            });
+
+            if (cur && [DispatchStatus.WAIT_ACCEPT, DispatchStatus.ACCEPTED].includes(cur.status as any)) {
+                const activeParts = (cur.participants || []).filter((p: any) => p?.isActive !== false);
+                // pending：未接单且未拒单
+                const hasPending = activeParts.some((p: any) => !p?.acceptedAt && !p?.rejectedAt);
+                if (hasPending) {
+                    throw new ForbiddenException('当前订单存在未完成派单（待接单/已接单），禁止重复派单');
+                }
+            }
+        }
 
         // ✅ v0.1：允许 WAIT_ASSIGN / ARCHIVED 派单
         // - ARCHIVED：存单后仍保持存单态，但允许创建新 dispatch（round+1），并把 currentDispatch 指向新批次

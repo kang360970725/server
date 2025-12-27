@@ -203,13 +203,53 @@ export class OrdersController {
         const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
         return this.ordersService.refundOrder(Number(body.id), operatorId, body.remark);
     }
-    
+
     //订单编辑功能
     @Post('update')
     @UseGuards(JwtAuthGuard)
     update(@Body() dto: any, @Req() req: any) {
         const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
         return this.ordersService.updateOrderEditable(dto, operatorId);
+    }
+
+    /**
+     * 陪玩拒单（待接单阶段）
+     * POST /orders/dispatch/reject
+     * body: { dispatchId, reason }
+     */
+    @Post('dispatch/reject')
+    async reject(@Body() body: any, @Request() req: any) {
+        const dispatchId = Number(body.dispatchId);
+        if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
+        const reason = String(body.reason ?? '').trim();
+        if (!reason) throw new BadRequestException('reason 必填');
+        return this.ordersService.rejectDispatch(dispatchId, req.user?.userId, reason);
+    }
+
+    /**
+     * 修改存单记录的保底进度（仅 ARCHIVED 轮次允许）
+     * POST /orders/dispatch/participant/update-progress
+     * body: { dispatchId, participantId, progressBaseWan, remark? }
+     */
+    @Post('dispatch/participant/update-progress')
+    async updateArchivedProgress(@Body() body: any, @Request() req: any) {
+        const dispatchId = Number(body.dispatchId);
+        const participantId = Number(body.participantId);
+        const progressBaseWan = body.progressBaseWan;
+
+        if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
+        if (!participantId || Number.isNaN(participantId)) throw new BadRequestException('participantId 必须为数字');
+
+        const n = Number(progressBaseWan);
+        if (!Number.isFinite(n)) throw new BadRequestException('progressBaseWan 非法');
+
+        return this.ordersService.updateArchivedParticipantProgress(
+            dispatchId,
+            participantId,
+            n,
+            req.user?.userId,
+            body.remark,
+        );
     }
 
 }

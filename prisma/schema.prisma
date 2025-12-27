@@ -434,6 +434,10 @@ model OrderParticipant {
   /// 规则：本轮“已接单”必须所有参与者 acceptedAt 都有值
   acceptedAt    DateTime?
 
+  // ✅ 新增：拒单时间 + 拒单原因（拒单后 participant 置 isActive=false，进入历史）
+    rejectedAt    DateTime?
+    rejectReason  String?
+
   /// 贡献金额（可选）
   /// v0.1：结单默认均分；存单按进度比例算（保底/小时），贡献字段先留作未来扩展
   contributionAmount Float? @default(0)
