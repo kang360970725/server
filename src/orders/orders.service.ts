@@ -98,7 +98,20 @@ export class OrdersService {
             paidAmount: order.paidAmount,
         });
 
-        return order;
+        // ✅ 新建即派单：若传了 playerIds，则直接创建首轮派单并指派
+        const playerIds = Array.isArray((dto as any)?.playerIds)
+            ? (dto as any).playerIds.map((x: any) => Number(x)).filter((n: number) => Number.isFinite(n))
+            : [];
+
+        if (playerIds.length > 0) {
+            // 复用你现有派单逻辑（包含防重复、参与者写入、日志等）
+            await this.assignDispatch(order.id, playerIds, dispatcherId, 'AUTO_CREATE');
+            // 派单后返回完整详情（带 currentDispatch/participants）
+            return this.getOrderDetail(order.id);
+        }
+
+        // 未选择打手：保持 WAIT_ASSIGN
+        return this.getOrderDetail(order.id);
     }
 
     /**
@@ -1649,64 +1662,156 @@ export class OrdersService {
         return updated;
     }
 
-    async updateDispatchParticipants(dispatchId: number, playerIds: number[], operatorId: number, remark?: string) {
+    async updateDispatchParticipants(
+        dto: { dispatchId: number; userIds: number[]; remark?: string },
+        operatorId: number,
+    ) {
+        const dispatchId = Number(dto?.dispatchId);
+        operatorId = Number(operatorId);
+
         if (!dispatchId) throw new BadRequestException('dispatchId 必填');
-        if (!Array.isArray(playerIds) || playerIds.length < 1 || playerIds.length > 2) {
-            throw new BadRequestException('playerIds 必须为 1~2 个');
+        if (!operatorId) throw new ForbiddenException('未登录或无权限操作');
+
+        const targetUserIds = Array.isArray(dto?.userIds)
+            ? dto.userIds.map((x: any) => Number(x)).filter((n: number) => Number.isFinite(n))
+            : [];
+
+        if (targetUserIds.length <= 0) {
+            throw new BadRequestException('参与者不能为空');
         }
 
-        const dispatch = await this.prisma.orderDispatch.findUnique({
-            where: { id: dispatchId },
-            include: {
-                order: true,
-                participants: true,
-            },
-        });
-        if (!dispatch) throw new NotFoundException('派单批次不存在');
+        // 去重
+        const targetSet = new Set<number>(targetUserIds);
+        const target = Array.from(targetSet);
 
-        // ✅ 只允许待接单阶段修改参与者
-        const allow = new Set(['WAIT_ACCEPT', 'WAIT_ASSIGN']);
-        if (!allow.has(String(dispatch.status))) {
-            throw new ForbiddenException('当前派单状态不可修改参与者');
-        }
+        const now = new Date();
 
-        // ✅ 若已有任一参与者 acceptedAt 非空，则不允许修改
-        if (dispatch.participants.some((p) => !!p.acceptedAt)) {
-            throw new ForbiddenException('已有打手接单，不能修改参与者（请存单后重新派单）');
-        }
-
-        // 旧记录全部置无效
-        await this.prisma.orderParticipant.updateMany({
-            where: { dispatchId },
-            data: { isActive: false },
-        });
-
-        // 创建新参与者（isActive=true）
-        await this.prisma.orderParticipant.createMany({
-            data: playerIds.map((userId) => ({
-                dispatchId,
-                userId,
-                isActive: true,
-            })),
-        });
-
-        // 写日志
-        if (operatorId) {
-            await this.prisma.userLog.create({
-                data: {
-                    userId: operatorId,
-                    action: 'UPDATE_DISPATCH_PARTICIPANTS',
-                    targetType: 'ORDER_DISPATCH',
-                    targetId: dispatchId,
-                    oldData: { playerIds: dispatch.participants.map((p) => p.userId) } as any,
-                    newData: { playerIds } as any,
-                    remark: remark || '更新派单参与者',
+        await this.prisma.$transaction(async (tx) => {
+            const dispatch = await tx.orderDispatch.findUnique({
+                where: { id: dispatchId },
+                include: {
+                    order: { select: { id: true, status: true } },
+                    participants: true,
                 },
             });
-        }
 
-        return this.getOrderDetail(dispatch.orderId);
+            if (!dispatch) throw new NotFoundException('派单批次不存在');
+
+            // 仅允许在 WAIT_ACCEPT/ACCEPTED 调整（你也可以只允许 WAIT_ACCEPT）
+            if (![DispatchStatus.WAIT_ACCEPT, DispatchStatus.ACCEPTED].includes(dispatch.status as any)) {
+                throw new ForbiddenException('当前派单状态不可修改参与者');
+            }
+
+            const existing = Array.isArray(dispatch.participants) ? dispatch.participants : [];
+
+            // 参与者是否“有效参与本轮”的口径：isActive!=false 且未拒单
+            const isActiveParticipant = (p: any) => p?.isActive !== false && !p?.rejectedAt;
+
+            const existingByUserId = new Map<number, any>();
+            for (const p of existing) existingByUserId.set(Number(p.userId), p);
+
+            const activeUserIds = existing.filter(isActiveParticipant).map((p: any) => Number(p.userId));
+            const activeSet = new Set<number>(activeUserIds);
+
+            // 要移除的：当前活跃但目标里没有
+            const toDeactivate = activeUserIds.filter((uid) => !targetSet.has(uid));
+
+            // ✅ 规则 B：不允许取消已接单者
+            // acceptedAt 有值即认为“已接单”
+            const acceptedToRemove = toDeactivate
+                .map((uid) => existingByUserId.get(uid))
+                .filter((p) => p?.acceptedAt);
+
+            if (acceptedToRemove.length > 0) {
+                const names = acceptedToRemove
+                    .map((p: any) => String(p?.userId))
+                    .join(',');
+                throw new ForbiddenException(`不允许取消已接单者：${names}`);
+            }
+
+            // 要恢复的：记录存在但当前非活跃/已拒单，且目标里有
+            const toReactivate: number[] = [];
+            for (const uid of target) {
+                const p = existingByUserId.get(uid);
+                if (!p) continue;
+                if (!isActiveParticipant(p)) toReactivate.push(uid);
+            }
+
+            // 要新增的：从未存在过记录
+            const toCreate: number[] = [];
+            for (const uid of target) {
+                if (!existingByUserId.has(uid)) toCreate.push(uid);
+            }
+
+            // 1) 失活移除（保留历史记录，避免 unique 冲突）
+            if (toDeactivate.length > 0) {
+                await tx.orderParticipant.updateMany({
+                    where: { dispatchId, userId: { in: toDeactivate } },
+                    data: { isActive: false },
+                });
+            }
+
+            // 2) 恢复参与者：重新加入必须重新“待接单”
+            if (toReactivate.length > 0) {
+                await tx.orderParticipant.updateMany({
+                    where: { dispatchId, userId: { in: toReactivate } },
+                    data: {
+                        isActive: true,
+                        acceptedAt: null,
+                        rejectedAt: null,
+                        rejectReason: null,
+                    } as any,
+                });
+            }
+
+            // 3) 新增参与者：只对真正不存在的 createMany，并加 skipDuplicates 兜底
+            if (toCreate.length > 0) {
+                await tx.orderParticipant.createMany({
+                    data: toCreate.map((uid) => ({
+                        dispatchId,
+                        userId: uid,
+                        isActive: true,
+                    })),
+                    skipDuplicates: true,
+                });
+            }
+
+            // 4) 参与者一旦变化：本轮回到 WAIT_ACCEPT（要求重新确认）
+            if (toDeactivate.length > 0 || toReactivate.length > 0 || toCreate.length > 0) {
+                await tx.orderDispatch.update({
+                    where: { id: dispatchId },
+                    data: {
+                        status: DispatchStatus.WAIT_ACCEPT,
+                        // 可选：记录一次更新时间字段（如果你有）
+                        // updatedAt: now,
+                    } as any,
+                });
+
+                // 同步订单状态（可选：如果你有“已派单/待接单”的订单状态口径）
+                // await tx.order.update({ where: { id: dispatch.orderId }, data: { status: OrderStatus.WAIT_ACCEPT } });
+            }
+
+            // 5) 记录日志（符合你“关键动作必须记录 UserLog”）
+            await this.logOrderAction(operatorId, dispatch.orderId, 'UPDATE_DISPATCH_PARTICIPANTS', {
+                dispatchId,
+                targetUserIds: target,
+                deactivated: toDeactivate,
+                reactivated: toReactivate,
+                created: toCreate,
+                remark: dto?.remark ?? null,
+                at: now,
+            });
+        });
+
+        // 返回最新详情（前端刷新用）
+        // 这里用订单详情最稳
+        const after = await this.prisma.orderDispatch.findUnique({
+            where: { id: dispatchId },
+            select: { orderId: true },
+        });
+        return this.getOrderDetail(Number(after?.orderId));
     }
+
 
     async adjustSettlementFinalEarnings(dto: { settlementId: number; finalEarnings: number; remark?: string }, operatorId: number) {
         const settlementId = Number(dto.settlementId);
