@@ -1890,5 +1890,84 @@ export class OrdersService {
         return this.getOrderDetail(orderId);
     }
 
+    async getMyWorkbenchStats(userId: number) {
+        userId = Number(userId);
+        if (!userId) throw new ForbiddenException('未登录或无权限操作');
+
+        const now = new Date();
+
+        // ✅ 按服务器时区计算（你如果要强制按北京时间，后面我可以给你加 tz 处理）
+        const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+        const endToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+        const startMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+        const endMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+        // 统一一个 where：只统计 存单(ARCHIVED) + 结单(COMPLETED)
+        const dispatchWhereToday: any = {
+            participants: { some: { userId } },
+            OR: [
+                { status: DispatchStatus.ARCHIVED, archivedAt: { gte: startToday, lte: endToday } },
+                { status: DispatchStatus.COMPLETED, completedAt: { gte: startToday, lte: endToday } },
+            ],
+        };
+
+        const dispatchWhereMonth: any = {
+            participants: { some: { userId } },
+            OR: [
+                { status: DispatchStatus.ARCHIVED, archivedAt: { gte: startMonth, lte: endMonth } },
+                { status: DispatchStatus.COMPLETED, completedAt: { gte: startMonth, lte: endMonth } },
+            ],
+        };
+
+        // ✅ 今日/月 接单数（只统计结单/存单）
+        const [todayCount, monthCount] = await Promise.all([
+            this.prisma.orderDispatch.count({ where: dispatchWhereToday }),
+            this.prisma.orderDispatch.count({ where: dispatchWhereMonth }),
+        ]);
+
+        // ✅ 今日/月 收入：对我的 settlement.finalEarnings 求和
+        // 说明：我们用 settlement -> dispatch(ARCHIVED/COMPLETED) 的时间范围来做口径一致的过滤
+        const incomeWhereToday: any = {
+            userId,
+            dispatch: {
+                OR: [
+                    { status: DispatchStatus.ARCHIVED, archivedAt: { gte: startToday, lte: endToday } },
+                    { status: DispatchStatus.COMPLETED, completedAt: { gte: startToday, lte: endToday } },
+                ],
+            },
+        };
+
+        const incomeWhereMonth: any = {
+            userId,
+            dispatch: {
+                OR: [
+                    { status: DispatchStatus.ARCHIVED, archivedAt: { gte: startMonth, lte: endMonth } },
+                    { status: DispatchStatus.COMPLETED, completedAt: { gte: startMonth, lte: endMonth } },
+                ],
+            },
+        };
+
+        const [todayIncomeAgg, monthIncomeAgg] = await Promise.all([
+            this.prisma.orderSettlement.aggregate({
+                where: incomeWhereToday,
+                _sum: { finalEarnings: true },
+            }),
+            this.prisma.orderSettlement.aggregate({
+                where: incomeWhereMonth,
+                _sum: { finalEarnings: true },
+            }),
+        ]);
+
+        const todayIncome = Number(todayIncomeAgg?._sum?.finalEarnings ?? 0);
+        const monthIncome = Number(monthIncomeAgg?._sum?.finalEarnings ?? 0);
+
+        return {
+            todayCount,
+            todayIncome,
+            monthCount,
+            monthIncome,
+        };
+    }
 
 }

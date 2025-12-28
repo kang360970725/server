@@ -498,7 +498,6 @@ export class UsersService {
         by: ['userId'],
         where: {
           userId: { in: ids },
-          isActive: true,
           dispatch: {
             OR: [
               { status: 'ARCHIVED' as any, archivedAt: { gte: start, lte: end } },

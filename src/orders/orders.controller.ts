@@ -252,4 +252,12 @@ export class OrdersController {
         );
     }
 
+    // 我的工作台统计：今日接单/今日收入/月累计接单/月累计收入
+    @Post('my/stats')
+    @UseGuards(JwtAuthGuard)
+    myStats(@Req() req: any) {
+        const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+        return this.ordersService.getMyWorkbenchStats(userId);
+    }
+
 }
