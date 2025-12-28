@@ -176,10 +176,12 @@ export class OrdersController {
     @Post('dispatch/update-participants')
     updateParticipants(@Body() body: any, @Request() req: any) {
         return this.ordersService.updateDispatchParticipants(
-            Number(body.dispatchId),
-            (body.playerIds || []).map((x: any) => Number(x)),
-            req.user?.userId,
-            body.remark,
+            {
+                dispatchId: body.dispatchId,
+                userIds: body.userIds,
+                remark: body.remark,
+            },
+            Number(req.user?.id ?? req.user?.userId ?? req.user?.sub),
         );
     }
 
