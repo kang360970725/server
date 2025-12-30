@@ -6,7 +6,7 @@ datasource db {
   provider = "mysql"
   url      = env("DATABASE_URL")
 }
-
+//pwd:Up9DXX6TKqu8sRw
 // 菜单项目表
 model GameProject {
   id          Int      @id @default(autoincrement())
