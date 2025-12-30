@@ -32,7 +32,8 @@ RUN apt-get update -y && apt-get install -y openssl ca-certificates && rm -rf /v
 
 # 只拷贝生产依赖
 COPY package.json package-lock.json* ./
-RUN npm install --omit=dev
+# RUN npm install --omit=dev
+RUN npm install
 
 # 拷贝构建产物 + prisma（migrations / schema / seed）
 COPY --from=builder /app/dist ./dist
