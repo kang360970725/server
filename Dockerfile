@@ -7,7 +7,7 @@ WORKDIR /app
 COPY package.json yarn.lock* package-lock.json* pnpm-lock.yaml* ./
 
 # 你的 packageManager 是 yarn@1.x，但云上用 npm ci 更通用；你也可以切到 yarn
-RUN npm ci
+RUN npm install
 
 # 拷贝代码
 COPY . .
@@ -26,7 +26,7 @@ ENV NODE_ENV=production
 
 # 只拷贝生产依赖（最小化镜像）
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
+RUN npm install --omit=dev
 
 # 拷贝构建产物 + prisma（migrations）
 COPY --from=builder /app/dist ./dist
