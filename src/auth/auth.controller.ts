@@ -1,8 +1,8 @@
-import {Body, Controller, Get, Post, Request, UseGuards} from '@nestjs/common';
-import {AuthService} from './auth.service';
-import {RegisterDto} from './dto/register.dto';
-import {LoginDto} from './dto/login.dto';
-import {JwtAuthGuard} from './guards/jwt-auth.guard';
+import { Body, Controller, Get, Post, Request, UseGuards } from '@nestjs/common';
+import { AuthService } from './auth.service';
+import { RegisterDto } from './dto/register.dto';
+import { LoginDto } from './dto/login.dto';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
 @Controller('auth')
 export class AuthController {
@@ -21,9 +21,7 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @Get('me')
   async getProfile(@Request() req) {
-    const user = await this.authService.validateUser(req.user.userId);
-
-    // 获取用户权限信息
+    // 这里你原来多调用了一次 validateUser，但最终返回的是 getUserWithPermissions
     return await this.authService.getUserWithPermissions(req.user.userId);
   }
 }

@@ -121,29 +121,38 @@ export class AuthService {
   async getUserWithPermissions(userId: number) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      include: {
+      select: {
+        id: true,
+        phone: true,
+        name: true,
+        userType: true,
+        level: true,
+        balance: true,
+        avatar: true,
+        needResetPwd: true,
+        roleId: true,
+        createdAt: true,
         Role: {
-          include: {
-            permissions: {
-              select: {
-                key: true
-              }
-            }
-          }
-        }
-      }
+          select: {
+            id: true,
+            name: true,
+            permissions: { select: { key: true } },
+          },
+        },
+      },
     });
 
     if (!user) {
       throw new UnauthorizedException('用户不存在');
     }
 
-    // 提取权限键名数组
-    const permissions = user.Role?.permissions?.map(p => p.key) || [];
+    const permissions = user.Role?.permissions?.map((p) => p.key) || [];
 
+    // ✅ 不把 Role.permissions 全量给前端也行；这里保留 Role 基础信息方便展示
     return {
       ...user,
-      permissions // 添加权限列表到响应中
+      permissions,
     };
   }
+
 }

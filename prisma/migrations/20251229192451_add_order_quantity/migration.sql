@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE `Order` ADD COLUMN `orderQuantity` INTEGER NOT NULL DEFAULT 1;

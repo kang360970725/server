@@ -1,5 +1,10 @@
 // src/auth/guards/permissions.guard.ts
-import { Injectable, CanActivate, ExecutionContext } from '@nestjs/common';
+import {
+    Injectable,
+    CanActivate,
+    ExecutionContext,
+    ForbiddenException,
+} from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 
 @Injectable()
@@ -7,25 +12,23 @@ export class PermissionsGuard implements CanActivate {
     constructor(private reflector: Reflector) {}
 
     canActivate(context: ExecutionContext): boolean {
-        const requiredPermissions = this.reflector.get<string[]>(
-            'permissions',
-            context.getHandler(),
-        );
+        const requiredPermissions =
+            this.reflector.get<string[]>('permissions', context.getHandler()) || [];
 
-        if (!requiredPermissions) {
-            return true;
-        }
+        // 没配置权限 => 放行
+        if (requiredPermissions.length === 0) return true;
 
         const request = context.switchToHttp().getRequest();
-        const user = request.user;
+        const user = request.user as { permissions?: string[] } | undefined;
 
-        if (!user || !user.role || !user.role.permissions) {
-            return false;
+        const userPermissions = user?.permissions || [];
+        const ok = requiredPermissions.some((p) => userPermissions.includes(p));
+
+        if (!ok) {
+            // 让前端能收到 403（配合 3.3）
+            throw new ForbiddenException('权限不足');
         }
 
-        const userPermissions = user.role.permissions.map(p => p.name);
-        return requiredPermissions.some(permission =>
-            userPermissions.includes(permission)
-        );
+        return true;
     }
 }

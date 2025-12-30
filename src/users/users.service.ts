@@ -145,6 +145,11 @@ export class UsersService {
       include: this.getUserIncludeFields(), // 改为使用 include
     });
 
+    if (updateUserDto.password) {
+      // ✅ 避免明文入库
+      updateUserDto.password = await bcrypt.hash(updateUserDto.password, 10);
+    }
+
     if (!oldUser) {
       throw new NotFoundException('用户不存在');
     }
@@ -174,6 +179,24 @@ export class UsersService {
     }
 
     return user;
+  }
+
+  async updateMyPassword(userId: number, newPassword: string) {
+    if (!newPassword || newPassword.length < 6) {
+      throw new BadRequestException('密码长度至少 6 位');
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        password: hashedPassword,
+        needResetPwd: false,
+      },
+      // 这里沿用你现有 include，避免前端字段缺失
+      include: this.getUserIncludeFields(),
+    });
   }
 
   // 新增：获取可用的员工评级列表
