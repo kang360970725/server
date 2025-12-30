@@ -64,7 +64,7 @@ export class OrdersController {
      */
     @Post('create')
     async create(@Body() body: any, @Request() req: any) {
-        const operatorId = req.user?.userId;
+        const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
         return this.ordersService.createOrder(body, operatorId);
     }
 
@@ -175,15 +175,19 @@ export class OrdersController {
 
     @Post('dispatch/update-participants')
     updateParticipants(@Body() body: any, @Request() req: any) {
+        const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+        const ids = Array.isArray(body.playerIds) ? body.playerIds : body.userIds;
+
         return this.ordersService.updateDispatchParticipants(
             {
-                dispatchId: body.dispatchId,
-                userIds: body.userIds,
+                dispatchId: Number(body.dispatchId),
+                playerIds: Array.isArray(ids) ? ids.map((x: any) => Number(x)).filter((n: number) => Number.isFinite(n)) : [],
                 remark: body.remark,
             },
-            Number(req.user?.id ?? req.user?.userId ?? req.user?.sub),
+            operatorId,
         );
     }
+
 
     @Post('settlements/adjust')
     // @Permissions('ADMIN', 'SUPER_ADMIN', 'FINANCE') // 你按你系统权限改

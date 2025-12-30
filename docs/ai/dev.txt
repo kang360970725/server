@@ -1,0 +1,3 @@
+数据库修改后需执行：
+npx prisma migrate dev --name 自定义名称
+npx prisma generate

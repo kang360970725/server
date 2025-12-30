@@ -498,6 +498,8 @@ export class UsersService {
         by: ['userId'],
         where: {
           userId: { in: ids },
+          acceptedAt: { not: null }, // ✅ 只统计已接单的，替换掉的不会计数
+          rejectedAt: null,          // ✅ 排除拒单
           dispatch: {
             OR: [
               { status: 'ARCHIVED' as any, archivedAt: { gte: start, lte: end } },

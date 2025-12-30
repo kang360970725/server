@@ -25,6 +25,10 @@ export class CreateOrderDto {
     @Min(0)
     paidAmount: number;
 
+    @IsNumber()
+    @Min(1)
+    orderQuantity: number;
+
     @IsOptional()
     @IsDateString()
     orderTime?: string;
@@ -56,5 +60,5 @@ export class CreateOrderDto {
 
     @IsOptional()
     @IsNumber()
-    customClubRate?: number; // 订单级俱乐部抽成（你确认：这就是俱乐部抽成）
+    customClubRate?: number; // 订单级俱乐部抽成（确认：这就是俱乐部抽成）
 }
