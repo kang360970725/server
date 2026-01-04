@@ -9,6 +9,7 @@ import {CompleteDispatchDto} from './dto/complete-dispatch.dto';
 import {QuerySettlementBatchDto} from './dto/query-settlement-batch.dto';
 import {MarkPaidDto} from './dto/mark-paid.dto';
 import {BillingMode, DispatchStatus, OrderStatus, PaymentStatus, PlayerWorkStatus} from '@prisma/client';
+import {WalletService} from '../wallet/wallet.service';
 
 /**
  * OrdersService v0.1
@@ -27,7 +28,10 @@ import {BillingMode, DispatchStatus, OrderStatus, PaymentStatus, PlayerWorkStatu
  */
 @Injectable()
 export class OrdersService {
-    constructor(private prisma: PrismaService) {
+    constructor(
+        private prisma: PrismaService,
+        private wallet: WalletService,
+    ) {
     }
 
     // -----------------------------
@@ -957,116 +961,34 @@ export class OrdersService {
      *   3) 陪玩分红比例（到手比例）：each * 分红
      */
     private async createSettlementsForDispatch(params: { orderId: number; dispatchId: number; mode: 'ARCHIVE' | 'COMPLETE' }) {
-        const {orderId, dispatchId, mode} = params;
+        // ===========================
+        // v0.2 临时测试参数：冻结时间用“分钟”而不是“天”
+        // ✅ 你测试跑通后，再把分钟改回天（或抽配置）
+        // ===========================
+        const EXPERIENCE_UNLOCK_MINUTES = 3;
+        const REGULAR_UNLOCK_MINUTES = 15;
 
-        const order = await this.prisma.order.findUnique({
-            where: {id: orderId},
-            include: {
-                project: true,
-            },
-        });
-        if (!order) throw new NotFoundException('订单不存在');
+        // ===========================
+        // v0.2 客服分红比例（公共常量，不落库）
+        // ✅ 后续要调比例直接改这里
+        // ⚠️ 比例口径：基于订单 paidAmount，且不影响打手分摊
+        // ===========================
+        const CUSTOMER_SERVICE_SHARE_RATE = 0.01; // 这里先给 1%，你可随时调整
 
-        const dispatch = await this.prisma.orderDispatch.findUnique({
-            where: {id: dispatchId},
-            include: {
-                participants: true,
-            },
-        });
-        if (!dispatch) throw new NotFoundException('派单批次不存在');
+        // 体验/福袋 = EXPERIENCE，否则 REGULAR（你现有逻辑保持）
+        const isExperience =
+            order.project.type === 'EXPERIENCE' || order.project.type === 'LUCKY_BAG';
 
-        const allParticipants = dispatch.participants || [];
-
-// ✅ 只统计有效参与者：未被取消 && 未拒单
-        const activeParticipants = allParticipants.filter(
-            (p: any) => p?.isActive !== false && !p?.rejectedAt,
+        // 解冻时间（v0.2 临时用分钟，便于你马上测试）
+        const unlockAt = new Date(
+            Date.now() +
+            (isExperience ? EXPERIENCE_UNLOCK_MINUTES : REGULAR_UNLOCK_MINUTES) * 60 * 1000,
         );
 
-        if (activeParticipants.length === 0) {
-            throw new BadRequestException('派单批次没有有效参与者，无法结算');
-        }
-
-// ✅ 结算前必须全员已接单（只针对有效参与者）
-        const pending = activeParticipants.filter((p: any) => !p?.acceptedAt);
-        if (pending.length > 0) {
-            throw new ForbiddenException('存在未接单参与者，禁止结算');
-        }
-
-// ✅ 最终参与结算的人：有效且已接单
-        const participants = activeParticipants;
-
-        // 幂等保护：同一 dispatch 只能生成一次 settlement
-        const existing = await this.prisma.orderSettlement.findFirst({
-            where: {orderId, dispatchId},
-            select: {id: true},
-        });
-        if (existing) throw new BadRequestException('该派单批次已生成结算记录，禁止重复结算');
-
-        // 结算类型：体验/福袋 = EXPERIENCE，否则 REGULAR
-        const settlementType = (order.project.type === 'EXPERIENCE' || order.project.type === 'LUCKY_BAG')
-            ? 'EXPERIENCE'
-            : 'REGULAR';
-
-        // ---------- 1) 计算 ratio ----------
-        const dispatchCount = await this.prisma.orderDispatch.count({where: {orderId}});
-
-        let ratio: number;
-        if (dispatchCount === 1 && mode === 'COMPLETE') {
-            // ✅ 规则 1：单次派单 + 本次结单 = 全量结算
-            ratio = 1;
-        } else {
-            // ✅ 规则 2：多次派单仍用你现有 ratio 逻辑（保底进度/结剩余等）
-            ratio = await this.computeDispatchRatio(order, dispatch, mode);
-        }
-
-        // ---------- 2) 计算本轮“可分配金额” ----------
-        // ✅ 按你要求：直接基于订单实付金额 paidAmount（不再额外扣 cs/invite 等）
-        const totalForThisDispatch = (order.paidAmount ?? 0) * ratio;
-
-        // ---------- 3) 本轮内按贡献/均分拆给每个参与者 ----------
-        const weights = participants.map((p) => {
-            const w = Number(p.contributionAmount ?? 0);
-            return Number.isFinite(w) && w > 0 ? w : 0;
-        });
-        const weightSum = weights.reduce((a, b) => a + b, 0);
-
-        const baseEachList = participants.map((_, idx) => {
-            if (weightSum > 0) return totalForThisDispatch * (weights[idx] / weightSum);
-            return totalForThisDispatch / participants.length;
-        });
-
-        // ---------- 4) 计算到手 multiplier（优先级：订单抽成 > 项目抽成 > 陪玩分红） ----------
-        const normalizeToRatio = (v: any, fallback: number) => {
-            const n = Number(v);
-            if (!Number.isFinite(n)) return fallback;
-            return n > 1 ? n / 100 : n; // 兼容 10 / 0.1 / 60 / 0.6
-        };
-
-        const orderCutRaw = order.customClubRate ?? null; // 订单固定抽成（平台抽成）
-        // 项目固定抽成优先取快照，避免项目后改影响历史
-        const snap: any = order.projectSnapshot || {};
-        const projectCutRaw = snap.clubRate ?? order.project?.clubRate ?? null;
-
-        // 陪玩分红比例来自 staffRating.rate（例如 60 表示 60%）
-        const userIds = participants.map((p) => p.userId);
-        const users = await this.prisma.user.findMany({
-            where: {id: {in: userIds}},
-            select: {id: true, staffRating: {select: {rate: true}}},
-        });
-        const shareMap = new Map<number, number>();
-        for (const u of users) {
-            shareMap.set(u.id, normalizeToRatio(u.staffRating?.rate, 1)); // 默认 100%
-        }
-
-        const hasOrderCut = orderCutRaw != null && !!orderCutRaw;
-
-        const hasProjectCut = !hasOrderCut && projectCutRaw != null && !!projectCutRaw;
-
-        const orderCut = hasOrderCut ? normalizeToRatio(orderCutRaw, 0) : 0;
-        const projectCut = hasProjectCut ? normalizeToRatio(projectCutRaw, 0) : 0;
-
         await this.prisma.$transaction(async (tx) => {
-            // 1) create settlements
+            // -------------------------
+            // 1) create settlements（陪玩/打手）
+            // -------------------------
             for (let i = 0; i < participants.length; i++) {
                 const p = participants[i];
                 const calculated = baseEachList[i];
@@ -1080,9 +1002,11 @@ export class OrdersService {
                     multiplier = Math.max(0, shareMap.get(p.userId) ?? 1);
                 }
 
+                // 你原逻辑：Math.trunc 直接取整（我不改）
                 const final = Math.trunc(calculated * multiplier);
 
-                await tx.orderSettlement.create({
+                // ✅ 1.1 先创建结算明细（原有逻辑）
+                const settlement = await tx.orderSettlement.create({
                     data: {
                         orderId,
                         dispatchId,
@@ -1097,9 +1021,81 @@ export class OrdersService {
                         paymentStatus: PaymentStatus.UNPAID,
                     },
                 });
+
+                // ✅ 1.2 再写钱包冻结收益（新增）
+                // - 幂等键：sourceType + sourceId（sourceId=settlement.id）
+                // - 金额精度：WalletService 内部 round2 保留 2 位
+                await this.wallet.createFrozenSettlementEarning(
+                    {
+                        userId: p.userId,
+                        amount: final,
+                        unlockAt,
+                        sourceType: 'ORDER_SETTLEMENT',
+                        sourceId: settlement.id,
+                        orderId,
+                        dispatchId,
+                        settlementId: settlement.id,
+                    },
+                    tx as any,
+                );
             }
 
-            // 2) aggregate + update order summary
+            // -------------------------
+            // 2) create settlements（派单客服）—— 不影响打手分摊
+            // -------------------------
+            // 规则：
+            // 1) 订单项目类型非体验单（非 EXPERIENCE / LUCKY_BAG）
+            // 2) dispatcher.userType === CUSTOMER_SERVICE
+            // 3) 金额 = order.paidAmount * CUSTOMER_SERVICE_SHARE_RATE
+            //
+            // ⚠️ 注意：客服收益来自平台收益池，不参与上面的 totalForThisDispatch 分摊
+            if (!isExperience && order.dispatcherId) {
+                const dispatcher = await tx.user.findUnique({
+                    where: {id: order.dispatcherId},
+                    select: {id: true, userType: true},
+                });
+
+                if (dispatcher?.userType === 'CUSTOMER_SERVICE') {
+                    const csAmountRaw = (order.paidAmount ?? 0) * CUSTOMER_SERVICE_SHARE_RATE;
+                    const csFinal = Math.trunc(csAmountRaw); // 与陪玩保持一致：取整，不引入小数
+
+                    // ✅ 2.1 生成客服结算明细
+                    const csSettlement = await tx.orderSettlement.create({
+                        data: {
+                            orderId,
+                            dispatchId,
+                            userId: dispatcher.id,
+                            settlementType,
+                            calculatedEarnings: csAmountRaw,
+                            manualAdjustment: csFinal - csAmountRaw,
+                            finalEarnings: csFinal,
+                            clubEarnings: 0,
+                            csEarnings: csFinal, // 仅作展示/对账用途
+                            inviteEarnings: null,
+                            paymentStatus: PaymentStatus.UNPAID,
+                        },
+                    });
+
+                    // ✅ 2.2 写钱包冻结收益（客服）
+                    await this.wallet.createFrozenSettlementEarning(
+                        {
+                            userId: dispatcher.id,
+                            amount: csFinal,
+                            unlockAt,
+                            sourceType: 'ORDER_SETTLEMENT',
+                            sourceId: csSettlement.id,
+                            orderId,
+                            dispatchId,
+                            settlementId: csSettlement.id,
+                        },
+                        tx as any,
+                    );
+                }
+            }
+
+            // -------------------------
+            // 3) aggregate + update order summary（原有逻辑保持）
+            // -------------------------
             const agg = await tx.orderSettlement.aggregate({
                 where: {orderId},
                 _sum: {finalEarnings: true, clubEarnings: true},
@@ -1113,19 +1109,178 @@ export class OrdersService {
                 },
             });
         });
-
-
-        await this.logOrderAction(order.dispatcherId, orderId, mode === 'ARCHIVE' ? 'SETTLE_ARCHIVE' : 'SETTLE_COMPLETE', {
-            dispatchId,
-            ratio,
-            dispatchCount,
-            totalForThisDispatch,
-            rule: dispatchCount === 1 && mode === 'COMPLETE' ? 'SINGLE_COMPLETE_FULL' : 'RATIO_BY_PROGRESS',
-            multiplierPriority: hasOrderCut ? 'ORDER_CUT' : hasProjectCut ? 'PROJECT_CUT' : 'PLAYER_SHARE',
-        });
-
-        return true;
     }
+
+//     private async createSettlementsForDispatch(params: { orderId: number; dispatchId: number; mode: 'ARCHIVE' | 'COMPLETE' }) {
+//         const {orderId, dispatchId, mode} = params;
+//
+//         const order = await this.prisma.order.findUnique({
+//             where: {id: orderId},
+//             include: {
+//                 project: true,
+//             },
+//         });
+//         if (!order) throw new NotFoundException('订单不存在');
+//
+//         const dispatch = await this.prisma.orderDispatch.findUnique({
+//             where: {id: dispatchId},
+//             include: {
+//                 participants: true,
+//             },
+//         });
+//         if (!dispatch) throw new NotFoundException('派单批次不存在');
+//
+//         const allParticipants = dispatch.participants || [];
+//
+// // ✅ 只统计有效参与者：未被取消 && 未拒单
+//         const activeParticipants = allParticipants.filter(
+//             (p: any) => p?.isActive !== false && !p?.rejectedAt,
+//         );
+//
+//         if (activeParticipants.length === 0) {
+//             throw new BadRequestException('派单批次没有有效参与者，无法结算');
+//         }
+//
+// // ✅ 结算前必须全员已接单（只针对有效参与者）
+//         const pending = activeParticipants.filter((p: any) => !p?.acceptedAt);
+//         if (pending.length > 0) {
+//             throw new ForbiddenException('存在未接单参与者，禁止结算');
+//         }
+//
+// // ✅ 最终参与结算的人：有效且已接单
+//         const participants = activeParticipants;
+//
+//         // 幂等保护：同一 dispatch 只能生成一次 settlement
+//         const existing = await this.prisma.orderSettlement.findFirst({
+//             where: {orderId, dispatchId},
+//             select: {id: true},
+//         });
+//         if (existing) throw new BadRequestException('该派单批次已生成结算记录，禁止重复结算');
+//
+//         // 结算类型：体验/福袋 = EXPERIENCE，否则 REGULAR
+//         const settlementType = (order.project.type === 'EXPERIENCE' || order.project.type === 'LUCKY_BAG')
+//             ? 'EXPERIENCE'
+//             : 'REGULAR';
+//
+//         // ---------- 1) 计算 ratio ----------
+//         const dispatchCount = await this.prisma.orderDispatch.count({where: {orderId}});
+//
+//         let ratio: number;
+//         if (dispatchCount === 1 && mode === 'COMPLETE') {
+//             // ✅ 规则 1：单次派单 + 本次结单 = 全量结算
+//             ratio = 1;
+//         } else {
+//             // ✅ 规则 2：多次派单仍用你现有 ratio 逻辑（保底进度/结剩余等）
+//             ratio = await this.computeDispatchRatio(order, dispatch, mode);
+//         }
+//
+//         // ---------- 2) 计算本轮“可分配金额” ----------
+//         // ✅ 按你要求：直接基于订单实付金额 paidAmount（不再额外扣 cs/invite 等）
+//         const totalForThisDispatch = (order.paidAmount ?? 0) * ratio;
+//
+//         // ---------- 3) 本轮内按贡献/均分拆给每个参与者 ----------
+//         const weights = participants.map((p) => {
+//             const w = Number(p.contributionAmount ?? 0);
+//             return Number.isFinite(w) && w > 0 ? w : 0;
+//         });
+//         const weightSum = weights.reduce((a, b) => a + b, 0);
+//
+//         const baseEachList = participants.map((_, idx) => {
+//             if (weightSum > 0) return totalForThisDispatch * (weights[idx] / weightSum);
+//             return totalForThisDispatch / participants.length;
+//         });
+//
+//         // ---------- 4) 计算到手 multiplier（优先级：订单抽成 > 项目抽成 > 陪玩分红） ----------
+//         const normalizeToRatio = (v: any, fallback: number) => {
+//             const n = Number(v);
+//             if (!Number.isFinite(n)) return fallback;
+//             return n > 1 ? n / 100 : n; // 兼容 10 / 0.1 / 60 / 0.6
+//         };
+//
+//         const orderCutRaw = order.customClubRate ?? null; // 订单固定抽成（平台抽成）
+//         // 项目固定抽成优先取快照，避免项目后改影响历史
+//         const snap: any = order.projectSnapshot || {};
+//         const projectCutRaw = snap.clubRate ?? order.project?.clubRate ?? null;
+//
+//         // 陪玩分红比例来自 staffRating.rate（例如 60 表示 60%）
+//         const userIds = participants.map((p) => p.userId);
+//         const users = await this.prisma.user.findMany({
+//             where: {id: {in: userIds}},
+//             select: {id: true, staffRating: {select: {rate: true}}},
+//         });
+//         const shareMap = new Map<number, number>();
+//         for (const u of users) {
+//             shareMap.set(u.id, normalizeToRatio(u.staffRating?.rate, 1)); // 默认 100%
+//         }
+//
+//         const hasOrderCut = orderCutRaw != null && !!orderCutRaw;
+//
+//         const hasProjectCut = !hasOrderCut && projectCutRaw != null && !!projectCutRaw;
+//
+//         const orderCut = hasOrderCut ? normalizeToRatio(orderCutRaw, 0) : 0;
+//         const projectCut = hasProjectCut ? normalizeToRatio(projectCutRaw, 0) : 0;
+//
+//         await this.prisma.$transaction(async (tx) => {
+//             // 1) create settlements
+//             for (let i = 0; i < participants.length; i++) {
+//                 const p = participants[i];
+//                 const calculated = baseEachList[i];
+//
+//                 let multiplier = 1;
+//                 if (hasOrderCut) {
+//                     multiplier = Math.max(0, 1 - orderCut);
+//                 } else if (hasProjectCut) {
+//                     multiplier = Math.max(0, 1 - projectCut);
+//                 } else {
+//                     multiplier = Math.max(0, shareMap.get(p.userId) ?? 1);
+//                 }
+//
+//                 const final = Math.trunc(calculated * multiplier);
+//
+//                 await tx.orderSettlement.create({
+//                     data: {
+//                         orderId,
+//                         dispatchId,
+//                         userId: p.userId,
+//                         settlementType,
+//                         calculatedEarnings: calculated,
+//                         manualAdjustment: final - calculated,
+//                         finalEarnings: final,
+//                         clubEarnings: calculated - final,
+//                         csEarnings: null,
+//                         inviteEarnings: null,
+//                         paymentStatus: PaymentStatus.UNPAID,
+//                     },
+//                 });
+//             }
+//
+//             // 2) aggregate + update order summary
+//             const agg = await tx.orderSettlement.aggregate({
+//                 where: {orderId},
+//                 _sum: {finalEarnings: true, clubEarnings: true},
+//             });
+//
+//             await tx.order.update({
+//                 where: {id: orderId},
+//                 data: {
+//                     totalPlayerEarnings: Number(agg._sum.finalEarnings ?? 0),
+//                     clubEarnings: Number(agg._sum.clubEarnings ?? 0),
+//                 },
+//             });
+//         });
+//
+//
+//         await this.logOrderAction(order.dispatcherId, orderId, mode === 'ARCHIVE' ? 'SETTLE_ARCHIVE' : 'SETTLE_COMPLETE', {
+//             dispatchId,
+//             ratio,
+//             dispatchCount,
+//             totalForThisDispatch,
+//             rule: dispatchCount === 1 && mode === 'COMPLETE' ? 'SINGLE_COMPLETE_FULL' : 'RATIO_BY_PROGRESS',
+//             multiplierPriority: hasOrderCut ? 'ORDER_CUT' : hasProjectCut ? 'PROJECT_CUT' : 'PLAYER_SHARE',
+//         });
+//
+//         return true;
+//     }
 
 
     private async computeDispatchRatio(order: any, dispatch: any, mode: 'ARCHIVE' | 'COMPLETE'): Promise<number> {

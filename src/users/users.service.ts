@@ -6,10 +6,11 @@ import { ChangeLevelDto } from './dto/change-level.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { UserType, PlayerWorkStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { WalletService } from '../wallet/wallet.service';
 
 @Injectable()
 export class UsersService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: PrismaService, private wallet: WalletService) {}
 
   async create(createUserDto: CreateUserDto, operatorId?: number) {
     const { phone, password, userType = UserType.REGISTERED_USER, ...rest } = createUserDto;
@@ -26,15 +27,33 @@ export class UsersService {
     // 加密密码
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const user = await this.prisma.user.create({
-      data: {
-        phone,
-        password: hashedPassword,
-        userType,
-        needResetPwd: userType !== UserType.REGISTERED_USER, // 员工首次登录需要重置密码
-        ...rest,
-      },
-      include: this.getUserIncludeFields(), // 改为使用 include
+    // const user = await this.prisma.user.create({
+    //   data: {
+    //     phone,
+    //     password: hashedPassword,
+    //     userType,
+    //     needResetPwd: userType !== UserType.REGISTERED_USER, // 员工首次登录需要重置密码
+    //     ...rest,
+    //   },
+    //   include: this.getUserIncludeFields(), // 改为使用 include
+    // });
+
+    const user = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: {
+          phone,
+          password: hashedPassword,
+          userType,
+          needResetPwd: userType !== UserType.REGISTERED_USER,// 员工首次登录需要重置密码
+          ...rest,
+        },
+        include: this.getUserIncludeFields(),
+      });
+
+      // ✅ 创建钱包账户（一人一账，幂等）
+      await this.wallet.ensureWalletAccount(created.id, tx as any);
+
+      return created;
     });
 
     // 记录操作日志

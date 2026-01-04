@@ -11,6 +11,9 @@ import {PermissionModule} from './permission/permission.module';
 import {RoleModule} from './role/role.module';
 import {GameProjectModule} from './game-project/game-project.module';
 import { MetaModule } from './meta/meta.module';
+import { ScheduleModule } from '@nestjs/schedule';
+import { WalletModule } from './wallet/wallet.module';
+
 
 @Module({
     imports: [
@@ -22,6 +25,8 @@ import { MetaModule } from './meta/meta.module';
         PermissionModule,
         RoleModule,
         GameProjectModule,
+        ScheduleModule.forRoot(),
+        WalletModule,
         MetaModule
     ],
     controllers: [AppController],
