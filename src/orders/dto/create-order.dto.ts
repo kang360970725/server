@@ -5,6 +5,7 @@ import {
     IsString,
     IsDateString,
     Min,
+    IsBoolean, // ✅ 新增
 } from 'class-validator';
 
 /**
@@ -61,4 +62,14 @@ export class CreateOrderDto {
     @IsOptional()
     @IsNumber()
     customClubRate?: number; // 订单级俱乐部抽成（确认：这就是俱乐部抽成）
+
+    /**
+     * 是否赠送单：
+     * - 赠送单不收款（后端会强制把 receivableAmount/paidAmount 置 0）
+     * - 仍正常结算/分红（结单逻辑不变）
+     * - 日账单/营收统计需排除（后续我们在统计接口里做排除）
+     */
+    @IsOptional()
+    @IsBoolean()
+    isGifted?: boolean;
 }

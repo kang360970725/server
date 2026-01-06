@@ -11,6 +11,11 @@ import {MarkPaidDto} from './dto/mark-paid.dto';
 import {BillingMode, DispatchStatus, OrderStatus, PaymentStatus, PlayerWorkStatus} from '@prisma/client';
 import {WalletService} from '../wallet/wallet.service';
 
+
+/** 保留 1 位小数（用于收益金额） */
+function round1(n: number) {
+    return Math.round(n * 10) / 10;
+}
 /**
  * OrdersService v0.1
  *
@@ -65,14 +70,31 @@ export class OrdersService {
 
         const serial = await this.generateOrderSerial();
 
+        // ✅ 赠送单：不收款，但仍然要正常结算/分红
+        // - 为避免前端误传金额导致“赠送单被计入营收”，后端这里强制清零
+        const isGifted = Boolean(dto.isGifted);
+
+        // 赠送金额口径（最小改动方案）：
+        // - 赠送单 giftedAmount = paidAmount（等同“这单价值由平台承担”）
+        // - 非赠送单 giftedAmount = 0（或 null）
+        const giftedAmount = isGifted ? Number(dto.paidAmount ?? 0) : 0;
+
         const order = await this.prisma.order.create({
             data: {
                 orderQuantity: Number(dto.orderQuantity ?? 1),
                 autoSerial: serial,
-                receivableAmount: dto.receivableAmount,
-                paidAmount: dto.paidAmount,
+                // receivableAmount: dto.receivableAmount,
+                // paidAmount: dto.paidAmount,
+                // paymentTime: dto.paymentTime ? new Date(dto.paymentTime) : null,
+
+                // ✅ 赠送单强制清零金额
+                receivableAmount: isGifted ? 0 : dto.receivableAmount,
+                paidAmount: isGifted ? 0 : dto.paidAmount,
+
+                // ✅ 赠送单一般不应有付款时间（你也可以按业务改成 now）
+                paymentTime: isGifted ? null : (dto.paymentTime ? new Date(dto.paymentTime) : null),
+
                 orderTime: dto.orderTime ? new Date(dto.orderTime) : null,
-                paymentTime: dto.paymentTime ? new Date(dto.paymentTime) : null,
                 openedAt: new Date(),
                 baseAmountWan: dto.baseAmountWan ?? null,
 
@@ -90,6 +112,9 @@ export class OrdersService {
                 customClubRate: dto.customClubRate ?? null,
                 clubRate: clubRate ?? null,
 
+                // ✅ 落库赠送标识
+                isGifted,
+                giftedAmount,
                 status: OrderStatus.WAIT_ASSIGN,
             },
             include: {
@@ -961,36 +986,147 @@ export class OrdersService {
      *   3) 陪玩分红比例（到手比例）：each * 分红
      */
     private async createSettlementsForDispatch(params: { orderId: number; dispatchId: number; mode: 'ARCHIVE' | 'COMPLETE' }) {
+        const {orderId, dispatchId, mode} = params;
+        console.log('[createSettlementsForDispatch] enter', { orderId, dispatchId, mode });
+
         // ===========================
-        // v0.2 临时测试参数：冻结时间用“分钟”而不是“天”
-        // ✅ 你测试跑通后，再把分钟改回天（或抽配置）
+        // v0.2 测试参数：冻结时间用“分钟”（方便你快速验证解冻）
+        // ✅ 后续上线再改回“天”或按用户等级配置
         // ===========================
         const EXPERIENCE_UNLOCK_MINUTES = 3;
         const REGULAR_UNLOCK_MINUTES = 15;
 
         // ===========================
         // v0.2 客服分红比例（公共常量，不落库）
-        // ✅ 后续要调比例直接改这里
-        // ⚠️ 比例口径：基于订单 paidAmount，且不影响打手分摊
+        // ✅ 口径：按订单实付金额 paidAmount 计算；不影响打手分摊
         // ===========================
-        const CUSTOMER_SERVICE_SHARE_RATE = 0.01; // 这里先给 1%，你可随时调整
+        const CUSTOMER_SERVICE_SHARE_RATE = 0.01;
 
-        // 体验/福袋 = EXPERIENCE，否则 REGULAR（你现有逻辑保持）
-        const isExperience =
-            order.project.type === 'EXPERIENCE' || order.project.type === 'LUCKY_BAG';
+        const order = await this.prisma.order.findUnique({
+            where: {id: orderId},
+            include: {
+                project: true,
+            },
+        });
+        if (!order) throw new NotFoundException('订单不存在');
 
-        // 解冻时间（v0.2 临时用分钟，便于你马上测试）
-        const unlockAt = new Date(
-            Date.now() +
-            (isExperience ? EXPERIENCE_UNLOCK_MINUTES : REGULAR_UNLOCK_MINUTES) * 60 * 1000,
+        const dispatch = await this.prisma.orderDispatch.findUnique({
+            where: {id: dispatchId},
+            include: {
+                participants: true,
+            },
+        });
+        if (!dispatch) throw new NotFoundException('派单批次不存在');
+
+        const allParticipants = dispatch.participants || [];
+
+        // ✅ 只统计有效参与者：未被取消 && 未拒单
+        const activeParticipants = allParticipants.filter(
+            (p: any) => p?.isActive !== false && !p?.rejectedAt,
         );
 
+        if (activeParticipants.length === 0) {
+            throw new BadRequestException('派单批次没有有效参与者，无法结算');
+        }
+
+        // ✅ 结算前必须全员已接单（只针对有效参与者）
+        const pending = activeParticipants.filter((p: any) => !p?.acceptedAt);
+        if (pending.length > 0) {
+            throw new ForbiddenException('存在未接单参与者，禁止结算');
+        }
+
+        // ✅ 最终参与结算的人：有效且已接单
+        const participants = activeParticipants;
+
+        // 幂等保护：同一 dispatch 只能生成一次 settlement
+        const existing = await this.prisma.orderSettlement.findFirst({
+            where: {orderId, dispatchId},
+            select: {id: true},
+        });
+        if (existing) throw new BadRequestException('该派单批次已生成结算记录，禁止重复结算');
+
+        // 结算类型：体验/福袋 = EXPERIENCE，否则 REGULAR
+        const isExperience = (order.project.type === 'EXPERIENCE' || order.project.type === 'LUCKY_BAG');
+        const settlementType = isExperience ? 'EXPERIENCE' : 'REGULAR';
+
+        // 解冻时间（v0.2 测试用分钟）
+        const unlockAt = new Date(Date.now() + (isExperience ? EXPERIENCE_UNLOCK_MINUTES : REGULAR_UNLOCK_MINUTES) * 60 * 1000);
+
+        // ---------- 1) 计算 ratio ----------
+        const dispatchCount = await this.prisma.orderDispatch.count({where: {orderId}});
+
+        let ratio: number;
+
+        if (dispatchCount === 1 && mode === 'COMPLETE') {
+            // ✅ 规则 1：单次派单 + 本次结单 = 全量结算
+            ratio = 1;
+        } else {
+            // ✅ 规则 2：多次派单仍用你现有 ratio 逻辑（保底进度/结剩余等）
+            ratio = await this.computeDispatchRatio(order, dispatch, mode);
+        }
+
+        // ---------- 2) 计算本轮“可分配金额” ----------
+        // ✅ 按你要求：直接基于订单实付金额 paidAmount（不再额外扣 cs/invite 等）
+        const totalForThisDispatch = (order.paidAmount ?? 0) * ratio;
+
+        // ---------- 3) 本轮内按贡献/均分拆给每个参与者 ----------
+        const weights = participants.map((p: any) => {
+            const w = Number(p.contributionAmount ?? 0);
+            return w > 0 ? w : 0;
+        });
+
+        const hasWeight = weights.some((w) => w > 0);
+
+        let baseEachList: number[];
+
+        if (hasWeight) {
+            const sum = weights.reduce((a, b) => a + b, 0);
+            baseEachList = weights.map((w) => (sum > 0 ? (totalForThisDispatch * w) / sum : 0));
+        } else {
+            baseEachList = participants.map(() => totalForThisDispatch / participants.length);
+        }
+
+        // ---------- 4) multiplier（抽成/分红优先级） ----------
+        // normalizeToRatio：如果给的是 60，视为 60% => 0.6；如果给的是 0.6，视为 0.6
+        const normalizeToRatio = (raw: any, fallback = 1): number => {
+            if (raw == null) return fallback;
+            const n = Number(raw);
+            if (!Number.isFinite(n)) return fallback;
+            if (n <= 0) return 0;
+            if (n > 1) return n / 100;
+            return n;
+        };
+
+        // 默认俱乐部抽成：订单级优先，其次项目默认；允许为空（表示未来按评级等扩展）
+        const orderCutRaw = order.customClubRate ?? null; // 订单固定抽成（平台抽成）
+
+        // 项目固定抽成优先取快照，避免项目后改影响历史
+        const snap: any = order.projectSnapshot || {};
+        const projectCutRaw = snap.clubRate ?? order.project?.clubRate ?? null;
+
+        // 陪玩分红比例来自 staffRating.rate（例如 60 表示 60%）
+        const userIds = participants.map((p: any) => p.userId);
+        const users = await this.prisma.user.findMany({
+            where: {id: {in: userIds}},
+            select: {id: true, staffRating: {select: {rate: true}}},
+        });
+        const shareMap = new Map<number, number>();
+        for (const u of users) {
+            const rate = u.staffRating?.rate ?? null;
+            const ratio = normalizeToRatio(rate, 1);
+            shareMap.set(u.id, ratio);
+        }
+
+        const hasOrderCut = orderCutRaw != null && !!orderCutRaw;
+        const hasProjectCut = !hasOrderCut && projectCutRaw != null && !!projectCutRaw;
+
+        const orderCut = hasOrderCut ? normalizeToRatio(orderCutRaw, 0) : 0;
+        const projectCut = hasProjectCut ? normalizeToRatio(projectCutRaw, 0) : 0;
+
         await this.prisma.$transaction(async (tx) => {
-            // -------------------------
             // 1) create settlements（陪玩/打手）
-            // -------------------------
             for (let i = 0; i < participants.length; i++) {
-                const p = participants[i];
+                const p: any = participants[i];
                 const calculated = baseEachList[i];
 
                 let multiplier = 1;
@@ -1002,10 +1138,9 @@ export class OrdersService {
                     multiplier = Math.max(0, shareMap.get(p.userId) ?? 1);
                 }
 
-                // 你原逻辑：Math.trunc 直接取整（我不改）
-                const final = Math.trunc(calculated * multiplier);
+                // 你原逻辑：round1 取小数后一位
+                const final = round1(calculated * multiplier);
 
-                // ✅ 1.1 先创建结算明细（原有逻辑）
                 const settlement = await tx.orderSettlement.create({
                     data: {
                         orderId,
@@ -1022,9 +1157,10 @@ export class OrdersService {
                     },
                 });
 
-                // ✅ 1.2 再写钱包冻结收益（新增）
-                // - 幂等键：sourceType + sourceId（sourceId=settlement.id）
-                // - 金额精度：WalletService 内部 round2 保留 2 位
+                // ✅ v0.2 钱包冻结入账（测试日志，便于你确认是否真正执行）
+                console.log('[wallet-hook] created settlement', { settlementId: settlement.id, userId: p.userId, final, dispatchId, orderId });
+                console.log('[wallet-hook] before wallet.createFrozenSettlementEarning', settlement.id);
+
                 await this.wallet.createFrozenSettlementEarning(
                     {
                         userId: p.userId,
@@ -1038,64 +1174,67 @@ export class OrdersService {
                     },
                     tx as any,
                 );
+
+                console.log('[wallet-hook] after wallet.createFrozenSettlementEarning', settlement.id);
             }
 
             // -------------------------
             // 2) create settlements（派单客服）—— 不影响打手分摊
             // -------------------------
             // 规则：
-            // 1) 订单项目类型非体验单（非 EXPERIENCE / LUCKY_BAG）
-            // 2) dispatcher.userType === CUSTOMER_SERVICE
-            // 3) 金额 = order.paidAmount * CUSTOMER_SERVICE_SHARE_RATE
+            // 1) 订单项目类型不为体验单（非 EXPERIENCE / LUCKY_BAG）
+            // 2) 派单人员 userType 为客服（CUSTOMER_SERVICE）
+            // 3) 金额 = 订单实付金额 paidAmount * CUSTOMER_SERVICE_SHARE_RATE
             //
-            // ⚠️ 注意：客服收益来自平台收益池，不参与上面的 totalForThisDispatch 分摊
+            // ⚠️ 注意：客服收益来源于平台收益池，不参与上面陪玩的分摊与扣减
             if (!isExperience && order.dispatcherId) {
                 const dispatcher = await tx.user.findUnique({
-                    where: {id: order.dispatcherId},
-                    select: {id: true, userType: true},
+                    where: { id: order.dispatcherId },
+                    select: { id: true, userType: true },
                 });
 
                 if (dispatcher?.userType === 'CUSTOMER_SERVICE') {
                     const csAmountRaw = (order.paidAmount ?? 0) * CUSTOMER_SERVICE_SHARE_RATE;
-                    const csFinal = Math.trunc(csAmountRaw); // 与陪玩保持一致：取整，不引入小数
+                    const csFinal = round1(csAmountRaw); // 与陪玩保持一致：取整
 
-                    // ✅ 2.1 生成客服结算明细
-                    const csSettlement = await tx.orderSettlement.create({
-                        data: {
-                            orderId,
-                            dispatchId,
-                            userId: dispatcher.id,
-                            settlementType,
-                            calculatedEarnings: csAmountRaw,
-                            manualAdjustment: csFinal - csAmountRaw,
-                            finalEarnings: csFinal,
-                            clubEarnings: 0,
-                            csEarnings: csFinal, // 仅作展示/对账用途
-                            inviteEarnings: null,
-                            paymentStatus: PaymentStatus.UNPAID,
-                        },
-                    });
+                    // 为 0 则不生成记录，避免无意义流水
+                    if (csFinal > 0) {
+                        const csSettlement = await tx.orderSettlement.create({
+                            data: {
+                                orderId,
+                                dispatchId,
+                                userId: dispatcher.id,
+                                settlementType,
+                                calculatedEarnings: csAmountRaw,
+                                manualAdjustment: csFinal - csAmountRaw,
+                                finalEarnings: csFinal,
+                                clubEarnings: 0,
+                                csEarnings: csFinal,
+                                inviteEarnings: null,
+                                paymentStatus: PaymentStatus.UNPAID,
+                            },
+                        });
 
-                    // ✅ 2.2 写钱包冻结收益（客服）
-                    await this.wallet.createFrozenSettlementEarning(
-                        {
-                            userId: dispatcher.id,
-                            amount: csFinal,
-                            unlockAt,
-                            sourceType: 'ORDER_SETTLEMENT',
-                            sourceId: csSettlement.id,
-                            orderId,
-                            dispatchId,
-                            settlementId: csSettlement.id,
-                        },
-                        tx as any,
-                    );
+                        console.log('[wallet-hook] created CS settlement', { settlementId: csSettlement.id, userId: dispatcher.id, csFinal, dispatchId, orderId });
+
+                        await this.wallet.createFrozenSettlementEarning(
+                            {
+                                userId: dispatcher.id,
+                                amount: csFinal,
+                                unlockAt,
+                                sourceType: 'ORDER_SETTLEMENT',
+                                sourceId: csSettlement.id,
+                                orderId,
+                                dispatchId,
+                                settlementId: csSettlement.id,
+                            },
+                            tx as any,
+                        );
+                    }
                 }
             }
 
-            // -------------------------
             // 3) aggregate + update order summary（原有逻辑保持）
-            // -------------------------
             const agg = await tx.orderSettlement.aggregate({
                 where: {orderId},
                 _sum: {finalEarnings: true, clubEarnings: true},
@@ -1109,7 +1248,19 @@ export class OrdersService {
                 },
             });
         });
+
+        await this.logOrderAction(order.dispatcherId, orderId, mode === 'ARCHIVE' ? 'SETTLE_ARCHIVE' : 'SETTLE_COMPLETE', {
+            dispatchId,
+            ratio,
+            dispatchCount,
+            totalForThisDispatch,
+            rule: dispatchCount === 1 && mode === 'COMPLETE' ? 'SINGLE_COMPLETE_FULL' : 'RATIO_BY_PROGRESS',
+            multiplierPriority: hasOrderCut ? 'ORDER_CUT' : hasProjectCut ? 'PROJECT_CUT' : 'PLAYER_SHARE',
+        });
+
+        return true;
     }
+
 
 //     private async createSettlementsForDispatch(params: { orderId: number; dispatchId: number; mode: 'ARCHIVE' | 'COMPLETE' }) {
 //         const {orderId, dispatchId, mode} = params;
@@ -2000,9 +2151,10 @@ export class OrdersService {
                         totalPlayerEarnings: 0,
                     },
                 });
+                // ✅ 4) 钱包冲正
+                await this.wallet.reverseOrderSettlementEarnings({ orderId }, tx);
             }
         });
-
         await this.logOrderAction(operatorId, orderId, 'REFUND_ORDER', {
             remark: remark ?? null,
             clearedSettlements: (order.settlements?.length ?? 0) > 0,
@@ -2085,73 +2237,66 @@ export class OrdersService {
 
         const now = new Date();
 
-        // ✅ 按服务器时区计算（你如果要强制按北京时间，后面我可以给你加 tz 处理）
+        // ✅ 仍按服务器本地时区切分（后续要统一北京时间再集中处理）
         const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
         const endToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
 
         const startMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
         const endMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
 
-        // 统一一个 where：只统计 存单(ARCHIVED) + 结单(COMPLETED)
-        const dispatchWhereToday: any = {
-            // participants: { some: { userId } },
-            participants: {some: {userId, acceptedAt: {not: null}, rejectedAt: null}},
-            OR: [
-                {status: DispatchStatus.ARCHIVED, archivedAt: {gte: startToday, lte: endToday}},
-                {status: DispatchStatus.COMPLETED, completedAt: {gte: startToday, lte: endToday}},
-            ],
+        // ✅ 钱包收益流水口径：只统计“结算收益入账”，并排除已冲正（退款）流水
+        // - 这样 Workbench 与钱包列表、解冻统计一致
+        const baseWhere: any = {
+            userId,
+            direction: 'IN',
+            bizType: 'SETTLEMENT_EARNING',
+            status: { not: 'REVERSED' },
+            // 可选：确保有 dispatchId（正常都会有）
+            dispatchId: { not: null },
         };
 
-        const dispatchWhereMonth: any = {
-            // participants: { some: { userId } },
-            participants: {some: {userId, acceptedAt: {not: null}, rejectedAt: null}},
-            OR: [
-                {status: DispatchStatus.ARCHIVED, archivedAt: {gte: startMonth, lte: endMonth}},
-                {status: DispatchStatus.COMPLETED, completedAt: {gte: startMonth, lte: endMonth}},
-            ],
+        const whereToday = {
+            ...baseWhere,
+            createdAt: { gte: startToday, lte: endToday },
         };
 
-        // ✅ 今日/月 接单数（只统计结单/存单）
-        const [todayCount, monthCount] = await Promise.all([
-            this.prisma.orderDispatch.count({where: dispatchWhereToday}),
-            this.prisma.orderDispatch.count({where: dispatchWhereMonth}),
+        const whereMonth = {
+            ...baseWhere,
+            createdAt: { gte: startMonth, lte: endMonth },
+        };
+
+        // ✅ 今日/月 接单数：按 dispatchId 去重计数
+        // Prisma 的 count 不支持 distinct 字段计数时，这里用 findMany + distinct 再 length（数据量小，性能OK）
+        const [todayDispatches, monthDispatches] = await Promise.all([
+            this.prisma.walletTransaction.findMany({
+                where: whereToday,
+                select: { dispatchId: true },
+                distinct: ['dispatchId'],
+            }),
+            this.prisma.walletTransaction.findMany({
+                where: whereMonth,
+                select: { dispatchId: true },
+                distinct: ['dispatchId'],
+            }),
         ]);
 
-        // ✅ 今日/月 收入：对我的 settlement.finalEarnings 求和
-        // 说明：我们用 settlement -> dispatch(ARCHIVED/COMPLETED) 的时间范围来做口径一致的过滤
-        const incomeWhereToday: any = {
-            userId,
-            dispatch: {
-                OR: [
-                    {status: DispatchStatus.ARCHIVED, archivedAt: {gte: startToday, lte: endToday}},
-                    {status: DispatchStatus.COMPLETED, completedAt: {gte: startToday, lte: endToday}},
-                ],
-            },
-        };
+        const todayCount = todayDispatches.length;
+        const monthCount = monthDispatches.length;
 
-        const incomeWhereMonth: any = {
-            userId,
-            dispatch: {
-                OR: [
-                    {status: DispatchStatus.ARCHIVED, archivedAt: {gte: startMonth, lte: endMonth}},
-                    {status: DispatchStatus.COMPLETED, completedAt: {gte: startMonth, lte: endMonth}},
-                ],
-            },
-        };
-
+        // ✅ 今日/月 收益：sum(amount)
         const [todayIncomeAgg, monthIncomeAgg] = await Promise.all([
-            this.prisma.orderSettlement.aggregate({
-                where: incomeWhereToday,
-                _sum: {finalEarnings: true},
+            this.prisma.walletTransaction.aggregate({
+                where: whereToday,
+                _sum: { amount: true },
             }),
-            this.prisma.orderSettlement.aggregate({
-                where: incomeWhereMonth,
-                _sum: {finalEarnings: true},
+            this.prisma.walletTransaction.aggregate({
+                where: whereMonth,
+                _sum: { amount: true },
             }),
         ]);
 
-        const todayIncome = Number(todayIncomeAgg?._sum?.finalEarnings ?? 0);
-        const monthIncome = Number(monthIncomeAgg?._sum?.finalEarnings ?? 0);
+        const todayIncome = Number(todayIncomeAgg?._sum?.amount ?? 0);
+        const monthIncome = Number(monthIncomeAgg?._sum?.amount ?? 0);
 
         return {
             todayCount,

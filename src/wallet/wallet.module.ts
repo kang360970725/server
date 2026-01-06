@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import { WalletService } from './wallet.service';
 import { WalletScheduler } from './wallet.scheduler';
+import {WalletController} from "./wallet.controller";
 
 /**
  * WalletModule（V0.1）
@@ -12,6 +13,7 @@ import { WalletScheduler } from './wallet.scheduler';
  * 这里沿用现有习惯，避免大范围重构。
  */
 @Module({
+    controllers: [WalletController],
     providers: [WalletService, WalletScheduler,PrismaService],
     exports: [WalletService],
 })

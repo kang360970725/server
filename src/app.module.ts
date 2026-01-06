@@ -13,6 +13,7 @@ import {GameProjectModule} from './game-project/game-project.module';
 import { MetaModule } from './meta/meta.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { WalletModule } from './wallet/wallet.module';
+import {DashboardModule} from "./dashboard/dashboard.module";
 
 
 @Module({
@@ -27,6 +28,7 @@ import { WalletModule } from './wallet/wallet.module';
         GameProjectModule,
         ScheduleModule.forRoot(),
         WalletModule,
+        DashboardModule,
         MetaModule
     ],
     controllers: [AppController],

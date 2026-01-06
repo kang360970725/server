@@ -383,6 +383,11 @@ model Order {
   /// ⚠️ 日账单/营收统计需排除 isGifted=true 的订单
   isGifted   Boolean         @default(false)
 
+  /// 赠送金额（用于统计活动成本/赠送成本）
+    /// - 前端不传
+    /// - 后端创建订单时：isGifted=true => giftedAmount = paidAmount（或订单价值口径）
+    giftedAmount Decimal?  @db.Decimal(10, 2)
+
   /// 结算明细：结单时落库（按订单+陪玩维度）
   settlements OrderSettlement[]
 
@@ -570,6 +575,8 @@ model SettlementBatch {
 model WalletAccount {
   id Int @id @default(autoincrement())
 
+/// 钱包UID：展示级唯一号（大写字母+数字混合），兼容老数据先允许为空
+  walletUid String? @unique @db.VarChar(20)
   /// 一人一账
   userId Int  @unique
   user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
