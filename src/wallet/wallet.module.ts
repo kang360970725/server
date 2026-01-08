@@ -3,6 +3,8 @@ import { PrismaService } from '../prisma.service';
 import { WalletService } from './wallet.service';
 import { WalletScheduler } from './wallet.scheduler';
 import {WalletController} from "./wallet.controller";
+import {WalletWithdrawalsController} from "./wallet-withdrawals.controller";
+import {WalletWithdrawalsService} from "./wallet-withdrawals.service";
 
 /**
  * WalletModule（V0.1）
@@ -13,8 +15,11 @@ import {WalletController} from "./wallet.controller";
  * 这里沿用现有习惯，避免大范围重构。
  */
 @Module({
-    controllers: [WalletController],
-    providers: [WalletService, WalletScheduler,PrismaService],
-    exports: [WalletService],
+    controllers: [
+        WalletController,
+        WalletWithdrawalsController, // ✅ 新增
+    ],
+    providers: [WalletService,WalletWithdrawalsService, WalletScheduler,PrismaService],
+    exports: [WalletService, WalletWithdrawalsService],
 })
 export class WalletModule {}

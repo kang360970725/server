@@ -134,6 +134,9 @@ model User {
   walletTransactions WalletTransaction[]
   walletHolds        WalletHold[]
 
+  /// ✅ 提现申请记录（反向关系）
+  walletWithdrawalRequests WalletWithdrawalRequest[]
+
   // 索引：用于客服派单快速筛选空闲打手
   @@index([workStatus])
   @@index([rating], map: "users_rating_fkey")
@@ -249,6 +252,10 @@ enum DispatchStatus {
   WAIT_ASSIGN // 待派单：可增减陪玩（应用层限制）
   WAIT_ACCEPT // 待接单：已指派陪玩，等待陪玩接单
   ACCEPTED // 已接单：全员接单完成（acceptedAllAt 写入）
+  /// ✅ 并发互斥用：结算处理中（结单/存单都会先抢占到这个状态）
+  /// - 作用：避免“一个点结单、一个点存单”同时跑结算链路
+  /// - 约束：只能从 ACCEPTED -> SETTLING；最终落到 ARCHIVED 或 COMPLETED
+  SETTLING
   ARCHIVED // 已存单：陪玩存单（写入 archivedAt）
   COMPLETED // 已结单：陪玩结单（写入 completedAt，并触发自动结算落库）
 }
@@ -289,6 +296,29 @@ enum WalletBizType {
   SETTLEMENT_EARNING // 结算收益入账（先冻结）
   RELEASE_FROZEN // 解冻：frozen -> available（内部划转）
   REFUND_REVERSAL // 退款冲正：对冲收益（负向）
+  /// ✅ 提现：申请时的资金预扣（available -> frozen）
+  WITHDRAW_RESERVE
+
+  /// ✅ 提现：审批拒绝/取消时的退回（frozen -> available）
+  WITHDRAW_RELEASE
+
+  /// ✅ 提现：实际出款成功（冻结资金真正扣除）
+  WITHDRAW_PAYOUT
+}
+
+enum WithdrawalStatus {
+  PENDING_REVIEW // 待审核
+  APPROVED // 已审核通过（进入打款流程）
+  REJECTED // 已驳回（资金已退回可用）
+  PAYING // 打款中（已提交到微信/三方）
+  PAID // 已打款成功
+  FAILED // 打款失败（允许重试）
+  CANCELED // 用户取消（如你后续要开放）
+}
+
+enum WithdrawalChannel {
+  WECHAT // 预留：微信自动打款
+  MANUAL // 先人工线下打款（本期可用）
 }
 
 /// 钱包流水状态
@@ -384,9 +414,9 @@ model Order {
   isGifted   Boolean         @default(false)
 
   /// 赠送金额（用于统计活动成本/赠送成本）
-    /// - 前端不传
-    /// - 后端创建订单时：isGifted=true => giftedAmount = paidAmount（或订单价值口径）
-    giftedAmount Decimal?  @db.Decimal(10, 2)
+  /// - 前端不传
+  /// - 后端创建订单时：isGifted=true => giftedAmount = paidAmount（或订单价值口径）
+  giftedAmount Decimal? @db.Decimal(10, 2)
 
   /// 结算明细：结单时落库（按订单+陪玩维度）
   settlements OrderSettlement[]
@@ -511,7 +541,12 @@ model OrderSettlement {
   /// - EXPERIENCE：体验/福袋（每 3 天批次结算）
   /// - REGULAR：正价（按月批次结算）
   /// v0.1 先用 String，后期可改 enum（避免迁移频繁）
-  settlementType String
+  settlementType    String
+  /// ✅ 本次结算批次号（一次结单/存单会生成 1 个批次号）
+  /// - 用途1：追溯/审计（将来查“这次结算跑了哪些流水”）
+  /// - 用途2：给外部系统/对账/异步任务（比如微信打款）做关联
+  /// - 注意：真正的“防重复”靠下面的 uniq 约束；batchId 是增强追踪能力
+  settlementBatchId String @db.VarChar(36)
 
   /// 计算结果（结单时自动生成）
   calculatedEarnings Float
@@ -536,10 +571,15 @@ model OrderSettlement {
   adjustedAt   DateTime?
   adjustRemark String?
 
+  /// ✅ 数据库兜底：同一 dispatch + 同一用户 + 同一 settlementType 只能有一条
+  /// - 这是防止并发重复结算的“最后一道门”
+  /// - 结单/存单都走结算，所以这个 uniq 至关重要
+  @@unique([dispatchId, userId, settlementType], map: "uniq_settlement_dispatch_user_type")
   @@index([orderId])
   @@index([dispatchId])
   @@index([userId])
   @@index([paymentStatus])
+  @@index([settlementBatchId])
 }
 
 //新增模型：SettlementBatch（批次结算）
@@ -575,11 +615,11 @@ model SettlementBatch {
 model WalletAccount {
   id Int @id @default(autoincrement())
 
-/// 钱包UID：展示级唯一号（大写字母+数字混合），兼容老数据先允许为空
+  /// 钱包UID：展示级唯一号（大写字母+数字混合），兼容老数据先允许为空
   walletUid String? @unique @db.VarChar(20)
   /// 一人一账
-  userId Int  @unique
-  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int     @unique
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   /// 可用余额（可提现/可抵扣）
   availableBalance Float @default(0)
@@ -628,6 +668,12 @@ model WalletTransaction {
   /// 对应冻结单（只有收益入账流水才会有）
   hold      WalletHold? @relation("WalletEarningHold")
 
+  /// ✅ 反向：该流水是否作为“提现预扣流水”被某个申请单引用
+  withdrawalReserveRequest WalletWithdrawalRequest? @relation("WithdrawalReserveTx")
+
+  /// ✅ 反向：该流水是否作为“提现出款流水”被某个申请单引用
+  withdrawalPayoutRequest WalletWithdrawalRequest? @relation("WithdrawalPayoutTx")
+
   /// 幂等关键：同一来源只能产生一条“结算收益流水”
   @@unique([sourceType, sourceId], map: "uniq_wallet_tx_source")
   @@index([userId, createdAt])
@@ -659,4 +705,61 @@ model WalletHold {
 
   @@index([status, unlockAt])
   @@map("wallet_holds")
+}
+
+model WalletWithdrawalRequest {
+  id Int @id @default(autoincrement())
+
+  /// 申请人
+  userId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// 申请金额（始终为正数）
+  amount Float
+
+  status  WithdrawalStatus  @default(PENDING_REVIEW)
+  channel WithdrawalChannel @default(MANUAL)
+
+  /// ✅ 幂等键：前端/客户端生成（推荐 uuid），用于防重复提交
+  /// - 同一个 userId + idempotencyKey 只能申请一次
+  idempotencyKey String @db.VarChar(64)
+
+  /// ✅ 业务单号：服务端生成（可用于展示/对账/三方回调关联）
+  requestNo String @unique @db.VarChar(32)
+
+  /// 申请备注（可选）
+  remark String?
+
+  /// 审批信息
+  reviewedBy   Int?
+  reviewedAt   DateTime?
+  reviewRemark String?
+
+  /// ✅ 关键：关联“预扣流水”（申请时产生）
+  reserveTxId Int               @unique
+  /// ✅ 申请时预扣冻结流水（available -> frozen）
+  reserveTx   WalletTransaction @relation("WithdrawalReserveTx", fields: [reserveTxId], references: [id], onDelete: Restrict)
+
+  /// ✅ 关键：关联“出款流水”（打款成功时产生，可空）
+  payoutTxId Int?               @unique
+  /// ✅ 实际出款流水（冻结资金真正扣除，打款成功后写入）
+  payoutTx   WalletTransaction? @relation("WithdrawalPayoutTx", fields: [payoutTxId], references: [id], onDelete: SetNull)
+
+  /// ---------- 为微信自动打款预留 ----------
+  /// 外部打款单号（你系统生成，发给微信用）
+  outTradeNo     String? @db.VarChar(64)
+  /// 微信/三方返回的交易号
+  channelTradeNo String? @db.VarChar(64)
+  /// 三方回调原始内容（可存 JSON 字符串）
+  callbackRaw    String? @db.Text
+  /// 最近一次打款错误原因
+  failReason     String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, idempotencyKey], map: "uniq_withdraw_user_idempotency")
+  @@index([userId, status, createdAt])
+  @@index([status, createdAt])
+  @@map("wallet_withdrawal_requests")
 }
