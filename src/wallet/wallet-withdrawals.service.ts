@@ -5,10 +5,10 @@ import { PrismaService } from '../prisma.service';
  * 提现服务（Wallet 子能力）
  *
  * 核心规则：
- * 1. 只能提现已解冻 availableBalance
- * 2. 申请即预扣（available -> frozen），防止并发重复申请
- * 3. 提现必须审批
- * 4. 为后续微信自动打款预留完整状态与字段
+ * 1) 只能提现已解冻 availableBalance
+ * 2) 申请即预扣（available -> frozen），防止并发重复申请
+ * 3) 提现必须审批
+ * 4) 为后续微信自动打款预留完整状态与字段
  */
 @Injectable()
 export class WalletWithdrawalsService {
@@ -31,10 +31,10 @@ export class WalletWithdrawalsService {
      * ✅ 提现申请
      *
      * 流程：
-     * 1. 校验可用余额
-     * 2. 预扣资金（available -> frozen）
-     * 3. 写冻结流水（WITHDRAW_RESERVE）
-     * 4. 创建提现申请单（PENDING_REVIEW）
+     * 1) 校验可用余额
+     * 2) 预扣资金（available -> frozen）
+     * 3) 写冻结流水（WITHDRAW_RESERVE）
+     * 4) 创建提现申请单（PENDING_REVIEW）
      *
      * 幂等：
      * - 前端必须传 idempotencyKey
@@ -57,7 +57,6 @@ export class WalletWithdrawalsService {
             // 1️⃣ 校验钱包
             const account = await tx.walletAccount.findUnique({ where: { userId } });
             if (!account) throw new Error('钱包账户不存在');
-
             if (account.availableBalance < amount) {
                 throw new Error('可用余额不足（仅可提现已解冻余额）');
             }
@@ -103,9 +102,7 @@ export class WalletWithdrawalsService {
             // 5️⃣ 回填 sourceId，形成稳定业务锚点
             await tx.walletTransaction.update({
                 where: { id: reserveTx.id },
-                data: {
-                    sourceId: request.id,
-                },
+                data: { sourceId: request.id },
             });
 
             return request;
@@ -136,12 +133,11 @@ export class WalletWithdrawalsService {
                 where: { id: requestId },
             });
             if (!req) throw new Error('提现申请不存在');
-
             if (req.status !== 'PENDING_REVIEW') {
                 throw new Error('该提现申请不在待审核状态');
             }
 
-            // ✅ 审批通过
+            // ✅ 审批通过：仅改状态（资金继续冻结，等待后续打款成功再真正扣除）
             if (approve) {
                 return tx.walletWithdrawalRequest.update({
                     where: { id: requestId },
@@ -163,6 +159,7 @@ export class WalletWithdrawalsService {
                 },
             });
 
+            // 写退回流水（WITHDRAW_RELEASE）
             await tx.walletTransaction.create({
                 data: {
                     userId: req.userId,
@@ -201,5 +198,65 @@ export class WalletWithdrawalsService {
             where: { status: 'PENDING_REVIEW' },
             orderBy: { id: 'asc' },
         });
+    }
+
+    /**
+     * ✅ 管理端：全量记录（分页 + 筛选）
+     * - 用于 admin 的“全部记录 + 状态筛选 + 打款结果字段展示”
+     */
+    async listAll(params: {
+        page: number;
+        pageSize: number;
+        status?: string;
+        channel?: string;
+        userId?: number;
+        requestNo?: string;
+        createdAtFrom?: string;
+        createdAtTo?: string;
+    }) {
+        const {
+            page = 1,
+            pageSize = 20,
+            status,
+            channel,
+            userId,
+            requestNo,
+            createdAtFrom,
+            createdAtTo,
+        } = params || ({} as any);
+
+        const take = Math.max(1, Math.min(Number(pageSize) || 20, 200)); // ✅ 单次最多 200，避免拖库
+        const skip = (Math.max(1, Number(page) || 1) - 1) * take;
+
+        // ✅ 组合 where 条件（全部可选）
+        const where: any = {};
+
+        if (status) where.status = status;
+        if (channel) where.channel = channel;
+        if (userId) where.userId = Number(userId);
+
+        // ✅ requestNo 支持模糊（包含）
+        if (requestNo && String(requestNo).trim()) {
+            where.requestNo = { contains: String(requestNo).trim() };
+        }
+
+        // ✅ 时间范围过滤（createdAt）
+        if (createdAtFrom || createdAtTo) {
+            where.createdAt = {};
+            if (createdAtFrom) where.createdAt.gte = new Date(createdAtFrom);
+            if (createdAtTo) where.createdAt.lte = new Date(createdAtTo);
+        }
+
+        const [total, list] = await this.prisma.$transaction([
+            this.prisma.walletWithdrawalRequest.count({ where }),
+            this.prisma.walletWithdrawalRequest.findMany({
+                where,
+                orderBy: { id: 'desc' }, // ✅ 最新在前
+                skip,
+                take,
+            }),
+        ]);
+
+        return { total, list, page: Math.max(1, Number(page) || 1), pageSize: take };
     }
 }
