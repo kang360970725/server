@@ -1,95 +1,83 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
 import { WalletWithdrawalsService } from './wallet-withdrawals.service';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 
-/**
- * 提现接口（挂在 wallet 模块下）
- *
- * ⚠️ 你需要按项目现有方式自行加：
- * - JWT 鉴权
- * - 角色/权限控制（打手 / 客服 / 财务）
- */
+// 按你项目实际路径替换
+import { PermissionsGuard } from '../auth/guards/permissions.guard';
+import { Permissions } from '../auth/decorators/permissions.decorator';
+
+const WITHDRAWALS_PAGE = 'wallet:withdrawals:page';
+
 @Controller('wallet/withdrawals')
+@UseGuards(JwtAuthGuard) // ✅ 统一要求登录
 export class WalletWithdrawalsController {
     constructor(private readonly service: WalletWithdrawalsService) {}
 
-    /**
-     * 打手：申请提现
-     * POST /wallet/withdrawals/apply
-     */
+    // ✅ 打手：申请提现（仅登录）
     @Post('apply')
     async apply(
+        @Req() req: any,
         @Body()
             body: {
-            userId: number;
             amount: number;
             idempotencyKey: string;
             remark?: string;
             channel?: 'MANUAL' | 'WECHAT';
         },
     ) {
-        return this.service.applyWithdrawal(body);
+        const userId = req.user?.userId; // 以你 jwt 注入结构为准
+        return this.service.applyWithdrawal({ ...body, userId });
     }
 
-    /**
-     * 打手：我的提现记录
-     * GET /wallet/withdrawals/mine
-     *
-     * ⚠️ 注意：GET 带 Body 并不标准，但你现有实现就是这样（先不大改）
-     * 你后续可以改成 query 参数：mine?userId=xxx
-     */
+    // ✅ 打手：我的提现记录（仅登录）
     @Get('mine')
-    async mine(@Body() body: { userId: number }) {
-        return this.service.listMine(body.userId);
+    async mine(@Req() req: any) {
+        const userId = req.user?.userId;
+        return this.service.listMine(userId);
     }
 
-    /**
-     * 管理端：待审核列表
-     * GET /wallet/withdrawals/pending
-     */
+    // ✅ 管理端：待审核列表（登录 + 权限）
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE)
     @Get('pending')
     async pending() {
         return this.service.listPending();
     }
 
-    /**
-     * ✅ 管理端：全量记录（分页 + 筛选 + 打款字段展示用）
-     * POST /wallet/withdrawals/list
-     *
-     * 说明：
-     * - 用 POST 是为了便于扩展筛选条件（时间范围/模糊搜索等）
-     * - 管理端页面将用它做“全部记录 + 状态筛选 + 打款结果字段展示”
-     */
+    // ✅ 管理端：全量记录（登录 + 权限）
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE)
     @Post('list')
     async list(
         @Body()
             body: {
             page: number;
             pageSize: number;
-            status?: string; // WithdrawalStatus，可选
-            channel?: string; // WithdrawalChannel，可选
-            userId?: number; // 可选：按用户筛
-            requestNo?: string; // 可选：按单号模糊
-            createdAtFrom?: string; // 可选：开始时间（ISO 字符串）
-            createdAtTo?: string; // 可选：结束时间（ISO 字符串）
+            status?: string;
+            channel?: string;
+            userId?: number;
+            requestNo?: string;
+            createdAtFrom?: string;
+            createdAtTo?: string;
         },
     ) {
         return this.service.listAll(body);
     }
 
-    /**
-     * 管理端：审批提现
-     * POST /wallet/withdrawals/review
-     */
+    // ✅ 管理端：审批提现（登录 + 权限）
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE)
     @Post('review')
     async review(
+        @Req() req: any,
         @Body()
             body: {
             requestId: number;
-            reviewerId: number;
             approve: boolean;
             reviewRemark?: string;
         },
     ) {
-        return this.service.reviewWithdrawal(body);
+        const reviewerId = req.user?.userId;
+        return this.service.reviewWithdrawal({ ...body, reviewerId });
     }
 }
