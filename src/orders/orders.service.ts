@@ -1004,8 +1004,10 @@ export class OrdersService {
         // v0.2 测试参数：冻结时间用“分钟”
         // ✅ 后续上线再改回“天 / 按等级配置”
         // ===========================
-        const EXPERIENCE_UNLOCK_MINUTES = 3;
-        const REGULAR_UNLOCK_MINUTES = 15;
+        // const EXPERIENCE_UNLOCK_MINUTES = 3 * 24 * 60;
+        // const REGULAR_UNLOCK_MINUTES = 7 * 24 * 60;
+        const EXPERIENCE_UNLOCK_MINUTES = 5;
+        const REGULAR_UNLOCK_MINUTES = 30;
 
         // ===========================
         // 客服分红比例（不落库，纯规则）
