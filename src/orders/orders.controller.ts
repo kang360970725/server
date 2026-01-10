@@ -99,7 +99,7 @@ export class OrdersController {
     /** 存单（管理端） */
     @Post('dispatch/archive')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:list:page')
+    @Permissions('orders:detail:page')
     async archive(@Body() body: any, @Request() req: any) {
         const dispatchId = Number(body.dispatchId);
         if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
@@ -109,7 +109,7 @@ export class OrdersController {
     /** 结单（管理端） */
     @Post('dispatch/complete')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:list:page')
+    @Permissions('orders:detail:page')
     async complete(@Body() body: any, @Request() req: any) {
         const dispatchId = Number(body.dispatchId);
         if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
