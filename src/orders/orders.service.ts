@@ -87,7 +87,7 @@ export class OrdersService {
                 receivableAmount: isGifted ? 0 : dto.receivableAmount,
                 paidAmount: isGifted ? 0 : dto.paidAmount,
 
-                // ✅ 赠送单一般不应有付款时间（你也可以按业务改成 now）
+                // ✅ 赠送单一般不应有付款时间（也可以按业务改成 now）
                 paymentTime: isGifted ? null : (dto.paymentTime ? new Date(dto.paymentTime) : null),
 
                 orderTime: dto.orderTime ? new Date(dto.orderTime) : null,
@@ -131,7 +131,7 @@ export class OrdersService {
             : [];
 
         if (playerIds.length > 0) {
-            // 复用你现有派单逻辑（包含防重复、参与者写入、日志等）
+            // 复用现有派单逻辑（包含防重复、参与者写入、日志等）
             await this.assignDispatch(order.id, playerIds, dispatcherId, 'AUTO_CREATE');
             // 派单后返回完整详情（带 currentDispatch/participants）
             return this.getOrderDetail(order.id);
@@ -271,7 +271,7 @@ export class OrdersService {
                     },
                 },
 
-                // ✅ 结算明细（可选：如果你详情页要展示）
+                // ✅ 结算明细（可选：如果详情页要展示）
                 settlements: {
                     include: {
                         user: {select: {id: true, name: true, phone: true}},
@@ -305,7 +305,7 @@ export class OrdersService {
         });
         if (!order) throw new NotFoundException('订单不存在');
 
-        // 若已退款等终态，可禁用派单（你后续可按业务扩展）
+        // 若已退款等终态，可禁用派单（后续可按业务扩展）
         if (order.status === OrderStatus.REFUNDED) {
             throw new ForbiddenException('已退款订单不可派单');
         }
@@ -430,7 +430,7 @@ export class OrdersService {
         this.ensureDispatchStatus(dispatch, [DispatchStatus.WAIT_ACCEPT, DispatchStatus.ACCEPTED], '当前状态不可接单');
 
         const participant = dispatch.participants.find((p) => p.userId === userId);
-        if (!participant) throw new ForbiddenException('你不是该订单的参与者');
+        if (!participant) throw new ForbiddenException('不是该订单的参与者');
 
         if (participant.acceptedAt) {
             // 幂等：已接单直接返回
@@ -507,7 +507,7 @@ export class OrdersService {
         }
 
         const participant = dispatch.participants.find((p: any) => Number(p.userId) === userId && p.isActive !== false);
-        if (!participant) throw new ForbiddenException('你不在本轮派单参与者中');
+        if (!participant) throw new ForbiddenException('不在本轮派单参与者中');
         if (participant.acceptedAt) throw new ForbiddenException('已接单，不能拒单');
         if (participant.rejectedAt) throw new ForbiddenException('已拒单，无需重复操作');
 
@@ -763,8 +763,8 @@ export class OrdersService {
                     data: { isActive: false },
                 });
 
-                // ✅ 9) 订单状态更新（你要求第9步在文件里，我这里给出稳定默认：结单 => COMPLETED）
-                // ⚠️ 如果你原逻辑是“当所有 dispatch 完成才 completed”，把你原逻辑粘回来，但必须用 tx。
+                // ✅ 9) 订单状态更新（要求第9步在文件里，我这里给出稳定默认：结单 => COMPLETED）
+                // ⚠️ 如果原逻辑是“当所有 dispatch 完成才 completed”，把原逻辑粘回来，但必须用 tx。
                 await tx.order.update({
                     where: { id: dispatch.orderId },
                     data: { status: OrderStatus.COMPLETED },
@@ -815,8 +815,8 @@ export class OrdersService {
             map.set(p.userId, p.progressBaseWan ?? null);
         }
 
-        // ✅ participants 通常最多 2 人，你逐条 update 其实非常快
-        // 若你未来支持更多人，也可以考虑批量 update（需要 CASE WHEN 写法，不建议 Prisma 做）
+        // ✅ participants 通常最多 2 人，逐条 update 其实非常快
+        // 若未来支持更多人，也可以考虑批量 update（需要 CASE WHEN 写法，不建议 Prisma 做）
         for (const part of dispatch.participants) {
             if (map.has(part.userId)) {
                 await tx.orderParticipant.update({
@@ -897,7 +897,7 @@ export class OrdersService {
     }
 
     /**
-     * 分钟 -> 计费小时（你的规则）
+     * 分钟 -> 计费小时（的规则）
      * - 整数小时正常计
      * - 余分钟：<15=0, 15~45=0.5, >45=1
      * - totalMinutes < 15 => 0
@@ -920,7 +920,7 @@ export class OrdersService {
     /**
      * 生成结算明细（核心）
      *
-     * 结算口径（按你最新规则）：
+     * 结算口径（按最新规则）：
      * - 单次派单 + 本次为结单：直接按订单实付金额 paidAmount 结算全量
      * - 多次派单：使用 computeDispatchRatio（保底进度/结单结剩余等）计算本轮 ratio
      * - 分配方式：优先按 participant.contributionAmount 权重；否则均分
@@ -946,256 +946,40 @@ export class OrdersService {
      *
      * 4) ✅ settlement + 钱包冻结必须在同一个 tx 中
      */
-    // async createSettlementsForDispatch(
-    //     params: {
-    //         orderId: number;
-    //         dispatchId: number;
-    //         mode: 'ARCHIVE' | 'COMPLETE';
-    //         settlementBatchId: string; // ✅ 结算批次号
-    //     },
-    //     tx: any, // ✅ 外层事务
-    // ) {
-    //     const { orderId, dispatchId, mode, settlementBatchId } = params;
-    //
-    //     // ===========================
-    //     // v0.2 测试参数：冻结时间用“分钟”
-    //     // ✅ 后续上线再改回“天 / 按等级配置”
-    //     // ===========================
-    //     // const EXPERIENCE_UNLOCK_MINUTES = 3 * 24 * 60;
-    //     // const REGULAR_UNLOCK_MINUTES = 7 * 24 * 60;
-    //     const EXPERIENCE_UNLOCK_MINUTES = 5;
-    //     const REGULAR_UNLOCK_MINUTES = 30;
-    //
-    //     // ===========================
-    //     // 客服分红比例（不落库，纯规则）
-    //     // ===========================
-    //     const CUSTOMER_SERVICE_SHARE_RATE = 0.01;
-    //
-    //     // 1️⃣ 读取订单 & 派单（必须用 tx）
-    //     const order = await tx.order.findUnique({
-    //         where: { id: orderId },
-    //         include: { project: true },
-    //     });
-    //     if (!order) throw new NotFoundException('订单不存在');
-    //
-    //     const dispatch = await tx.orderDispatch.findUnique({
-    //         where: { id: dispatchId },
-    //         include: { participants: true },
-    //     });
-    //     if (!dispatch) throw new NotFoundException('派单批次不存在');
-    //
-    //     // 2️⃣ 本轮参与者（只结算 active 的，避免历史重复结算）
-    //     const participants = dispatch.participants.filter((p) => p.isActive);
-    //     if (participants.length === 0) return true;
-    //
-    //     // 3️⃣ 本轮结算类型（体验单 / 正价单）
-    //     const settlementType = order.type === OrderType.EXPERIENCE ? 'EXPERIENCE' : 'REGULAR';
-    //
-    //     // 解冻时间
-    //     const unlockAt =
-    //         settlementType === 'EXPERIENCE'
-    //             ? new Date(Date.now() + EXPERIENCE_UNLOCK_MINUTES * 60 * 1000)
-    //             : new Date(Date.now() + REGULAR_UNLOCK_MINUTES * 60 * 1000);
-    //
-    //     // 4️⃣ 分摊规则（原有逻辑，保持）
-    //     // ✅ ARCHIVE 按 progress 比例分摊：ratioMap key 为 participant.id
-    //     const ratioMap = this.buildProgressRatioMap(participants);
-    //
-    //     const dispatchCount = await tx.orderDispatch.count({
-    //         where: { orderId },
-    //     });
-    //
-    //     const hasOrderCut = Number(order.cutRate ?? 0) > 0;
-    //     const hasProjectCut = Number(order.project?.cutRate ?? 0) > 0;
-    //
-    //     // ===========================
-    //     // 5️⃣ 逐个陪玩生成结算（幂等）
-    //     // ✅ 优化：从 “串行 for-await” 改为 Promise.all 并发
-    //     // ===========================
-    //     await Promise.all(
-    //         participants.map(async (p) => {
-    //             const userId = p.userId;
-    //
-    //             const ratio = ratioMap.get(p.id) ?? 1;
-    //             const calculated = this.calcPlayerEarning({
-    //                 order,
-    //                 participantsCount: participants.length,
-    //                 ratio,
-    //             });
-    //
-    //             // 平台抽成 / 项目抽成 / 分红比例优先级（原逻辑）
-    //             const multiplier = this.resolveMultiplier(order, p);
-    //             const final = this.round1(calculated * multiplier);
-    //
-    //             // === 5.2 结算 upsert（核心幂等点） ===
-    //             const settlement = await tx.orderSettlement.upsert({
-    //                 where: {
-    //                     // ✅ schema：@@unique([dispatchId, userId, settlementType])
-    //                     dispatchId_userId_settlementType: {
-    //                         dispatchId,
-    //                         userId,
-    //                         settlementType,
-    //                     },
-    //                 },
-    //                 create: {
-    //                     orderId,
-    //                     dispatchId,
-    //                     userId,
-    //                     settlementType,
-    //                     settlementBatchId, // ✅ 批次号
-    //                     calculatedEarnings: calculated,
-    //                     manualAdjustment: final - calculated,
-    //                     finalEarnings: final,
-    //                     clubEarnings: calculated - final,
-    //                     csEarnings: null,
-    //                     inviteEarnings: null,
-    //                     paymentStatus: PaymentStatus.UNPAID,
-    //                 },
-    //                 update: {
-    //                     // ✅ 幂等策略：不覆盖人工调整，只补 batchId
-    //                     settlementBatchId,
-    //                 },
-    //             });
-    //
-    //             // === 5.3 钱包冻结（同一 tx，依赖 settlement.id 的唯一性） ===
-    //             // ✅ 这里也保持幂等：wallet 内部通常以 sourceType+sourceId 或类似唯一键防重复
-    //             await this.wallet.createFrozenSettlementEarning(
-    //                 {
-    //                     userId,
-    //                     amount: settlement.finalEarnings,
-    //                     unlockAt,
-    //                     sourceType: 'ORDER_SETTLEMENT',
-    //                     sourceId: settlement.id, // ✅ 幂等锚点
-    //                     orderId,
-    //                     dispatchId,
-    //                     settlementId: settlement.id,
-    //                 },
-    //                 tx,
-    //             );
-    //         }),
-    //     );
-    //
-    //     // ===========================
-    //     // 6️⃣ 客服分红（如有）
-    //     // ✅ 优化：独立块，逻辑保持，仍在事务内
-    //     // ===========================
-    //     if (CUSTOMER_SERVICE_SHARE_RATE > 0 && order.dispatcherId) {
-    //         const csAmount = this.round1(order.paidAmount * CUSTOMER_SERVICE_SHARE_RATE);
-    //         if (csAmount > 0) {
-    //             const csSettlement = await tx.orderSettlement.upsert({
-    //                 where: {
-    //                     dispatchId_userId_settlementType: {
-    //                         dispatchId,
-    //                         userId: order.dispatcherId,
-    //                         settlementType: 'CUSTOMER_SERVICE',
-    //                     },
-    //                 },
-    //                 create: {
-    //                     orderId,
-    //                     dispatchId,
-    //                     userId: order.dispatcherId,
-    //                     settlementType: 'CUSTOMER_SERVICE',
-    //                     settlementBatchId,
-    //                     calculatedEarnings: csAmount,
-    //                     manualAdjustment: 0,
-    //                     finalEarnings: csAmount,
-    //                     paymentStatus: PaymentStatus.UNPAID,
-    //                 },
-    //                 update: { settlementBatchId },
-    //             });
-    //
-    //             await this.wallet.createFrozenSettlementEarning(
-    //                 {
-    //                     userId: order.dispatcherId,
-    //                     amount: csSettlement.finalEarnings,
-    //                     unlockAt,
-    //                     sourceType: 'ORDER_SETTLEMENT',
-    //                     sourceId: csSettlement.id,
-    //                     orderId,
-    //                     dispatchId,
-    //                     settlementId: csSettlement.id,
-    //                 },
-    //                 tx,
-    //             );
-    //         }
-    //     }
-    //
-    //     // ===========================
-    //     // 7️⃣ 聚合回写订单（你原有逻辑，保持）
-    //     // ===========================
-    //     const agg = await tx.orderSettlement.aggregate({
-    //         where: { orderId },
-    //         _sum: {
-    //             finalEarnings: true,
-    //             clubEarnings: true,
-    //         },
-    //     });
-    //
-    //     await tx.order.update({
-    //         where: { id: orderId },
-    //         data: {
-    //             totalPlayerEarnings: Number(agg._sum.finalEarnings ?? 0),
-    //             clubEarnings: Number(agg._sum.clubEarnings ?? 0),
-    //         },
-    //     });
-    //
-    //     // ===========================
-    //     // 8️⃣ 操作日志（你原有逻辑，保持）
-    //     // ===========================
-    //     await this.logOrderAction(
-    //         order.dispatcherId,
-    //         orderId,
-    //         mode === 'ARCHIVE' ? 'SETTLE_ARCHIVE' : 'SETTLE_COMPLETE',
-    //         {
-    //             dispatchId,
-    //             settlementBatchId,
-    //             rule:
-    //                 dispatchCount === 1 && mode === 'COMPLETE'
-    //                     ? 'SINGLE_COMPLETE_FULL'
-    //                     : 'RATIO_BY_PROGRESS',
-    //             multiplierPriority: hasOrderCut
-    //                 ? 'ORDER_CUT'
-    //                 : hasProjectCut
-    //                     ? 'PROJECT_CUT'
-    //                     : 'PLAYER_SHARE',
-    //         },
-    //     );
-    //
-    //     return true;
-    // }
-
     async createSettlementsForDispatch(
         params: {
             orderId: number;
             dispatchId: number;
             mode: 'ARCHIVE' | 'COMPLETE';
-            settlementBatchId: string;
+            settlementBatchId: string; // ✅ 结算批次号
         },
-        tx: any,
+        tx: any, // ✅ 外层事务
     ) {
         const { orderId, dispatchId, mode, settlementBatchId } = params;
 
         // ===========================
         // v0.2 测试参数：冻结时间用“分钟”
+        // ✅ 后续上线再改回“天 / 按等级配置”
         // ===========================
+        // const EXPERIENCE_UNLOCK_MINUTES = 3 * 24 * 60;
+        // const REGULAR_UNLOCK_MINUTES = 7 * 24 * 60;
         const EXPERIENCE_UNLOCK_MINUTES = 5;
         const REGULAR_UNLOCK_MINUTES = 30;
 
         // ===========================
-        // 客服分红比例
+        // 客服分红比例（不落库，纯规则）
         // ===========================
         const CUSTOMER_SERVICE_SHARE_RATE = 0.01;
 
         // ---------- 工具函数 ----------
+        const isSet = (v: any) => v !== null && v !== undefined; // ✅ 0 也算已设置
         const normalizeToRatio = (v: any, fallback: number) => {
             const n = Number(v);
             if (!Number.isFinite(n)) return fallback;
-            return n > 1 ? n / 100 : n; // 兼容 10 / 0.1 / 60 / 0.6
+            return n > 1 ? n / 100 : n;
         };
-        const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
-        const isSet = (v: any) => v !== null && v !== undefined; // ✅ 关键：0 也算“已设置”
 
-        // 1️⃣ 读取订单 & 派单
+        // 1️⃣ 读取订单 & 派单（必须用 tx）
         const order = await tx.order.findUnique({
             where: { id: orderId },
             include: { project: true },
@@ -1208,80 +992,85 @@ export class OrdersService {
         });
         if (!dispatch) throw new NotFoundException('派单批次不存在');
 
-        // 2️⃣ 本轮参与者（active）
+        // 2️⃣ 本轮参与者（只结算 active 的，避免历史重复结算）
         const participants = dispatch.participants.filter((p) => p.isActive);
         if (participants.length === 0) return true;
 
-        // 3️⃣ 结算类型
+        // 3️⃣ 本轮结算类型（体验单 / 正价单）
         const settlementType = order.type === OrderType.EXPERIENCE ? 'EXPERIENCE' : 'REGULAR';
 
+        // 解冻时间
         const unlockAt =
             settlementType === 'EXPERIENCE'
                 ? new Date(Date.now() + EXPERIENCE_UNLOCK_MINUTES * 60 * 1000)
                 : new Date(Date.now() + REGULAR_UNLOCK_MINUTES * 60 * 1000);
 
-        // 4️⃣ 分摊规则（保持你现有的 progress ratio）
+        // 4️⃣ 分摊规则（原有逻辑，保持）
+        // ✅ ARCHIVE 按 progress 比例分摊：ratioMap key 为 participant.id
         const ratioMap = this.buildProgressRatioMap(participants);
-        const dispatchCount = await tx.orderDispatch.count({ where: { orderId } });
 
-        // ✅ 订单抽成优先：customClubRate > clubRate（两者都算“订单抽成设置”）
-        const orderCutRaw = isSet(order.customClubRate) ? order.customClubRate : (isSet(order.clubRate) ? order.clubRate : null);
+        const dispatchCount = await tx.orderDispatch.count({
+            where: { orderId },
+        });
 
-        // ✅ 项目抽成：快照优先（projectSnapshot.clubRate），否则项目配置 project.clubRate
-        const snap: any = order.projectSnapshot ?? {};
+        // ---------- 4.1) 结算瞬间快照：抽成规则输入 ----------
+        // ✅ 订单抽成：只认 customClubRate；clubRate 仅做历史快照展示
+        const orderCutRaw = isSet(order.customClubRate) ? order.customClubRate : null;
+
+        // ✅ 项目抽成：快照优先，避免项目后改影响历史
+        const snap: any = order.projectSnapshot || {};
         const projectCutRaw = isSet(snap.clubRate) ? snap.clubRate : (isSet(order.project?.clubRate) ? order.project.clubRate : null);
 
-        // ✅ 批量拉员工评级（只在“订单未设置 && 项目未设置”时才需要）
-        let shareMap: Map<number, number> | null = null;
+        // ---------- 4.2) 员工评级抽成快照（仅当订单/项目都未设置抽成时才需要） ----------
+        // 员工评级表是 staffRating，对应抽成比例字段为 rate（抽成比例，不是到手比例）
+        let staffCutMap: Map<number, number> | undefined;
+
         if (!isSet(orderCutRaw) && !isSet(projectCutRaw)) {
             const userIds = participants.map((p) => p.userId);
             const users = await tx.user.findMany({
                 where: { id: { in: userIds } },
                 select: { id: true, staffRating: { select: { rate: true } } },
             });
-            shareMap = new Map<number, number>();
+
+            staffCutMap = new Map<number, number>();
             for (const u of users) {
-                shareMap.set(u.id, clamp01(normalizeToRatio(u.staffRating?.rate, 1))); // 默认 100%
+                // ✅ staffRating.rate = 抽成比例（例如 0.4/40 表示抽 40%）
+                staffCutMap.set(u.id, Number(u.staffRating?.rate ?? 0));
             }
         }
 
-        // ✅ 统一计算 multiplier：严格按你给的优先级与“0 也算已设置”
-        const getMultiplier = (userId: number) => {
-            // 1) 订单抽成（含 0）
-            if (isSet(orderCutRaw)) {
-                const cut = clamp01(normalizeToRatio(orderCutRaw, 0));
-                return clamp01(1 - cut);
-            }
-
-            // 2) 项目抽成（含 0）
-            if (isSet(projectCutRaw)) {
-                const cut = clamp01(normalizeToRatio(projectCutRaw, 0));
-                return clamp01(1 - cut);
-            }
-
-            // 3) 员工评级分红
-            return clamp01(shareMap?.get(userId) ?? 1);
-        };
-
-        // ✅ 日志用：实际命中的优先级
-        const multiplierPriority = isSet(orderCutRaw) ? 'ORDER_CUT' : isSet(projectCutRaw) ? 'PROJECT_CUT' : 'PLAYER_SHARE';
+        // ✅ 用于日志：命中哪个优先级
+        const multiplierPriority = isSet(orderCutRaw) ? 'ORDER_CUT' : isSet(projectCutRaw) ? 'PROJECT_CUT' : 'PLAYER_CUT';
 
         // ===========================
-        // 5️⃣ 批量幂等写 settlement + 冻结钱包（并发 + 可重算）
+        // 5️⃣ 逐个陪玩生成结算（幂等）
+        // ✅ 优化：从 “串行 for-await” 改为 Promise.all 并发
+        // ✅ 重要：resolveMultiplier 只吃快照，不在循环中查 DB，避免 N 次查询 & 结算中规则漂移
         // ===========================
 
-        // 5.0 先查已有 settlement（避免 upsert update 不重算的问题）
+        // 5.0 先查已有 settlement（用于“安全重算，不覆盖人工调整”）
         const userIds = participants.map((p) => p.userId);
         const existing = await tx.orderSettlement.findMany({
-            where: { dispatchId, settlementType, userId: { in: userIds } },
-            select: { id: true, userId: true, paymentStatus: true, manualAdjustment: true, finalEarnings: true },
+            where: {
+                dispatchId,
+                settlementType,
+                userId: { in: userIds },
+            },
+            select: {
+                id: true,
+                userId: true,
+                paymentStatus: true,
+                manualAdjustment: true,
+                finalEarnings: true,
+            },
         });
         const existMap = new Map<number, any>();
         for (const e of existing) existMap.set(e.userId, e);
 
-        // 5.1 并发处理每个参与者
         await Promise.all(
             participants.map(async (p) => {
+                const userId = p.userId;
+
                 const ratio = ratioMap.get(p.id) ?? 1;
                 const calculated = this.calcPlayerEarning({
                     order,
@@ -1289,32 +1078,43 @@ export class OrdersService {
                     ratio,
                 });
 
-                const multiplier = getMultiplier(p.userId);
+                // 平台抽成 / 项目抽成 / 陪玩抽成优先级（按规则快照）
+                const multiplier = this.resolveMultiplier(order, p, {
+                    orderCutRaw,
+                    projectCutRaw,
+                    staffCutMap,
+                });
+
                 const final = this.round1(calculated * multiplier);
 
-                const found = existMap.get(p.userId);
+                const found = existMap.get(userId);
 
-                // ✅ 可重算规则：未打款 且 未人工调整（manualAdjustment=0）
+                // ✅ 可重算规则：
+                // - UNPAID 且 manualAdjustment=0：允许重算（例如改了抽成比例）
+                // - 否则：只补 settlementBatchId，不覆盖人工调整/已支付
                 const canRecalc =
                     !found ||
                     (found.paymentStatus === PaymentStatus.UNPAID && Number(found.manualAdjustment ?? 0) === 0);
 
                 let settlementId: number;
+                let settlementFinal: number;
 
                 if (!found) {
                     const created = await tx.orderSettlement.create({
                         data: {
                             orderId,
                             dispatchId,
-                            userId: p.userId,
+                            userId,
                             settlementType,
-                            settlementBatchId,
+
+                            settlementBatchId, // ✅ 批次号
 
                             calculatedEarnings: calculated,
                             manualAdjustment: final - calculated,
                             finalEarnings: final,
                             clubEarnings: calculated - final,
 
+                            // 这两项暂不再按新口径扣（不影响后续财务流程）
                             csEarnings: null,
                             inviteEarnings: null,
 
@@ -1324,17 +1124,21 @@ export class OrdersService {
                     });
 
                     settlementId = created.id;
+                    settlementFinal = created.finalEarnings;
 
+                    // === 钱包冻结（同一 tx，依赖 settlement.id 的唯一性） ===
+                    // ✅ 这里也保持幂等：WalletTransaction 需基于 sourceType+sourceId 幂等生成 earningTx
+                    // ✅ WalletHold.earningTxId @unique 保证同一 earningTx 只能冻结一次
                     await this.wallet.createFrozenSettlementEarning(
                         {
-                            userId: p.userId,
-                            amount: created.finalEarnings,
+                            userId,
+                            amount: settlementFinal,
                             unlockAt,
                             sourceType: 'ORDER_SETTLEMENT',
-                            sourceId: created.id,
+                            sourceId: settlementId, // ✅ 幂等锚点
                             orderId,
                             dispatchId,
-                            settlementId: created.id,
+                            settlementId,
                         },
                         tx,
                     );
@@ -1357,14 +1161,15 @@ export class OrdersService {
                         select: { id: true, finalEarnings: true },
                     });
 
-                    // ✅ 冻结也要幂等：wallet 内部应以 sourceType+sourceId 去重
+                    settlementFinal = updated.finalEarnings;
+
                     await this.wallet.createFrozenSettlementEarning(
                         {
-                            userId: p.userId,
-                            amount: updated.finalEarnings,
+                            userId,
+                            amount: settlementFinal,
                             unlockAt,
                             sourceType: 'ORDER_SETTLEMENT',
-                            sourceId: updated.id,
+                            sourceId: updated.id, // ✅ 幂等锚点
                             orderId,
                             dispatchId,
                             settlementId: updated.id,
@@ -1372,19 +1177,20 @@ export class OrdersService {
                         tx,
                     );
                 } else {
-                    // 不覆盖人工调整/已支付：只补 batchId（保持你原策略）
+                    // ✅ 幂等策略：不覆盖人工调整，只补 batchId
                     await tx.orderSettlement.update({
                         where: { id: settlementId },
                         data: { settlementBatchId },
                     });
 
-                    // ✅ 这里不做钱包调整（避免覆盖人工/已支付）
+                    // ✅ 不做钱包调整：避免覆盖人工调整/已支付
                 }
             }),
         );
 
         // ===========================
-        // 6️⃣ 客服分红
+        // 6️⃣ 客服分红（如有）
+        // ✅ 优化：独立块，逻辑保持，仍在事务内
         // ===========================
         if (CUSTOMER_SERVICE_SHARE_RATE > 0 && order.dispatcherId) {
             const csAmount = this.round1((order.paidAmount ?? 0) * CUSTOMER_SERVICE_SHARE_RATE);
@@ -1470,11 +1276,14 @@ export class OrdersService {
         }
 
         // ===========================
-        // 7️⃣ 聚合回写订单
+        // 7️⃣ 聚合回写订单（原有逻辑，保持）
         // ===========================
         const agg = await tx.orderSettlement.aggregate({
             where: { orderId },
-            _sum: { finalEarnings: true, clubEarnings: true },
+            _sum: {
+                finalEarnings: true,
+                clubEarnings: true,
+            },
         });
 
         await tx.order.update({
@@ -1486,7 +1295,7 @@ export class OrdersService {
         });
 
         // ===========================
-        // 8️⃣ 操作日志（建议也传 tx，避免事务内外混用）
+        // 8️⃣ 操作日志（原有逻辑，保持）
         // ===========================
         await this.logOrderAction(
             order.dispatcherId,
@@ -1495,16 +1304,23 @@ export class OrdersService {
             {
                 dispatchId,
                 settlementBatchId,
-                rule: dispatchCount === 1 && mode === 'COMPLETE' ? 'SINGLE_COMPLETE_FULL' : 'RATIO_BY_PROGRESS',
+                rule:
+                    dispatchCount === 1 && mode === 'COMPLETE'
+                        ? 'SINGLE_COMPLETE_FULL'
+                        : 'RATIO_BY_PROGRESS',
                 multiplierPriority,
+
+                // ✅ 记录使用的抽成快照（便于对账/追溯）
                 orderCut: isSet(orderCutRaw) ? normalizeToRatio(orderCutRaw, 0) : null,
                 projectCut: !isSet(orderCutRaw) && isSet(projectCutRaw) ? normalizeToRatio(projectCutRaw, 0) : null,
+                staffCutHint: (!isSet(orderCutRaw) && !isSet(projectCutRaw)) ? 'STAFF_RATING_RATE' : null,
             },
             tx,
         );
 
         return true;
     }
+
 
 
     private capProgress(progress: number, base: number): number {
@@ -1961,7 +1777,7 @@ export class OrdersService {
 
             if (!dispatch) throw new NotFoundException('派单批次不存在');
 
-            // 仅允许在 WAIT_ACCEPT/ACCEPTED 调整（你也可以只允许 WAIT_ACCEPT）
+            // 仅允许在 WAIT_ACCEPT/ACCEPTED 调整（也可以只允许 WAIT_ACCEPT）
             if (![DispatchStatus.WAIT_ACCEPT, DispatchStatus.ACCEPTED].includes(dispatch.status as any)) {
                 throw new ForbiddenException('当前派单状态不可修改参与者');
             }
@@ -2046,16 +1862,16 @@ export class OrdersService {
                     where: {id: dispatchId},
                     data: {
                         status: DispatchStatus.WAIT_ACCEPT,
-                        // 可选：记录一次更新时间字段（如果你有）
+                        // 可选：记录一次更新时间字段（如果有）
                         // updatedAt: now,
                     } as any,
                 });
 
-                // 同步订单状态（可选：如果你有“已派单/待接单”的订单状态口径）
+                // 同步订单状态（可选：如果有“已派单/待接单”的订单状态口径）
                 // await tx.order.update({ where: { id: dispatch.orderId }, data: { status: OrderStatus.WAIT_ACCEPT } });
             }
 
-            // 5) 记录日志（符合你“关键动作必须记录 UserLog”）
+            // 5) 记录日志（符合“关键动作必须记录 UserLog”）
             await this.logOrderAction(operatorId, dispatch.orderId, 'UPDATE_DISPATCH_PARTICIPANTS', {
                 dispatchId,
                 targetUserIds: target,
@@ -2100,7 +1916,7 @@ export class OrdersService {
             },
         });
 
-        // ✅ 记录日志（你要求关键动作必须记录）
+        // ✅ 记录日志（要求关键动作必须记录）
         await this.logOrderAction(operatorId, s.orderId, 'ADJUST_SETTLEMENT', {
             settlementId,
             oldFinalEarnings: s.finalEarnings,
@@ -2138,7 +1954,7 @@ export class OrdersService {
         const now = new Date();
 
         await this.prisma.$transaction(async (tx) => {
-            // 1) 订单状态置 REFUNDED（你要“结单状态并标记退款”：这里用 REFUNDED 即“已结单且已退款”）
+            // 1) 订单状态置 REFUNDED（要“结单状态并标记退款”：这里用 REFUNDED 即“已结单且已退款”）
             await tx.order.update({
                 where: {id: orderId},
                 data: {status: OrderStatus.REFUNDED},
@@ -2356,7 +2172,7 @@ export class OrdersService {
 
 
     /**
-     * ✅ 金额统一处理：保留 1 位小数（与你原来的 round1 调用对齐）
+     * ✅ 金额统一处理：保留 1 位小数（与原来的 round1 调用对齐）
      * - 避免浮点误差导致的对账问题
      */
     private round1(n: number) {
@@ -2368,7 +2184,7 @@ export class OrdersService {
      * ✅ 构建“进度比例”映射，用于存单（ARCHIVE）按贡献分摊
      *
      * 规则（保守版）：
-     * - progress 取值范围建议 0~1（你如果用 0~100，记得在这里除以 100）
+     * - progress 取值范围建议 0~1（如果用 0~100，记得在这里除以 100）
      * - 若所有 progress 都为空/0，则每个参与者按 1 平均
      *
      * 返回：
@@ -2381,7 +2197,7 @@ export class OrdersService {
         // 1) 取权重：progress 有值则用 progress，否则用 1
         for (const p of participants) {
             const raw = p.progress;
-            // ✅ 如果 progress 是 0~100（你项目有可能），可改为：const w = raw != null ? raw / 100 : 1;
+            // ✅ 如果 progress 是 0~100（项目有可能），可改为：const w = raw != null ? raw / 100 : 1;
             const w = raw != null ? Number(raw) : 1;
             weightMap.set(p.id, Math.max(0, w));
         }
@@ -2408,7 +2224,7 @@ export class OrdersService {
      * ✅ 计算单个陪玩理论收益（保守版）
      *
      * 说明：
-     * - 你项目真实收益规则可能更复杂（等级/类型/抽成/补收/超时/平台扣点等）
+     * - 项目真实收益规则可能更复杂（等级/类型/抽成/补收/超时/平台扣点等）
      * - 这里先提供最小实现，让编译通过，并保持“可替换点集中”
      */
     private calcPlayerEarning(params: {
@@ -2421,7 +2237,7 @@ export class OrdersService {
         const paid = Number(order?.paidAmount || 0);
         const count = Math.max(1, Number(participantsCount || 1));
 
-        // ✅ 默认：总收益先平均分给所有陪玩（后续你可替换为“陪玩分成比例”）
+        // ✅ 默认：总收益先平均分给所有陪玩（后续可替换为“陪玩分成比例”）
         const base = paid / count;
 
         // ✅ ARCHIVE 模式：如果传入 ratio，则按 ratio 分摊（否则仍按平均）
@@ -2431,18 +2247,63 @@ export class OrdersService {
     }
 
     /**
-     * ✅ 倍率解析（保守版）
+     * 计算到手 multiplier（优先级：订单抽成 > 项目抽成 > 陪玩抽成）
      *
-     * 说明：
-     * - 你原先代码里有 resolveMultiplier(order, participant)
-     * - 如果你有会员等级/陪玩等级/加价倍率，在这里集中实现
+     * 规则：
+     * - 订单抽成：order.customClubRate（抽成比例 cut） => multiplier = 1 - cut
+     *   ⚠️ order.clubRate 仅做历史快照展示，不参与规则计算
+     * - 项目抽成：order.projectSnapshot.clubRate（优先）或 order.project.clubRate（抽成比例 cut） => multiplier = 1 - cut
+     * - 陪玩抽成：staffRating.rate（抽成比例 cut） => multiplier = 1 - cut
+     *
+     * 口径兼容：
+     * - 10 / 0.1 / 40 / 0.4 都可
+     * - 0 也算“已设置”，只有 null/undefined 才算未设置
+     *
+     * 注意：
+     * - 本方法不查 DB，只使用结算瞬间快照（避免结算过程中规则被改导致不一致）
      */
     private resolveMultiplier(
-        _order: any,
-        _participant: any,
-    ) {
-        return 1;
+        order: any,
+        participant: { userId: number },
+        snapshot: {
+            // ✅ 结算瞬间快照（只在 createSettlementsForDispatch 开头准备一次）
+            orderCutRaw: any | null;     // order.customClubRate（可为 0）
+            projectCutRaw: any | null;   // snapshot.clubRate 或 project.clubRate（可为 0）
+            staffCutMap?: Map<number, number>; // staffRating.rate（抽成比例），仅当需要走员工评级时才会传
+        },
+    ): number {
+        // ---------- normalize ----------
+        const normalizeToRatio = (v: any, fallback: number) => {
+            const n = Number(v);
+            if (!Number.isFinite(n)) return fallback;
+            return n > 1 ? n / 100 : n; // 兼容 10 / 0.1 / 60 / 0.6
+        };
+        const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+        const isSet = (v: any) => v !== null && v !== undefined; // ✅ 0 也算已设置
+
+        // ---------- 订单抽成（优先级最高） ----------
+        // ✅ 订单固定抽成（平台抽成）
+        // 口径：0 或 0.1 表示不抽成或抽 1 成，陪玩到手 = (1 - 0/0.1)
+        if (isSet(snapshot.orderCutRaw)) {
+            const cut = clamp01(normalizeToRatio(snapshot.orderCutRaw, 0));
+            return clamp01(1 - cut);
+        }
+
+        // ---------- 项目抽成（快照优先） ----------
+        // 项目固定抽成优先取快照，避免项目后改影响历史
+        if (isSet(snapshot.projectCutRaw)) {
+            const cut = clamp01(normalizeToRatio(snapshot.projectCutRaw, 0));
+            return clamp01(1 - cut);
+        }
+
+        // ---------- 陪玩抽成（员工评级 staffRating.rate） ----------
+        // 员工评级表 staffRating，对应抽成比例字段为 rate
+        // ✅ 的业务定义：rate=0.4 表示抽 40%，陪玩到手 = 1 - 0.4 = 0.6
+        const staffCut = snapshot.staffCutMap?.get(participant.userId);
+        const cut = clamp01(normalizeToRatio(staffCut ?? 0, 0)); // 默认不抽成
+        return clamp01(1 - cut);
     }
+
 
 
 }
