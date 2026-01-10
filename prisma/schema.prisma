@@ -149,7 +149,7 @@ enum PlayerWorkStatus {
   WORKING /// 接单中（不可派单）
   RESTING /// 休息（不可派单）
 }
-
+///员工评级表
 model StaffRating {
   id          Int          @id @default(autoincrement())
   name        String       @unique

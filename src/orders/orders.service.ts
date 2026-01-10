@@ -946,32 +946,256 @@ export class OrdersService {
      *
      * 4) ✅ settlement + 钱包冻结必须在同一个 tx 中
      */
+    // async createSettlementsForDispatch(
+    //     params: {
+    //         orderId: number;
+    //         dispatchId: number;
+    //         mode: 'ARCHIVE' | 'COMPLETE';
+    //         settlementBatchId: string; // ✅ 结算批次号
+    //     },
+    //     tx: any, // ✅ 外层事务
+    // ) {
+    //     const { orderId, dispatchId, mode, settlementBatchId } = params;
+    //
+    //     // ===========================
+    //     // v0.2 测试参数：冻结时间用“分钟”
+    //     // ✅ 后续上线再改回“天 / 按等级配置”
+    //     // ===========================
+    //     // const EXPERIENCE_UNLOCK_MINUTES = 3 * 24 * 60;
+    //     // const REGULAR_UNLOCK_MINUTES = 7 * 24 * 60;
+    //     const EXPERIENCE_UNLOCK_MINUTES = 5;
+    //     const REGULAR_UNLOCK_MINUTES = 30;
+    //
+    //     // ===========================
+    //     // 客服分红比例（不落库，纯规则）
+    //     // ===========================
+    //     const CUSTOMER_SERVICE_SHARE_RATE = 0.01;
+    //
+    //     // 1️⃣ 读取订单 & 派单（必须用 tx）
+    //     const order = await tx.order.findUnique({
+    //         where: { id: orderId },
+    //         include: { project: true },
+    //     });
+    //     if (!order) throw new NotFoundException('订单不存在');
+    //
+    //     const dispatch = await tx.orderDispatch.findUnique({
+    //         where: { id: dispatchId },
+    //         include: { participants: true },
+    //     });
+    //     if (!dispatch) throw new NotFoundException('派单批次不存在');
+    //
+    //     // 2️⃣ 本轮参与者（只结算 active 的，避免历史重复结算）
+    //     const participants = dispatch.participants.filter((p) => p.isActive);
+    //     if (participants.length === 0) return true;
+    //
+    //     // 3️⃣ 本轮结算类型（体验单 / 正价单）
+    //     const settlementType = order.type === OrderType.EXPERIENCE ? 'EXPERIENCE' : 'REGULAR';
+    //
+    //     // 解冻时间
+    //     const unlockAt =
+    //         settlementType === 'EXPERIENCE'
+    //             ? new Date(Date.now() + EXPERIENCE_UNLOCK_MINUTES * 60 * 1000)
+    //             : new Date(Date.now() + REGULAR_UNLOCK_MINUTES * 60 * 1000);
+    //
+    //     // 4️⃣ 分摊规则（原有逻辑，保持）
+    //     // ✅ ARCHIVE 按 progress 比例分摊：ratioMap key 为 participant.id
+    //     const ratioMap = this.buildProgressRatioMap(participants);
+    //
+    //     const dispatchCount = await tx.orderDispatch.count({
+    //         where: { orderId },
+    //     });
+    //
+    //     const hasOrderCut = Number(order.cutRate ?? 0) > 0;
+    //     const hasProjectCut = Number(order.project?.cutRate ?? 0) > 0;
+    //
+    //     // ===========================
+    //     // 5️⃣ 逐个陪玩生成结算（幂等）
+    //     // ✅ 优化：从 “串行 for-await” 改为 Promise.all 并发
+    //     // ===========================
+    //     await Promise.all(
+    //         participants.map(async (p) => {
+    //             const userId = p.userId;
+    //
+    //             const ratio = ratioMap.get(p.id) ?? 1;
+    //             const calculated = this.calcPlayerEarning({
+    //                 order,
+    //                 participantsCount: participants.length,
+    //                 ratio,
+    //             });
+    //
+    //             // 平台抽成 / 项目抽成 / 分红比例优先级（原逻辑）
+    //             const multiplier = this.resolveMultiplier(order, p);
+    //             const final = this.round1(calculated * multiplier);
+    //
+    //             // === 5.2 结算 upsert（核心幂等点） ===
+    //             const settlement = await tx.orderSettlement.upsert({
+    //                 where: {
+    //                     // ✅ schema：@@unique([dispatchId, userId, settlementType])
+    //                     dispatchId_userId_settlementType: {
+    //                         dispatchId,
+    //                         userId,
+    //                         settlementType,
+    //                     },
+    //                 },
+    //                 create: {
+    //                     orderId,
+    //                     dispatchId,
+    //                     userId,
+    //                     settlementType,
+    //                     settlementBatchId, // ✅ 批次号
+    //                     calculatedEarnings: calculated,
+    //                     manualAdjustment: final - calculated,
+    //                     finalEarnings: final,
+    //                     clubEarnings: calculated - final,
+    //                     csEarnings: null,
+    //                     inviteEarnings: null,
+    //                     paymentStatus: PaymentStatus.UNPAID,
+    //                 },
+    //                 update: {
+    //                     // ✅ 幂等策略：不覆盖人工调整，只补 batchId
+    //                     settlementBatchId,
+    //                 },
+    //             });
+    //
+    //             // === 5.3 钱包冻结（同一 tx，依赖 settlement.id 的唯一性） ===
+    //             // ✅ 这里也保持幂等：wallet 内部通常以 sourceType+sourceId 或类似唯一键防重复
+    //             await this.wallet.createFrozenSettlementEarning(
+    //                 {
+    //                     userId,
+    //                     amount: settlement.finalEarnings,
+    //                     unlockAt,
+    //                     sourceType: 'ORDER_SETTLEMENT',
+    //                     sourceId: settlement.id, // ✅ 幂等锚点
+    //                     orderId,
+    //                     dispatchId,
+    //                     settlementId: settlement.id,
+    //                 },
+    //                 tx,
+    //             );
+    //         }),
+    //     );
+    //
+    //     // ===========================
+    //     // 6️⃣ 客服分红（如有）
+    //     // ✅ 优化：独立块，逻辑保持，仍在事务内
+    //     // ===========================
+    //     if (CUSTOMER_SERVICE_SHARE_RATE > 0 && order.dispatcherId) {
+    //         const csAmount = this.round1(order.paidAmount * CUSTOMER_SERVICE_SHARE_RATE);
+    //         if (csAmount > 0) {
+    //             const csSettlement = await tx.orderSettlement.upsert({
+    //                 where: {
+    //                     dispatchId_userId_settlementType: {
+    //                         dispatchId,
+    //                         userId: order.dispatcherId,
+    //                         settlementType: 'CUSTOMER_SERVICE',
+    //                     },
+    //                 },
+    //                 create: {
+    //                     orderId,
+    //                     dispatchId,
+    //                     userId: order.dispatcherId,
+    //                     settlementType: 'CUSTOMER_SERVICE',
+    //                     settlementBatchId,
+    //                     calculatedEarnings: csAmount,
+    //                     manualAdjustment: 0,
+    //                     finalEarnings: csAmount,
+    //                     paymentStatus: PaymentStatus.UNPAID,
+    //                 },
+    //                 update: { settlementBatchId },
+    //             });
+    //
+    //             await this.wallet.createFrozenSettlementEarning(
+    //                 {
+    //                     userId: order.dispatcherId,
+    //                     amount: csSettlement.finalEarnings,
+    //                     unlockAt,
+    //                     sourceType: 'ORDER_SETTLEMENT',
+    //                     sourceId: csSettlement.id,
+    //                     orderId,
+    //                     dispatchId,
+    //                     settlementId: csSettlement.id,
+    //                 },
+    //                 tx,
+    //             );
+    //         }
+    //     }
+    //
+    //     // ===========================
+    //     // 7️⃣ 聚合回写订单（你原有逻辑，保持）
+    //     // ===========================
+    //     const agg = await tx.orderSettlement.aggregate({
+    //         where: { orderId },
+    //         _sum: {
+    //             finalEarnings: true,
+    //             clubEarnings: true,
+    //         },
+    //     });
+    //
+    //     await tx.order.update({
+    //         where: { id: orderId },
+    //         data: {
+    //             totalPlayerEarnings: Number(agg._sum.finalEarnings ?? 0),
+    //             clubEarnings: Number(agg._sum.clubEarnings ?? 0),
+    //         },
+    //     });
+    //
+    //     // ===========================
+    //     // 8️⃣ 操作日志（你原有逻辑，保持）
+    //     // ===========================
+    //     await this.logOrderAction(
+    //         order.dispatcherId,
+    //         orderId,
+    //         mode === 'ARCHIVE' ? 'SETTLE_ARCHIVE' : 'SETTLE_COMPLETE',
+    //         {
+    //             dispatchId,
+    //             settlementBatchId,
+    //             rule:
+    //                 dispatchCount === 1 && mode === 'COMPLETE'
+    //                     ? 'SINGLE_COMPLETE_FULL'
+    //                     : 'RATIO_BY_PROGRESS',
+    //             multiplierPriority: hasOrderCut
+    //                 ? 'ORDER_CUT'
+    //                 : hasProjectCut
+    //                     ? 'PROJECT_CUT'
+    //                     : 'PLAYER_SHARE',
+    //         },
+    //     );
+    //
+    //     return true;
+    // }
+
     async createSettlementsForDispatch(
         params: {
             orderId: number;
             dispatchId: number;
             mode: 'ARCHIVE' | 'COMPLETE';
-            settlementBatchId: string; // ✅ 结算批次号
+            settlementBatchId: string;
         },
-        tx: any, // ✅ 外层事务
+        tx: any,
     ) {
         const { orderId, dispatchId, mode, settlementBatchId } = params;
 
         // ===========================
         // v0.2 测试参数：冻结时间用“分钟”
-        // ✅ 后续上线再改回“天 / 按等级配置”
         // ===========================
-        // const EXPERIENCE_UNLOCK_MINUTES = 3 * 24 * 60;
-        // const REGULAR_UNLOCK_MINUTES = 7 * 24 * 60;
         const EXPERIENCE_UNLOCK_MINUTES = 5;
         const REGULAR_UNLOCK_MINUTES = 30;
 
         // ===========================
-        // 客服分红比例（不落库，纯规则）
+        // 客服分红比例
         // ===========================
         const CUSTOMER_SERVICE_SHARE_RATE = 0.01;
 
-        // 1️⃣ 读取订单 & 派单（必须用 tx）
+        // ---------- 工具函数 ----------
+        const normalizeToRatio = (v: any, fallback: number) => {
+            const n = Number(v);
+            if (!Number.isFinite(n)) return fallback;
+            return n > 1 ? n / 100 : n; // 兼容 10 / 0.1 / 60 / 0.6
+        };
+        const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+        const isSet = (v: any) => v !== null && v !== undefined; // ✅ 关键：0 也算“已设置”
+
+        // 1️⃣ 读取订单 & 派单
         const order = await tx.order.findUnique({
             where: { id: orderId },
             include: { project: true },
@@ -984,38 +1208,80 @@ export class OrdersService {
         });
         if (!dispatch) throw new NotFoundException('派单批次不存在');
 
-        // 2️⃣ 本轮参与者（只结算 active 的，避免历史重复结算）
+        // 2️⃣ 本轮参与者（active）
         const participants = dispatch.participants.filter((p) => p.isActive);
         if (participants.length === 0) return true;
 
-        // 3️⃣ 本轮结算类型（体验单 / 正价单）
+        // 3️⃣ 结算类型
         const settlementType = order.type === OrderType.EXPERIENCE ? 'EXPERIENCE' : 'REGULAR';
 
-        // 解冻时间
         const unlockAt =
             settlementType === 'EXPERIENCE'
                 ? new Date(Date.now() + EXPERIENCE_UNLOCK_MINUTES * 60 * 1000)
                 : new Date(Date.now() + REGULAR_UNLOCK_MINUTES * 60 * 1000);
 
-        // 4️⃣ 分摊规则（你原有逻辑，保持）
-        // ✅ ARCHIVE 按 progress 比例分摊：ratioMap key 为 participant.id
+        // 4️⃣ 分摊规则（保持你现有的 progress ratio）
         const ratioMap = this.buildProgressRatioMap(participants);
+        const dispatchCount = await tx.orderDispatch.count({ where: { orderId } });
 
-        const dispatchCount = await tx.orderDispatch.count({
-            where: { orderId },
+        // ✅ 订单抽成优先：customClubRate > clubRate（两者都算“订单抽成设置”）
+        const orderCutRaw = isSet(order.customClubRate) ? order.customClubRate : (isSet(order.clubRate) ? order.clubRate : null);
+
+        // ✅ 项目抽成：快照优先（projectSnapshot.clubRate），否则项目配置 project.clubRate
+        const snap: any = order.projectSnapshot ?? {};
+        const projectCutRaw = isSet(snap.clubRate) ? snap.clubRate : (isSet(order.project?.clubRate) ? order.project.clubRate : null);
+
+        // ✅ 批量拉员工评级（只在“订单未设置 && 项目未设置”时才需要）
+        let shareMap: Map<number, number> | null = null;
+        if (!isSet(orderCutRaw) && !isSet(projectCutRaw)) {
+            const userIds = participants.map((p) => p.userId);
+            const users = await tx.user.findMany({
+                where: { id: { in: userIds } },
+                select: { id: true, staffRating: { select: { rate: true } } },
+            });
+            shareMap = new Map<number, number>();
+            for (const u of users) {
+                shareMap.set(u.id, clamp01(normalizeToRatio(u.staffRating?.rate, 1))); // 默认 100%
+            }
+        }
+
+        // ✅ 统一计算 multiplier：严格按你给的优先级与“0 也算已设置”
+        const getMultiplier = (userId: number) => {
+            // 1) 订单抽成（含 0）
+            if (isSet(orderCutRaw)) {
+                const cut = clamp01(normalizeToRatio(orderCutRaw, 0));
+                return clamp01(1 - cut);
+            }
+
+            // 2) 项目抽成（含 0）
+            if (isSet(projectCutRaw)) {
+                const cut = clamp01(normalizeToRatio(projectCutRaw, 0));
+                return clamp01(1 - cut);
+            }
+
+            // 3) 员工评级分红
+            return clamp01(shareMap?.get(userId) ?? 1);
+        };
+
+        // ✅ 日志用：实际命中的优先级
+        const multiplierPriority = isSet(orderCutRaw) ? 'ORDER_CUT' : isSet(projectCutRaw) ? 'PROJECT_CUT' : 'PLAYER_SHARE';
+
+        // ===========================
+        // 5️⃣ 批量幂等写 settlement + 冻结钱包（并发 + 可重算）
+        // ===========================
+
+        // 5.0 先查已有 settlement（避免 upsert update 不重算的问题）
+        const userIds = participants.map((p) => p.userId);
+        const existing = await tx.orderSettlement.findMany({
+            where: { dispatchId, settlementType, userId: { in: userIds } },
+            select: { id: true, userId: true, paymentStatus: true, manualAdjustment: true, finalEarnings: true },
         });
+        const existMap = new Map<number, any>();
+        for (const e of existing) existMap.set(e.userId, e);
 
-        const hasOrderCut = Number(order.cutRate ?? 0) > 0;
-        const hasProjectCut = Number(order.project?.cutRate ?? 0) > 0;
-
-        // ===========================
-        // 5️⃣ 逐个陪玩生成结算（幂等）
-        // ✅ 优化：从 “串行 for-await” 改为 Promise.all 并发
-        // ===========================
+        // 5.1 并发处理每个参与者
         await Promise.all(
             participants.map(async (p) => {
-                const userId = p.userId;
-
                 const ratio = ratioMap.get(p.id) ?? 1;
                 const calculated = this.calcPlayerEarning({
                     order,
@@ -1023,66 +1289,107 @@ export class OrdersService {
                     ratio,
                 });
 
-                // 平台抽成 / 项目抽成 / 分红比例优先级（你原逻辑）
-                const multiplier = this.resolveMultiplier(order, p);
+                const multiplier = getMultiplier(p.userId);
                 const final = this.round1(calculated * multiplier);
 
-                // === 5.2 结算 upsert（核心幂等点） ===
-                const settlement = await tx.orderSettlement.upsert({
-                    where: {
-                        // ✅ schema：@@unique([dispatchId, userId, settlementType])
-                        dispatchId_userId_settlementType: {
-                            dispatchId,
-                            userId,
-                            settlementType,
-                        },
-                    },
-                    create: {
-                        orderId,
-                        dispatchId,
-                        userId,
-                        settlementType,
-                        settlementBatchId, // ✅ 批次号
-                        calculatedEarnings: calculated,
-                        manualAdjustment: final - calculated,
-                        finalEarnings: final,
-                        clubEarnings: calculated - final,
-                        csEarnings: null,
-                        inviteEarnings: null,
-                        paymentStatus: PaymentStatus.UNPAID,
-                    },
-                    update: {
-                        // ✅ 幂等策略：不覆盖人工调整，只补 batchId
-                        settlementBatchId,
-                    },
-                });
+                const found = existMap.get(p.userId);
 
-                // === 5.3 钱包冻结（同一 tx，依赖 settlement.id 的唯一性） ===
-                // ✅ 这里也保持幂等：wallet 内部通常以 sourceType+sourceId 或类似唯一键防重复
-                await this.wallet.createFrozenSettlementEarning(
-                    {
-                        userId,
-                        amount: settlement.finalEarnings,
-                        unlockAt,
-                        sourceType: 'ORDER_SETTLEMENT',
-                        sourceId: settlement.id, // ✅ 幂等锚点
-                        orderId,
-                        dispatchId,
-                        settlementId: settlement.id,
-                    },
-                    tx,
-                );
+                // ✅ 可重算规则：未打款 且 未人工调整（manualAdjustment=0）
+                const canRecalc =
+                    !found ||
+                    (found.paymentStatus === PaymentStatus.UNPAID && Number(found.manualAdjustment ?? 0) === 0);
+
+                let settlementId: number;
+
+                if (!found) {
+                    const created = await tx.orderSettlement.create({
+                        data: {
+                            orderId,
+                            dispatchId,
+                            userId: p.userId,
+                            settlementType,
+                            settlementBatchId,
+
+                            calculatedEarnings: calculated,
+                            manualAdjustment: final - calculated,
+                            finalEarnings: final,
+                            clubEarnings: calculated - final,
+
+                            csEarnings: null,
+                            inviteEarnings: null,
+
+                            paymentStatus: PaymentStatus.UNPAID,
+                        },
+                        select: { id: true, finalEarnings: true },
+                    });
+
+                    settlementId = created.id;
+
+                    await this.wallet.createFrozenSettlementEarning(
+                        {
+                            userId: p.userId,
+                            amount: created.finalEarnings,
+                            unlockAt,
+                            sourceType: 'ORDER_SETTLEMENT',
+                            sourceId: created.id,
+                            orderId,
+                            dispatchId,
+                            settlementId: created.id,
+                        },
+                        tx,
+                    );
+
+                    return;
+                }
+
+                settlementId = found.id;
+
+                if (canRecalc) {
+                    const updated = await tx.orderSettlement.update({
+                        where: { id: settlementId },
+                        data: {
+                            settlementBatchId,
+                            calculatedEarnings: calculated,
+                            manualAdjustment: final - calculated,
+                            finalEarnings: final,
+                            clubEarnings: calculated - final,
+                        },
+                        select: { id: true, finalEarnings: true },
+                    });
+
+                    // ✅ 冻结也要幂等：wallet 内部应以 sourceType+sourceId 去重
+                    await this.wallet.createFrozenSettlementEarning(
+                        {
+                            userId: p.userId,
+                            amount: updated.finalEarnings,
+                            unlockAt,
+                            sourceType: 'ORDER_SETTLEMENT',
+                            sourceId: updated.id,
+                            orderId,
+                            dispatchId,
+                            settlementId: updated.id,
+                        },
+                        tx,
+                    );
+                } else {
+                    // 不覆盖人工调整/已支付：只补 batchId（保持你原策略）
+                    await tx.orderSettlement.update({
+                        where: { id: settlementId },
+                        data: { settlementBatchId },
+                    });
+
+                    // ✅ 这里不做钱包调整（避免覆盖人工/已支付）
+                }
             }),
         );
 
         // ===========================
-        // 6️⃣ 客服分红（如有）
-        // ✅ 优化：独立块，逻辑保持，仍在事务内
+        // 6️⃣ 客服分红
         // ===========================
         if (CUSTOMER_SERVICE_SHARE_RATE > 0 && order.dispatcherId) {
-            const csAmount = this.round1(order.paidAmount * CUSTOMER_SERVICE_SHARE_RATE);
+            const csAmount = this.round1((order.paidAmount ?? 0) * CUSTOMER_SERVICE_SHARE_RATE);
             if (csAmount > 0) {
-                const csSettlement = await tx.orderSettlement.upsert({
+                const csFound = await tx.orderSettlement.findUnique({
                     where: {
                         dispatchId_userId_settlementType: {
                             dispatchId,
@@ -1090,45 +1397,84 @@ export class OrdersService {
                             settlementType: 'CUSTOMER_SERVICE',
                         },
                     },
-                    create: {
-                        orderId,
-                        dispatchId,
-                        userId: order.dispatcherId,
-                        settlementType: 'CUSTOMER_SERVICE',
-                        settlementBatchId,
-                        calculatedEarnings: csAmount,
-                        manualAdjustment: 0,
-                        finalEarnings: csAmount,
-                        paymentStatus: PaymentStatus.UNPAID,
-                    },
-                    update: { settlementBatchId },
+                    select: { id: true, paymentStatus: true, manualAdjustment: true },
                 });
 
-                await this.wallet.createFrozenSettlementEarning(
-                    {
-                        userId: order.dispatcherId,
-                        amount: csSettlement.finalEarnings,
-                        unlockAt,
-                        sourceType: 'ORDER_SETTLEMENT',
-                        sourceId: csSettlement.id,
-                        orderId,
-                        dispatchId,
-                        settlementId: csSettlement.id,
-                    },
-                    tx,
-                );
+                if (!csFound) {
+                    const created = await tx.orderSettlement.create({
+                        data: {
+                            orderId,
+                            dispatchId,
+                            userId: order.dispatcherId,
+                            settlementType: 'CUSTOMER_SERVICE',
+                            settlementBatchId,
+                            calculatedEarnings: csAmount,
+                            manualAdjustment: 0,
+                            finalEarnings: csAmount,
+                            paymentStatus: PaymentStatus.UNPAID,
+                        },
+                        select: { id: true, finalEarnings: true },
+                    });
+
+                    await this.wallet.createFrozenSettlementEarning(
+                        {
+                            userId: order.dispatcherId,
+                            amount: created.finalEarnings,
+                            unlockAt,
+                            sourceType: 'ORDER_SETTLEMENT',
+                            sourceId: created.id,
+                            orderId,
+                            dispatchId,
+                            settlementId: created.id,
+                        },
+                        tx,
+                    );
+                } else {
+                    const canRecalc =
+                        csFound.paymentStatus === PaymentStatus.UNPAID && Number(csFound.manualAdjustment ?? 0) === 0;
+
+                    if (canRecalc) {
+                        const updated = await tx.orderSettlement.update({
+                            where: { id: csFound.id },
+                            data: {
+                                settlementBatchId,
+                                calculatedEarnings: csAmount,
+                                finalEarnings: csAmount,
+                                clubEarnings: 0,
+                                manualAdjustment: 0,
+                            },
+                            select: { id: true, finalEarnings: true },
+                        });
+
+                        await this.wallet.createFrozenSettlementEarning(
+                            {
+                                userId: order.dispatcherId,
+                                amount: updated.finalEarnings,
+                                unlockAt,
+                                sourceType: 'ORDER_SETTLEMENT',
+                                sourceId: updated.id,
+                                orderId,
+                                dispatchId,
+                                settlementId: updated.id,
+                            },
+                            tx,
+                        );
+                    } else {
+                        await tx.orderSettlement.update({
+                            where: { id: csFound.id },
+                            data: { settlementBatchId },
+                        });
+                    }
+                }
             }
         }
 
         // ===========================
-        // 7️⃣ 聚合回写订单（你原有逻辑，保持）
+        // 7️⃣ 聚合回写订单
         // ===========================
         const agg = await tx.orderSettlement.aggregate({
             where: { orderId },
-            _sum: {
-                finalEarnings: true,
-                clubEarnings: true,
-            },
+            _sum: { finalEarnings: true, clubEarnings: true },
         });
 
         await tx.order.update({
@@ -1140,7 +1486,7 @@ export class OrdersService {
         });
 
         // ===========================
-        // 8️⃣ 操作日志（你原有逻辑，保持）
+        // 8️⃣ 操作日志（建议也传 tx，避免事务内外混用）
         // ===========================
         await this.logOrderAction(
             order.dispatcherId,
@@ -1149,20 +1495,17 @@ export class OrdersService {
             {
                 dispatchId,
                 settlementBatchId,
-                rule:
-                    dispatchCount === 1 && mode === 'COMPLETE'
-                        ? 'SINGLE_COMPLETE_FULL'
-                        : 'RATIO_BY_PROGRESS',
-                multiplierPriority: hasOrderCut
-                    ? 'ORDER_CUT'
-                    : hasProjectCut
-                        ? 'PROJECT_CUT'
-                        : 'PLAYER_SHARE',
+                rule: dispatchCount === 1 && mode === 'COMPLETE' ? 'SINGLE_COMPLETE_FULL' : 'RATIO_BY_PROGRESS',
+                multiplierPriority,
+                orderCut: isSet(orderCutRaw) ? normalizeToRatio(orderCutRaw, 0) : null,
+                projectCut: !isSet(orderCutRaw) && isSet(projectCutRaw) ? normalizeToRatio(projectCutRaw, 0) : null,
             },
+            tx,
         );
 
         return true;
     }
+
 
     private capProgress(progress: number, base: number): number {
         if (progress > base) return base;
