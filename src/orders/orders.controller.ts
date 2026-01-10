@@ -48,7 +48,7 @@ export class OrdersController {
     /** 订单详情（管理端） */
     @Post('detail')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:list:page')
+    @Permissions('orders:detail:page')
     async detail(@Body() body: any) {
         const id = Number(body.id);
         if (!id || Number.isNaN(id)) throw new BadRequestException('id 必须为数字');
