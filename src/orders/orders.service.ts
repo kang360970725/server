@@ -1,4 +1,4 @@
-import {BadRequestException, ForbiddenException, Injectable, NotFoundException} from '@nestjs/common';
+import {BadRequestException, ForbiddenException, Injectable, NotFoundException, ConflictException} from '@nestjs/common';
 import {PrismaService} from '../prisma/prisma.service';
 import {CreateOrderDto} from './dto/create-order.dto';
 import {QueryOrdersDto} from './dto/query-orders.dto';
@@ -1232,8 +1232,8 @@ export class OrdersService {
                     });
 
                     const canRecalc =
-                        !found ||
-                        (found.paymentStatus === PaymentStatus.UNPAID && Number(found.manualAdjustment ?? 0) === 0);
+                        !csFound ||
+                        (csFound.paymentStatus === PaymentStatus.UNPAID && Number(csFound.manualAdjustment ?? 0) === 0);
                     await this.wallet.createFrozenSettlementEarning(
                         {
                             userId: order.dispatcherId,
@@ -1266,8 +1266,8 @@ export class OrdersService {
                         });
 
                         const canRecalc =
-                            !found ||
-                            (found.paymentStatus === PaymentStatus.UNPAID && Number(found.manualAdjustment ?? 0) === 0);
+                            !csFound ||
+                            (csFound.paymentStatus === PaymentStatus.UNPAID && Number(csFound.manualAdjustment ?? 0) === 0);
 
                         await this.wallet.createFrozenSettlementEarning(
                             {
