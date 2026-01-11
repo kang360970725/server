@@ -110,86 +110,86 @@ export class WalletService {
      *
      * 不在这里判断“体验单/非体验单”，unlockAt 由调用方计算传入
      */
-    async createFrozenSettlementEarning(params: {
-        userId: number;
-        amount: number;
-        unlockAt: Date;
+    async createFrozenSettlementEarning(
+        params: {
+            userId: number;
+            amount: number;
+            unlockAt: Date;
 
-        // 幂等来源
-        sourceType?: string; // default 'ORDER_SETTLEMENT'
-        sourceId: number;
+            // 幂等来源
+            sourceType?: string; // default 'ORDER_SETTLEMENT'
+            sourceId: number;
 
-        // 可选冗余关联，方便对账
-        orderId?: number | null;
-        dispatchId?: number | null;
-        settlementId?: number | null;
-    },
-                                        tx?: PrismaTx) {
-        console.log('[createFrozenSettlementEarning] userId=', params.userId, 'amount=', params.amount, 'sourceType=', params.sourceType ?? 'ORDER_SETTLEMENT', 'sourceId=', params.sourceId);
+            // ✅ 是否允许“重算修正”（由 Orders 侧 canRecalc 传入）
+            // - true：若 earningTx 仍为 FROZEN，则允许将 tx/hold 金额与解冻时间对齐到最新，并修正 frozenBalance（按 delta）
+            // - false：只做幂等补偿（补建 hold），不改金额（避免覆盖人工调整/已支付/已出账等）
+            allowRecalc?: boolean;
+
+            // 可选冗余关联，方便对账
+            orderId?: number | null;
+            dispatchId?: number | null;
+            settlementId?: number | null; // 对应 OrderSettlement.id
+        },
+        tx?: PrismaTx,
+    ) {
+        console.log(
+            '[createFrozenSettlementEarning] userId=',
+            params.userId,
+            'amount=',
+            params.amount,
+            'sourceType=',
+            params.sourceType ?? 'ORDER_SETTLEMENT',
+            'sourceId=',
+            params.sourceId,
+            'allowRecalc=',
+            params.allowRecalc ?? false,
+        );
+
         const db = (tx as any) ?? this.prisma;
 
         const sourceType = params.sourceType ?? 'ORDER_SETTLEMENT';
+        const allowRecalc = params.allowRecalc ?? false;
+
+        // ✅ 金额统一保留两位（你原实现）
         const amount = round2(params.amount);
 
         if (amount <= 0) {
             // 结算收益为 0 的情况：不入账、不建冻结单（避免产生无意义流水）
-            return { created: false, tx: null as any, hold: null as any };
+            return { created: false, updated: false, tx: null as any, hold: null as any };
         }
 
-        // 1) 查是否已存在该来源的收益流水（幂等）
-        const existingTx = await db.walletTransaction.findFirst({
-            where: {
-                sourceType,
-                sourceId: params.sourceId,
-            },
-            select: { id: true, userId: true, amount: true, status: true },
-        });
+        // 说明：
+        // - 这套链路的幂等锚点是：WalletTransaction.(sourceType, sourceId) 的唯一约束
+        // - WalletHold 则以 earningTxId @unique 做第二层幂等（同一收益流水只能冻结一次）
+        //
+        // 所以最稳的做法是：
+        // 1) upsert WalletTransaction（消灭并发竞态）
+        // 2) upsert WalletHold（消灭并发竞态）
+        // 3) 账户汇总 frozenBalance 用“delta 修正”或“补偿修正”，确保一致
 
-        // 2) 如果已存在：确保冻结单存在（补偿），然后返回
-        if (existingTx) {
-            const existingHold = await db.walletHold.findFirst({
-                where: { earningTxId: existingTx.id },
-                select: { id: true, status: true },
-            });
-
-            if (!existingHold) {
-                await db.walletHold.create({
-                    data: {
-                        userId: params.userId,
-                        earningTxId: existingTx.id,
-                        amount,
-                        status: 'FROZEN',
-                        unlockAt: params.unlockAt,
-                    },
-                });
-
-                // 冻结单补建时，账户 frozenBalance 可能没加过，这里做一次兜底修正：
-                // - 只有当收益流水还是 FROZEN 时才补增 frozenBalance
-                if (existingTx.status === 'FROZEN') {
-                    await this.ensureWalletAccount(params.userId, db as any);
-                    await db.walletAccount.update({
-                        where: { userId: params.userId },
-                        data: { frozenBalance: { increment: amount } },
-                    });
-                }
-            }
-
-            return { created: false, tx: existingTx, hold: existingHold };
-        }
-
-        // 3) 不存在则创建：建议在事务里执行，确保“流水 + 冻结单 + 账户汇总”原子一致
-        //    如果外部没传 tx，这里自己包一层 transaction
         const runner = async (t: PrismaTx) => {
-            // 3.1 兜底确保账户存在
+            // 0) 兜底确保账户存在
             await this.ensureWalletAccount(params.userId, t as any);
 
-            // 3.2 创建收益流水（冻结）
-            const earningTx = await (t as any).walletTransaction.create({
-                data: {
+            // 1) upsert 收益流水（冻结）
+            // ✅ 幂等：同一来源只会有一条收益流水
+            //
+            // 注意：
+            // - create 分支：正常创建冻结流水
+            // - update 分支：只更新冗余字段；金额是否更新由 allowRecalc + status 决定（后面统一处理）
+            const earningTx = await (t as any).walletTransaction.upsert({
+                where: {
+                    // @@unique([sourceType, sourceId])
+                    sourceType_sourceId: {
+                        sourceType,
+                        sourceId: params.sourceId,
+                    },
+                },
+                create: {
                     userId: params.userId,
                     direction: 'IN',
                     bizType: 'SETTLEMENT_EARNING',
-                    amount,
+                    amount, // 初始金额
                     status: 'FROZEN',
                     sourceType,
                     sourceId: params.sourceId,
@@ -197,26 +197,142 @@ export class WalletService {
                     dispatchId: params.dispatchId ?? null,
                     settlementId: params.settlementId ?? null,
                 },
-            });
-
-            // 3.3 创建冻结单
-            const hold = await (t as any).walletHold.create({
-                data: {
-                    userId: params.userId,
-                    earningTxId: earningTx.id,
-                    amount,
-                    status: 'FROZEN',
-                    unlockAt: params.unlockAt,
+                update: {
+                    // ✅ 幂等补偿：冗余字段可以对齐（不敏感）
+                    // ⚠️ 金额是否改，后面统一按 allowRecalc + status 判断
+                    orderId: params.orderId ?? null,
+                    dispatchId: params.dispatchId ?? null,
+                    settlementId: params.settlementId ?? null,
                 },
+                select: { id: true, userId: true, amount: true, status: true },
             });
 
-            // 3.4 汇总账户：冻结余额 +amount
-            await (t as any).walletAccount.update({
-                where: { userId: params.userId },
-                data: { frozenBalance: { increment: amount } },
+            // 2) 确保冻结单存在（upsert）
+            //    WalletHold 以 earningTxId @unique 幂等
+            const existingHold = await (t as any).walletHold.findUnique({
+                where: { earningTxId: earningTx.id },
+                select: { id: true, amount: true, status: true, unlockAt: true },
             });
 
-            return { created: true, tx: earningTx, hold };
+            // 3) 处理三类情况：
+            // A) 第一次创建（earningTx.status=FROZEN + hold 不存在）
+            // B) 已存在但需要补偿（hold 缺失）
+            // C) 已存在且 allowRecalc=true，需要同步金额与解冻时间（仅当 earningTx 仍为 FROZEN）
+            //
+            // 核心原则：
+            // - 如果 earningTx 不为 FROZEN，说明这笔流水已进入后续流程（解冻/出账/冲正等），不要再改金额，避免污染财务链路
+            // - 如果 allowRecalc=false，则永远不改金额，只做“补建/补偿”
+            let created = false;
+            let updated = false;
+
+            // ---------- 3.1) 补建冻结单 ----------
+            // 这里必须非常小心 frozenBalance 的补偿增量应当用“真实冻结金额”
+            // - 若已有 earningTx，冻结金额应以 earningTx.amount 为准（不是 params.amount）
+            if (!existingHold) {
+                const hold = await (t as any).walletHold.create({
+                    data: {
+                        userId: params.userId,
+                        earningTxId: earningTx.id,
+                        amount: earningTx.amount, // ✅ 以 earningTx.amount 为准，避免补偿时用错 params.amount
+                        status: 'FROZEN',
+                        unlockAt: params.unlockAt,
+                    },
+                    select: { id: true, amount: true, status: true, unlockAt: true },
+                });
+
+                // 冻结单补建时，账户 frozenBalance 可能没加过，这里做一次兜底修正：
+                // - 只有当收益流水还是 FROZEN 时才补增 frozenBalance
+                if (earningTx.status === 'FROZEN') {
+                    await (t as any).walletAccount.update({
+                        where: { userId: params.userId },
+                        data: { frozenBalance: { increment: earningTx.amount } },
+                    });
+                }
+
+                // ✅ 这属于“补偿创建”
+                return { created: false, updated: true, tx: earningTx, hold };
+            }
+
+            // ---------- 3.2) allowRecalc：同步修正金额 / 解冻时间 ----------
+            // 只有在满足以下条件时才允许对齐金额：
+            // - allowRecalc=true（Orders 侧判断了 canRecalc）
+            // - earningTx.status === 'FROZEN'（仍在冻结态，可安全调整）
+            //
+            // 对齐内容：
+            // - WalletTransaction.amount -> amount
+            // - WalletHold.amount -> amount
+            // - WalletHold.unlockAt -> params.unlockAt（体验/非体验规则调整也要对齐）
+            // - walletAccount.frozenBalance 按 delta 修正
+            if (allowRecalc && earningTx.status === 'FROZEN') {
+                const oldAmount = round2(earningTx.amount);
+                const newAmount = amount;
+
+                // delta 可正可负
+                const delta = round2(newAmount - oldAmount);
+
+                // 如果金额或 unlockAt 有变化才更新（减少写压力）
+                const needUpdateAmount = delta !== 0;
+                const needUpdateUnlockAt =
+                    existingHold.unlockAt?.getTime?.() !== params.unlockAt.getTime?.();
+
+                if (needUpdateAmount || needUpdateUnlockAt) {
+                    if (needUpdateAmount) {
+                        await (t as any).walletTransaction.update({
+                            where: { id: earningTx.id },
+                            data: { amount: newAmount },
+                        });
+
+                        // ✅ 汇总账户 frozenBalance 按差额修正
+                        // - 增加：increment
+                        // - 减少：decrement
+                        if (delta > 0) {
+                            await (t as any).walletAccount.update({
+                                where: { userId: params.userId },
+                                data: { frozenBalance: { increment: delta } },
+                            });
+                        } else if (delta < 0) {
+                            await (t as any).walletAccount.update({
+                                where: { userId: params.userId },
+                                data: { frozenBalance: { decrement: Math.abs(delta) } },
+                            });
+                        }
+                    }
+
+                    await (t as any).walletHold.update({
+                        where: { id: existingHold.id },
+                        data: {
+                            amount: newAmount, // ✅ 冻结单金额同步
+                            unlockAt: params.unlockAt, // ✅ 解冻时间同步
+                        },
+                    });
+
+                    updated = true;
+                }
+
+                // 返回最新 hold（保持返回值可信）
+                const hold = await (t as any).walletHold.findUnique({
+                    where: { id: existingHold.id },
+                    select: { id: true, amount: true, status: true, unlockAt: true },
+                });
+
+                // 返回最新 tx（金额可能已更新）
+                const txLatest = await (t as any).walletTransaction.findUnique({
+                    where: { id: earningTx.id },
+                    select: { id: true, userId: true, amount: true, status: true },
+                });
+
+                return { created, updated, tx: txLatest, hold };
+            }
+
+            // ---------- 3.3) 默认幂等返回（不改金额） ----------
+            // allowRecalc=false 或 earningTx.status != FROZEN
+            // 只保证“冻结单存在”，并返回
+            const hold = await (t as any).walletHold.findUnique({
+                where: { id: existingHold.id },
+                select: { id: true, amount: true, status: true, unlockAt: true },
+            });
+
+            return { created, updated, tx: earningTx, hold };
         };
 
         // 外部传了 tx 就用外部 tx（让 OrdersService 将来能把“结算+钱包入账”做成一个大事务）
@@ -227,6 +343,7 @@ export class WalletService {
         // 否则内部开启事务
         return this.prisma.$transaction(async (t) => runner(t as any));
     }
+
 
     /**
      * 退款冲正：按订单维度冲正所有“结算收益入账”流水（含冻结/已解冻两种情况）

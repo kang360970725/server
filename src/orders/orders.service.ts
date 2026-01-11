@@ -1129,6 +1129,9 @@ export class OrdersService {
                     // === 钱包冻结（同一 tx，依赖 settlement.id 的唯一性） ===
                     // ✅ 这里也保持幂等：WalletTransaction 需基于 sourceType+sourceId 幂等生成 earningTx
                     // ✅ WalletHold.earningTxId @unique 保证同一 earningTx 只能冻结一次
+                    const canRecalc =
+                        !found ||
+                        (found.paymentStatus === PaymentStatus.UNPAID && Number(found.manualAdjustment ?? 0) === 0);
                     await this.wallet.createFrozenSettlementEarning(
                         {
                             userId,
@@ -1139,6 +1142,7 @@ export class OrdersService {
                             orderId,
                             dispatchId,
                             settlementId,
+                            allowRecalc: canRecalc,
                         },
                         tx,
                     );
@@ -1163,6 +1167,10 @@ export class OrdersService {
 
                     settlementFinal = updated.finalEarnings;
 
+                    const canRecalc =
+                        !found ||
+                        (found.paymentStatus === PaymentStatus.UNPAID && Number(found.manualAdjustment ?? 0) === 0);
+
                     await this.wallet.createFrozenSettlementEarning(
                         {
                             userId,
@@ -1173,6 +1181,7 @@ export class OrdersService {
                             orderId,
                             dispatchId,
                             settlementId: updated.id,
+                            allowRecalc: canRecalc,
                         },
                         tx,
                     );
@@ -1222,6 +1231,9 @@ export class OrdersService {
                         select: { id: true, finalEarnings: true },
                     });
 
+                    const canRecalc =
+                        !found ||
+                        (found.paymentStatus === PaymentStatus.UNPAID && Number(found.manualAdjustment ?? 0) === 0);
                     await this.wallet.createFrozenSettlementEarning(
                         {
                             userId: order.dispatcherId,
@@ -1232,6 +1244,7 @@ export class OrdersService {
                             orderId,
                             dispatchId,
                             settlementId: created.id,
+                            allowRecalc: canRecalc,
                         },
                         tx,
                     );
@@ -1252,6 +1265,10 @@ export class OrdersService {
                             select: { id: true, finalEarnings: true },
                         });
 
+                        const canRecalc =
+                            !found ||
+                            (found.paymentStatus === PaymentStatus.UNPAID && Number(found.manualAdjustment ?? 0) === 0);
+
                         await this.wallet.createFrozenSettlementEarning(
                             {
                                 userId: order.dispatcherId,
@@ -1262,6 +1279,7 @@ export class OrdersService {
                                 orderId,
                                 dispatchId,
                                 settlementId: updated.id,
+                                allowRecalc: canRecalc,
                             },
                             tx,
                         );
@@ -1698,49 +1716,128 @@ export class OrdersService {
         return {data, total, page, limit, totalPages: Math.ceil(total / limit)};
     }
 
+    /***
+     * 小时单补收收益，需触发重新结算。
+     * ✅ 未结单不允许补收（仅 OrderStatus.COMPLETED）
+     * ✅ 仅小时单（BillingMode.HOURLY）
+     * ✅ 实付金额仅允许增加（超时补收），不允许减少
+     * ✅ 补收后重算：修改原结算流水/钱包冻结（不新增）
+     **/
     async updatePaidAmount(orderId: number, paidAmount: number, operatorId: number, remark?: string) {
         if (!orderId) throw new BadRequestException('id 必填');
         if (!Number.isFinite(paidAmount) || paidAmount < 0) throw new BadRequestException('paidAmount 非法');
 
-        const order = await this.prisma.order.findUnique({
-            where: {id: orderId},
-            include: {project: true},
-        });
-        if (!order) throw new NotFoundException('订单不存在');
-
-        const snapshot: any = order.projectSnapshot || {};
-        const billingMode = snapshot.billingMode || (order.project as any)?.billingMode;
-
-        if (billingMode !== 'HOURLY') {
-            throw new ForbiddenException('仅小时单允许修改实付金额');
-        }
-
-        if (paidAmount < order.paidAmount) {
-            throw new ForbiddenException('实付金额仅允许增加（超时补收），不允许减少');
-        }
-
-        const old = order.paidAmount;
-        const updated = await this.prisma.order.update({
-            where: {id: orderId},
-            data: {paidAmount},
-        });
-
-        if (operatorId) {
-            await this.prisma.userLog.create({
-                data: {
-                    userId: operatorId,
-                    action: 'UPDATE_PAID_AMOUNT',
-                    targetType: 'ORDER',
-                    targetId: orderId,
-                    oldData: {paidAmount: old} as any,
-                    newData: {paidAmount} as any,
-                    remark: remark || `小时单补收：${old} → ${paidAmount}`,
-                },
+        return this.prisma.$transaction(async (tx) => {
+            // 1) 读取订单（事务内，保证后续重算看到的是最新 paidAmount）
+            const order = await tx.order.findUnique({
+                where: { id: orderId },
+                include: { project: true },
             });
-        }
+            if (!order) throw new NotFoundException('订单不存在');
 
-        return updated;
+            // 2) 校验：仅小时单允许补收
+            // billingMode 字段来自订单选择的项目 GameProject.billingMode
+            const snapshot: any = order.projectSnapshot || {};
+            const billingMode: BillingMode | undefined =
+                (snapshot.billingMode as any) || ((order.project as any)?.billingMode as any);
+
+            if (billingMode !== BillingMode.HOURLY) {
+                throw new ForbiddenException('仅小时单允许修改实付金额');
+            }
+
+            // 3) 校验：未结单不允许补收（严格）
+            if (order.status !== OrderStatus.COMPLETED) {
+                throw new ForbiddenException('未结单，不允许补收实付金额');
+            }
+
+            // 4) 校验：只允许增加
+            const old = Number(order.paidAmount ?? 0);
+            if (paidAmount < old) {
+                throw new ForbiddenException('实付金额仅允许增加（超时补收），不允许减少');
+            }
+            if (paidAmount === old) {
+                // 无变化：不写日志、不重算
+                return order;
+            }
+
+            // 5) 防并发：结算中禁止补收（避免结算链路读取到中途变化的 paidAmount）
+            const settlingCount = await tx.orderDispatch.count({
+                where: { orderId, status: DispatchStatus.SETTLING as any },
+            });
+            if (settlingCount > 0) {
+                throw new ConflictException('订单正在结算处理中，请稍后再试');
+            }
+
+            // 6) 读取需要重算的 dispatch（严谨：只重算已经结单的批次）
+            // - 你当前规则：只有 COMPLETED 才算“结单触发自动结算落库”
+            const completedDispatches = await tx.orderDispatch.findMany({
+                where: { orderId, status: DispatchStatus.COMPLETED as any },
+                select: { id: true, status: true },
+                orderBy: { id: 'asc' },
+            });
+
+            if (completedDispatches.length === 0) {
+                // 理论上 order.status=COMPLETED 时不应发生，但加一道防线更安全
+                throw new ConflictException('订单已结单但未找到已结单派单批次，无法重算');
+            }
+
+            // 7) 更新实付金额（事务内）
+            const updated = await tx.order.update({
+                where: { id: orderId },
+                data: { paidAmount },
+            });
+
+            // 8) 写日志（事务内）
+            if (operatorId) {
+                await tx.userLog.create({
+                    data: {
+                        userId: operatorId,
+                        action: 'UPDATE_PAID_AMOUNT',
+                        targetType: 'ORDER',
+                        targetId: orderId,
+                        oldData: { paidAmount: old } as any,
+                        newData: { paidAmount } as any,
+                        remark: remark || `小时单补收：${old} → ${paidAmount}`,
+                    },
+                });
+            }
+
+            // 9) 触发重算结算（修改原流水，不新增）
+            // ✅ 每次补收生成新的批次号，便于审计/追溯
+            const settlementBatchId = randomUUID();
+
+            // ✅ 串行执行：事务内更稳（避免 dispatch 多时 Promise.all 放大事务压力/超时风险）
+            for (const d of completedDispatches) {
+                await this.createSettlementsForDispatch(
+                    {
+                        orderId,
+                        dispatchId: d.id,
+                        mode: 'COMPLETE',
+                        settlementBatchId,
+                    },
+                    tx,
+                );
+            }
+
+            // 10) 可选：记录一次“补收触发重算”
+            if (operatorId) {
+                await tx.userLog.create({
+                    data: {
+                        userId: operatorId,
+                        action: 'RECALC_SETTLEMENT_BY_PAID_AMOUNT',
+                        targetType: 'ORDER',
+                        targetId: orderId,
+                        oldData: { paidAmount: old } as any,
+                        newData: { paidAmount } as any,
+                        remark: `补收触发重算结算，batch=${settlementBatchId}`,
+                    },
+                });
+            }
+
+            return updated;
+        });
     }
+
 
     async updateDispatchParticipants(
         dto: { dispatchId: number; playerIds: number[]; remark?: string },
