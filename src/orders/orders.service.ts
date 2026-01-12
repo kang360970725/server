@@ -946,6 +946,406 @@ export class OrdersService {
      *
      * 4) ✅ settlement + 钱包冻结必须在同一个 tx 中
      */
+//     async createSettlementsForDispatch(
+//         params: {
+//             orderId: number;
+//             dispatchId: number;
+//             mode: 'ARCHIVE' | 'COMPLETE';
+//             settlementBatchId: string; // ✅ 结算批次号
+//         },
+//         tx: any, // ✅ 外层事务
+//     ) {
+//         const { orderId, dispatchId, mode, settlementBatchId } = params;
+//
+//         // ===========================
+//         // v0.2 测试参数：冻结时间用“分钟”
+//         // ✅ 后续上线再改回“天 / 按等级配置”
+//         // ===========================
+//         // const EXPERIENCE_UNLOCK_MINUTES = 3 * 24 * 60;
+//         // const REGULAR_UNLOCK_MINUTES = 7 * 24 * 60;
+//         const EXPERIENCE_UNLOCK_MINUTES = 5;
+//         const REGULAR_UNLOCK_MINUTES = 30;
+//
+//         // ===========================
+//         // 客服分红比例（不落库，纯规则）
+//         // ===========================
+//         const CUSTOMER_SERVICE_SHARE_RATE = 0.01;
+//
+//         // ---------- 工具函数 ----------
+//         const isSet = (v: any) => v !== null && v !== undefined; // ✅ 0 也算已设置
+//         const normalizeToRatio = (v: any, fallback: number) => {
+//             const n = Number(v);
+//             if (!Number.isFinite(n)) return fallback;
+//             return n > 1 ? n / 100 : n;
+//         };
+//
+//         // 1️⃣ 读取订单 & 派单（必须用 tx）
+//         const order = await tx.order.findUnique({
+//             where: { id: orderId },
+//             include: { project: true },
+//         });
+//         if (!order) throw new NotFoundException('订单不存在');
+//
+//         const dispatch = await tx.orderDispatch.findUnique({
+//             where: { id: dispatchId },
+//             include: { participants: true },
+//         });
+//         if (!dispatch) throw new NotFoundException('派单批次不存在');
+//
+//         // 2️⃣ 本轮参与者（只结算 active 的，避免历史重复结算）
+//         const participants = dispatch.participants.filter((p) => p.isActive);
+//         if (participants.length === 0) return true;
+//
+//         // 3️⃣ 本轮结算类型（体验单 / 正价单）
+//         const settlementType = order.type === OrderType.EXPERIENCE ? 'EXPERIENCE' : 'REGULAR';
+//
+//         // 解冻时间
+//         const unlockAt =
+//             settlementType === 'EXPERIENCE'
+//                 ? new Date(Date.now() + EXPERIENCE_UNLOCK_MINUTES * 60 * 1000)
+//                 : new Date(Date.now() + REGULAR_UNLOCK_MINUTES * 60 * 1000);
+//
+//         // 4️⃣ 分摊规则（原有逻辑，保持）
+//         // ✅ ARCHIVE 按 progress 比例分摊：ratioMap key 为 participant.id
+//         const ratioMap = this.buildProgressRatioMap(participants);
+//
+//         const dispatchCount = await tx.orderDispatch.count({
+//             where: { orderId },
+//         });
+//
+//         // ---------- 4.1) 结算瞬间快照：抽成规则输入 ----------
+//         // ✅ 订单抽成：只认 customClubRate；clubRate 仅做历史快照展示
+//         const orderCutRaw = isSet(order.customClubRate) ? order.customClubRate : null;
+//
+//         // ✅ 项目抽成：快照优先，避免项目后改影响历史
+//         const snap: any = order.projectSnapshot || {};
+//         const projectCutRaw = isSet(snap.clubRate) ? snap.clubRate : (isSet(order.project?.clubRate) ? order.project.clubRate : null);
+//
+//         // ---------- 4.2) 员工评级抽成快照（仅当订单/项目都未设置抽成时才需要） ----------
+//         // 员工评级表是 staffRating，对应抽成比例字段为 rate（抽成比例，不是到手比例）
+//         let staffCutMap: Map<number, number> | undefined;
+//
+//         if (!isSet(orderCutRaw) && !isSet(projectCutRaw)) {
+//             const userIds = participants.map((p) => p.userId);
+//             const users = await tx.user.findMany({
+//                 where: { id: { in: userIds } },
+//                 select: { id: true, staffRating: { select: { rate: true } } },
+//             });
+//
+//             staffCutMap = new Map<number, number>();
+//             for (const u of users) {
+//                 // ✅ staffRating.rate = 抽成比例（例如 0.4/40 表示抽 40%）
+//                 staffCutMap.set(u.id, Number(u.staffRating?.rate ?? 0));
+//             }
+//         }
+//
+//         // ✅ 用于日志：命中哪个优先级
+//         const multiplierPriority = isSet(orderCutRaw) ? 'ORDER_CUT' : isSet(projectCutRaw) ? 'PROJECT_CUT' : 'PLAYER_CUT';
+//
+//         // ===========================
+//         // 5️⃣ 逐个陪玩生成结算（幂等）
+//         // ✅ 优化：从 “串行 for-await” 改为 Promise.all 并发
+//         // ✅ 重要：resolveMultiplier 只吃快照，不在循环中查 DB，避免 N 次查询 & 结算中规则漂移
+//         // ===========================
+//
+//         // 5.0 先查已有 settlement（用于“安全重算，不覆盖人工调整”）
+//         const userIds = participants.map((p) => p.userId);
+//         const existing = await tx.orderSettlement.findMany({
+//             where: {
+//                 dispatchId,
+//                 settlementType,
+//                 userId: { in: userIds },
+//             },
+//             select: {
+//                 id: true,
+//                 userId: true,
+//                 paymentStatus: true,
+//                 manualAdjustment: true,
+//                 finalEarnings: true,
+//             },
+//         });
+//         const existMap = new Map<number, any>();
+//         for (const e of existing) existMap.set(e.userId, e);
+//
+//         await Promise.all(
+//             participants.map(async (p) => {
+//                 const userId = p.userId;
+//
+//                 const ratio = ratioMap.get(p.id) ?? 1;
+//                 const calculated = this.calcPlayerEarning({
+//                     order,
+//                     participantsCount: participants.length,
+//                     ratio,
+//                 });
+//
+//                 // 平台抽成 / 项目抽成 / 陪玩抽成优先级（按规则快照）
+//                 const multiplier = this.resolveMultiplier(order, p, {
+//                     orderCutRaw,
+//                     projectCutRaw,
+//                     staffCutMap,
+//                 });
+//
+//                 const final = this.round1(calculated * multiplier);
+//
+//                 const found = existMap.get(userId);
+//
+//                 // ✅ 可重算规则：
+//                 // - UNPAID 且 manualAdjustment=0：允许重算（例如改了抽成比例）
+//                 // - 否则：只补 settlementBatchId，不覆盖人工调整/已支付
+//                 const canRecalc =
+//                     !found ||
+//                     (found.paymentStatus === PaymentStatus.UNPAID && Number(found.manualAdjustment ?? 0) === 0);
+//
+//                 let settlementId: number;
+//                 let settlementFinal: number;
+//
+//                 if (!found) {
+//                     const created = await tx.orderSettlement.create({
+//                         data: {
+//                             orderId,
+//                             dispatchId,
+//                             userId,
+//                             settlementType,
+//
+//                             settlementBatchId, // ✅ 批次号
+//
+//                             calculatedEarnings: calculated,
+//                             manualAdjustment: final - calculated,
+//                             finalEarnings: final,
+//                             clubEarnings: calculated - final,
+//
+//                             // 这两项暂不再按新口径扣（不影响后续财务流程）
+//                             csEarnings: null,
+//                             inviteEarnings: null,
+//
+//                             paymentStatus: PaymentStatus.UNPAID,
+//                         },
+//                         select: { id: true, finalEarnings: true },
+//                     });
+//
+//                     settlementId = created.id;
+//                     settlementFinal = created.finalEarnings;
+//
+//                     // === 钱包冻结（同一 tx，依赖 settlement.id 的唯一性） ===
+//                     // ✅ 这里也保持幂等：WalletTransaction 需基于 sourceType+sourceId 幂等生成 earningTx
+//                     // ✅ WalletHold.earningTxId @unique 保证同一 earningTx 只能冻结一次
+//                     await this.wallet.syncSettlementEarningByFinalEarnings(
+//                         {
+//                             userId,
+//                             finalEarnings: settlementFinal, // ✅ 允许 0/负数
+//                             unlockAt, // ✅ final>0 才冻结；final<=0 自动取消冻结/即时入账
+//                             sourceType: 'ORDER_SETTLEMENT',
+//                             sourceId: settlementId, // ✅ 幂等锚点（uniq_wallet_tx_source）
+//                             orderId,
+//                             dispatchId,
+//                             settlementId,
+//                         },
+//                         tx,
+//                     );
+//
+//                     return;
+//                 }
+//
+//                 settlementId = found.id;
+//
+//                 if (canRecalc) {
+//                     const updated = await tx.orderSettlement.update({
+//                         where: { id: settlementId },
+//                         data: {
+//                             settlementBatchId,
+//                             calculatedEarnings: calculated,
+//                             manualAdjustment: final - calculated,
+//                             finalEarnings: final,
+//                             clubEarnings: calculated - final,
+//                         },
+//                         select: { id: true, finalEarnings: true },
+//                     });
+//
+//                     await this.wallet.syncSettlementEarningByFinalEarnings(
+//                         {
+//                             userId,
+//                             finalEarnings: updated.finalEarnings, // ✅ 允许 0/负数
+//                             unlockAt, // ✅ 仅 final>0 时有意义；final<=0 会自动取消冻结
+//                             sourceType: 'ORDER_SETTLEMENT',
+//                             sourceId: updated.id,
+//                             orderId,
+//                             dispatchId,
+//                             settlementId: updated.id,
+//                         },
+//                         tx,
+//                     );
+//
+//                 } else {
+//                     // ✅ 幂等策略：不覆盖人工调整，只补 batchId
+//                     await tx.orderSettlement.update({
+//                         where: { id: settlementId },
+//                         data: { settlementBatchId },
+//                     });
+//
+//                     // ✅ 不做钱包调整：避免覆盖人工调整/已支付
+//                 }
+//             }),
+//         );
+//
+//         // ===========================
+// // 6️⃣ 客服分红（如有）
+// // ✅ 优化：独立块，逻辑保持，仍在事务内
+// // ===========================
+//         if (CUSTOMER_SERVICE_SHARE_RATE > 0 && order.dispatcherId) {
+//             const csAmount = this.round1((order.paidAmount ?? 0) * CUSTOMER_SERVICE_SHARE_RATE);
+//             if (csAmount > 0) {
+//                 const csFound = await tx.orderSettlement.findUnique({
+//                     where: {
+//                         dispatchId_userId_settlementType: {
+//                             dispatchId,
+//                             userId: order.dispatcherId,
+//                             settlementType: 'CUSTOMER_SERVICE',
+//                         },
+//                     },
+//                     select: { id: true, paymentStatus: true, manualAdjustment: true },
+//                 });
+//
+//                 // ✅ 可重算规则：
+//                 // - 不存在：首次创建，允许写入冻结
+//                 // - 存在且 UNPAID 且 manualAdjustment=0：允许重算（金额/冻结对齐）
+//                 // - 其他情况：只补 batchId，不覆盖人工/已支付
+//                 const canRecalc =
+//                     !csFound ||
+//                     (csFound.paymentStatus === PaymentStatus.UNPAID &&
+//                         Number(csFound.manualAdjustment ?? 0) === 0);
+//
+//                 if (!csFound) {
+//                     const created = await tx.orderSettlement.create({
+//                         data: {
+//                             orderId,
+//                             dispatchId,
+//                             userId: order.dispatcherId,
+//                             settlementType: 'CUSTOMER_SERVICE',
+//                             settlementBatchId,
+//                             calculatedEarnings: csAmount,
+//                             manualAdjustment: 0,
+//                             finalEarnings: csAmount,
+//                             clubEarnings: 0,
+//                             paymentStatus: PaymentStatus.UNPAID,
+//                         },
+//                         select: { id: true, finalEarnings: true },
+//                     });
+//
+//                     // await this.wallet.createFrozenSettlementEarning(
+//                     //     {
+//                     //         userId: order.dispatcherId,
+//                     //         amount: created.finalEarnings,
+//                     //         unlockAt,
+//                     //         sourceType: 'ORDER_SETTLEMENT',
+//                     //         sourceId: created.id,
+//                     //         orderId,
+//                     //         dispatchId,
+//                     //         settlementId: created.id,
+//                     //         allowRecalc: true, // ✅ 首次创建：允许（幂等由唯一键保证）
+//                     //     },
+//                     //     tx,
+//                     // );
+//
+//                     await this.wallet.syncSettlementEarningByFinalEarnings(
+//                         {
+//                             userId: order.dispatcherId,
+//                             // amount: created.finalEarnings,
+//                             finalEarnings: created.finalEarnings, // ✅ 允许 0/负数
+//                             unlockAt, // ✅ 仅 final>0 时有意义；final<=0 会自动取消冻结
+//                             sourceType: 'ORDER_SETTLEMENT',
+//                             sourceId: created.id,
+//                             orderId,
+//                             dispatchId,
+//                             settlementId: created.id,
+//                         },
+//                         tx,
+//                     );
+//                 } else {
+//                     if (canRecalc) {
+//                         const updated = await tx.orderSettlement.update({
+//                             where: { id: csFound.id },
+//                             data: {
+//                                 settlementBatchId,
+//                                 calculatedEarnings: csAmount,
+//                                 manualAdjustment: 0,
+//                                 finalEarnings: csAmount,
+//                                 clubEarnings: 0,
+//                             },
+//                             select: { id: true, finalEarnings: true },
+//                         });
+//
+//                         await this.wallet.syncSettlementEarningByFinalEarnings(
+//                             {
+//                                 userId: order.dispatcherId,
+//                                 finalEarnings: updated.finalEarnings, // ✅ 允许 0/负数（即便认为不会负数，也统一口径）
+//                                 unlockAt,
+//                                 sourceType: 'ORDER_SETTLEMENT',
+//                                 sourceId: updated.id,
+//                                 orderId,
+//                                 dispatchId,
+//                                 settlementId: updated.id,
+//                             },
+//                             tx,
+//                         );
+//                     } else {
+//                         // ✅ 不允许重算：只补 batchId
+//                         await tx.orderSettlement.update({
+//                             where: { id: csFound.id },
+//                             data: { settlementBatchId },
+//                         });
+//
+//                         // ✅ 不动钱包金额/冻结，避免覆盖人工或已支付链路
+//                     }
+//                 }
+//             }
+//         }
+//
+//         // ===========================
+//         // 7️⃣ 聚合回写订单（原有逻辑，保持）
+//         // ===========================
+//         const agg = await tx.orderSettlement.aggregate({
+//             where: { orderId },
+//             _sum: {
+//                 finalEarnings: true,
+//                 clubEarnings: true,
+//             },
+//         });
+//
+//         await tx.order.update({
+//             where: { id: orderId },
+//             data: {
+//                 totalPlayerEarnings: Number(agg._sum.finalEarnings ?? 0),
+//                 clubEarnings: Number(agg._sum.clubEarnings ?? 0),
+//             },
+//         });
+//
+//         // ===========================
+//         // 8️⃣ 操作日志（原有逻辑，保持）
+//         // ===========================
+//         await this.logOrderAction(
+//             order.dispatcherId,
+//             orderId,
+//             mode === 'ARCHIVE' ? 'SETTLE_ARCHIVE' : 'SETTLE_COMPLETE',
+//             {
+//                 dispatchId,
+//                 settlementBatchId,
+//                 rule:
+//                     dispatchCount === 1 && mode === 'COMPLETE'
+//                         ? 'SINGLE_COMPLETE_FULL'
+//                         : 'RATIO_BY_PROGRESS',
+//                 multiplierPriority,
+//
+//                 // ✅ 记录使用的抽成快照（便于对账/追溯）
+//                 orderCut: isSet(orderCutRaw) ? normalizeToRatio(orderCutRaw, 0) : null,
+//                 projectCut: !isSet(orderCutRaw) && isSet(projectCutRaw) ? normalizeToRatio(projectCutRaw, 0) : null,
+//                 staffCutHint: (!isSet(orderCutRaw) && !isSet(projectCutRaw)) ? 'STAFF_RATING_RATE' : null,
+//             },
+//             tx,
+//         );
+//
+//         return true;
+//     }
+
     async createSettlementsForDispatch(
         params: {
             orderId: number;
@@ -993,20 +1393,22 @@ export class OrdersService {
         if (!dispatch) throw new NotFoundException('派单批次不存在');
 
         // 2️⃣ 本轮参与者（只结算 active 的，避免历史重复结算）
-        const participants = dispatch.participants.filter((p) => p.isActive);
+        const participants = (dispatch.participants || []).filter((p: any) => p.isActive);
         if (participants.length === 0) return true;
 
-        // 3️⃣ 本轮结算类型（体验单 / 正价单）
-        const settlementType = order.type === OrderType.EXPERIENCE ? 'EXPERIENCE' : 'REGULAR';
+        // 3️⃣ 本轮基础结算类型（体验单 / 正价单）
+        const baseSettlementType = order.type === OrderType.EXPERIENCE ? 'EXPERIENCE' : 'REGULAR';
 
         // 解冻时间
         const unlockAt =
-            settlementType === 'EXPERIENCE'
+            baseSettlementType === 'EXPERIENCE'
                 ? new Date(Date.now() + EXPERIENCE_UNLOCK_MINUTES * 60 * 1000)
                 : new Date(Date.now() + REGULAR_UNLOCK_MINUTES * 60 * 1000);
 
-        // 4️⃣ 分摊规则（原有逻辑，保持）
+        // 4️⃣ 分摊规则（原有逻辑，保持兼容）
         // ✅ ARCHIVE 按 progress 比例分摊：ratioMap key 为 participant.id
+        // ⚠️ 说明：新需求里“炸单/正收益”若录入了 progressWan，会改用 grossRmb 均摊；
+        //    ratioMap 仍作为“未录入 progress 时”的兼容回退逻辑（例如小时单/未填进度）。
         const ratioMap = this.buildProgressRatioMap(participants);
 
         const dispatchCount = await tx.orderDispatch.count({
@@ -1019,14 +1421,18 @@ export class OrdersService {
 
         // ✅ 项目抽成：快照优先，避免项目后改影响历史
         const snap: any = order.projectSnapshot || {};
-        const projectCutRaw = isSet(snap.clubRate) ? snap.clubRate : (isSet(order.project?.clubRate) ? order.project.clubRate : null);
+        const projectCutRaw = isSet(snap.clubRate)
+            ? snap.clubRate
+            : isSet(order.project?.clubRate)
+                ? order.project.clubRate
+                : null;
 
         // ---------- 4.2) 员工评级抽成快照（仅当订单/项目都未设置抽成时才需要） ----------
         // 员工评级表是 staffRating，对应抽成比例字段为 rate（抽成比例，不是到手比例）
         let staffCutMap: Map<number, number> | undefined;
 
         if (!isSet(orderCutRaw) && !isSet(projectCutRaw)) {
-            const userIds = participants.map((p) => p.userId);
+            const userIds = participants.map((p: any) => p.userId);
             const users = await tx.user.findMany({
                 where: { id: { in: userIds } },
                 select: { id: true, staffRating: { select: { rate: true } } },
@@ -1040,20 +1446,126 @@ export class OrdersService {
         }
 
         // ✅ 用于日志：命中哪个优先级
-        const multiplierPriority = isSet(orderCutRaw) ? 'ORDER_CUT' : isSet(projectCutRaw) ? 'PROJECT_CUT' : 'PLAYER_CUT';
+        const multiplierPriority = isSet(orderCutRaw)
+            ? 'ORDER_CUT'
+            : isSet(projectCutRaw)
+                ? 'PROJECT_CUT'
+                : 'PLAYER_CUT';
 
         // ===========================
-        // 5️⃣ 逐个陪玩生成结算（幂等）
-        // ✅ 优化：从 “串行 for-await” 改为 Promise.all 并发
-        // ✅ 重要：resolveMultiplier 只吃快照，不在循环中查 DB，避免 N 次查询 & 结算中规则漂移
+        // ✅ 4.3 本轮“progressWan → 人民币 gross”口径 + 炸单池（carry）兑付口径
+        // 说明：
+        // - order.baseAmountWan 固定不变（订单保底万）
+        // - 本轮 progressWan = active participants.progressBaseWan 求和（允许负数）
+        // - rate = round1(baseAmountWan / paidAmount)（万/元，取 1 位小数）
+        // - grossRmb = round1(progressWan / rate)（人民币，可正可负）
+        // - carryRemaining（炸单池剩余）通过历史 settlement 聚合计算（不改表结构）
+        // - 正常收益受订单 paidAmount 池封顶（避免“某轮打太多导致总收益>实收”）
         // ===========================
 
-        // 5.0 先查已有 settlement（用于“安全重算，不覆盖人工调整”）
-        const userIds = participants.map((p) => p.userId);
-        const existing = await tx.orderSettlement.findMany({
+        // ✅ rate = baseAmountWan / paidAmount（万/元），按你要求取 1 位小数
+        const baseAmountWan = Number((order as any).baseAmountWan ?? 0);
+        const paidAmount = Number((order as any).paidAmount ?? 0);
+        if (!Number.isFinite(baseAmountWan) || baseAmountWan <= 0) {
+            throw new BadRequestException('订单 baseAmountWan 非法');
+        }
+        if (!Number.isFinite(paidAmount) || paidAmount <= 0) {
+            throw new BadRequestException('订单 paidAmount 非法');
+        }
+        const rateWanPerYuan = this.round1(baseAmountWan / paidAmount); // ✅ 1 位小数
+
+        // ✅ 本轮 progress 总额（万）：active participants.progressBaseWan 求和（允许负数）
+        let dispatchProgressWan = 0;
+        let hasAnyProgressInput = false;
+        for (const p of participants) {
+            const v = (p as any).progressBaseWan;
+            if (v !== null && v !== undefined) {
+                const n = Number(v);
+                if (Number.isFinite(n) && n !== 0) {
+                    dispatchProgressWan += n;
+                    hasAnyProgressInput = true;
+                }
+            }
+        }
+
+        // ✅ 本轮 gross（人民币，可正可负）
+        // - 若本轮未填任何 progress（全为 0/空）：保持兼容，后续仍走你原“paidAmount 均分”口径
+        const grossRmb = hasAnyProgressInput ? this.round1(dispatchProgressWan / rateWanPerYuan) : null;
+
+        // ✅ 聚合历史：计算 carryRemaining + remainingPaidPool（最小改动：findMany + reduce）
+        // - carryDebt：历史基础结算（REGULAR/EXPERIENCE）里 calculatedEarnings<0 的绝对值之和
+        // - carryPaid：历史补偿结算（CARRY_COMPENSATION）里 calculatedEarnings>0 的之和
+        // - consumedPaidPool：历史基础结算里 calculatedEarnings>0 的之和（用于 paidAmount 池封顶）
+        const allForOrder = await tx.orderSettlement.findMany({
+            where: { orderId },
+            select: { settlementType: true, calculatedEarnings: true },
+        });
+
+        let consumedPaidPool = 0;
+        let carryDebt = 0;
+        let carryPaid = 0;
+
+        for (const s of allForOrder) {
+            const cal = Number((s as any).calculatedEarnings ?? 0);
+            if (!Number.isFinite(cal) || cal === 0) continue;
+
+            // ✅ 只看基础结算类型（REGULAR/EXPERIENCE）作为“订单收益池消耗/炸单池负债”来源
+            if ((s as any).settlementType === baseSettlementType) {
+                if (cal > 0) consumedPaidPool += cal;
+                if (cal < 0) carryDebt += -cal;
+            }
+
+            // ✅ 补偿结算：历史已兑付
+            if ((s as any).settlementType === 'CARRY_COMPENSATION') {
+                if (cal > 0) carryPaid += cal;
+            }
+        }
+
+        consumedPaidPool = this.round1(consumedPaidPool);
+        carryDebt = this.round1(carryDebt);
+        carryPaid = this.round1(carryPaid);
+
+        const carryRemaining = Math.max(0, this.round1(carryDebt - carryPaid));
+        const remainingPaidPool = Math.max(0, this.round1(paidAmount - consumedPaidPool));
+
+        // ✅ 把 gross 拆成：repay（本轮从炸单池兑付的补偿）+ normalGross（本轮正常收益，受 paidPool 封顶）
+        // - gross<0：炸单 → normalGross 为负数，repay=0
+        // - gross>0：先 repay=min(gross, carryRemaining)；normalGross = min(gross-repay, remainingPaidPool)
+        let repayRmb = 0;
+        let normalGrossRmb = 0;
+        let excessNormalRmb = 0; // ✅ 超出 paidPool 的部分（不发放，只做日志追溯）
+
+        if (grossRmb !== null) {
+            if (grossRmb < 0) {
+                repayRmb = 0;
+                normalGrossRmb = grossRmb; // 负数
+            } else if (grossRmb > 0) {
+                repayRmb = Math.min(grossRmb, carryRemaining);
+
+                const candidate = this.round1(grossRmb - repayRmb);
+                normalGrossRmb = Math.min(candidate, remainingPaidPool);
+
+                excessNormalRmb = this.round1(candidate - normalGrossRmb);
+            } else {
+                repayRmb = 0;
+                normalGrossRmb = 0;
+                excessNormalRmb = 0;
+            }
+        }
+
+        // ===========================
+        // 5️⃣ 逐个陪玩生成基础结算（幂等）
+        // ✅ 重要：本轮若有 progress 输入，基础结算按 normalGrossRmb 均摊；
+        //    炸单（gross<0）强制 multiplier=1，不受评级影响；
+        //    正收益才按抽成优先级计算 multiplier。
+        // ===========================
+
+        // 5.0 先查已有基础 settlement（用于幂等 update）
+        const userIds = participants.map((p: any) => p.userId);
+        const existingBase = await tx.orderSettlement.findMany({
             where: {
                 dispatchId,
-                settlementType,
+                settlementType: baseSettlementType,
                 userId: { in: userIds },
             },
             select: {
@@ -1064,37 +1576,52 @@ export class OrdersService {
                 finalEarnings: true,
             },
         });
-        const existMap = new Map<number, any>();
-        for (const e of existing) existMap.set(e.userId, e);
+        const baseMap = new Map<number, any>();
+        for (const e of existingBase) baseMap.set(e.userId, e);
 
         await Promise.all(
-            participants.map(async (p) => {
+            participants.map(async (p: any, idx: number) => {
                 const userId = p.userId;
 
-                const ratio = ratioMap.get(p.id) ?? 1;
-                const calculated = this.calcPlayerEarning({
-                    order,
-                    participantsCount: participants.length,
-                    ratio,
-                });
+                // ✅ calculated：本轮该陪玩的“基础收益”（人民币，可正可负）
+                // - 若本轮有 progress 输入：使用 normalGrossRmb 均摊（炸单时为负数）
+                // - 否则：保持兼容（小时单/未录入进度）仍用旧口径 paidAmount 均分 * ratio
+                let calculated: number;
 
-                // 平台抽成 / 项目抽成 / 陪玩抽成优先级（按规则快照）
-                const multiplier = this.resolveMultiplier(order, p, {
-                    orderCutRaw,
-                    projectCutRaw,
-                    staffCutMap,
-                });
+                if (grossRmb !== null) {
+                    // ✅ 均摊 normalGrossRmb（按 round1 口径），尾差给最后一个
+                    const avg = this.round1(normalGrossRmb / participants.length);
+                    calculated = avg;
 
+                    if (idx === participants.length - 1) {
+                        const sumBeforeLast = this.round1(avg * (participants.length - 1));
+                        calculated = this.round1(normalGrossRmb - sumBeforeLast);
+                    }
+                } else {
+                    const ratio = ratioMap.get(p.id) ?? 1;
+                    calculated = this.calcPlayerEarning({
+                        order,
+                        participantsCount: participants.length,
+                        ratio,
+                    });
+                }
+
+                // ✅ 平台抽成 / 项目抽成 / 员工评级优先级（正收益才适用）
+                // ✅ 炸单（gross<0）：不受抽成/评级影响
+                let multiplier = 1;
+
+                if (!(grossRmb !== null && grossRmb < 0)) {
+                    multiplier = this.resolveMultiplier(order, p, {
+                        orderCutRaw,
+                        projectCutRaw,
+                        staffCutMap,
+                    });
+                }
+
+                // ✅ final：本轮实际到手（人民币，可正可负）
                 const final = this.round1(calculated * multiplier);
 
-                const found = existMap.get(userId);
-
-                // ✅ 可重算规则：
-                // - UNPAID 且 manualAdjustment=0：允许重算（例如改了抽成比例）
-                // - 否则：只补 settlementBatchId，不覆盖人工调整/已支付
-                const canRecalc =
-                    !found ||
-                    (found.paymentStatus === PaymentStatus.UNPAID && Number(found.manualAdjustment ?? 0) === 0);
+                const found = baseMap.get(userId);
 
                 let settlementId: number;
                 let settlementFinal: number;
@@ -1105,19 +1632,19 @@ export class OrdersService {
                             orderId,
                             dispatchId,
                             userId,
-                            settlementType,
-
-                            settlementBatchId, // ✅ 批次号
+                            settlementType: baseSettlementType,
+                            settlementBatchId,
 
                             calculatedEarnings: calculated,
-                            manualAdjustment: final - calculated,
+                            manualAdjustment: this.round1(final - calculated),
                             finalEarnings: final,
-                            clubEarnings: calculated - final,
 
-                            // 这两项暂不再按新口径扣（不影响后续财务流程）
+                            // ✅ 正常：平台差额 = calculated - final
+                            // ✅ 炸单：multiplier=1 → 差额为 0
+                            clubEarnings: this.round1(calculated - final),
+
                             csEarnings: null,
                             inviteEarnings: null,
-
                             paymentStatus: PaymentStatus.UNPAID,
                         },
                         select: { id: true, finalEarnings: true },
@@ -1125,81 +1652,143 @@ export class OrdersService {
 
                     settlementId = created.id;
                     settlementFinal = created.finalEarnings;
-
-                    // === 钱包冻结（同一 tx，依赖 settlement.id 的唯一性） ===
-                    // ✅ 这里也保持幂等：WalletTransaction 需基于 sourceType+sourceId 幂等生成 earningTx
-                    // ✅ WalletHold.earningTxId @unique 保证同一 earningTx 只能冻结一次
-                    const canRecalc =
-                        !found ||
-                        (found.paymentStatus === PaymentStatus.UNPAID && Number(found.manualAdjustment ?? 0) === 0);
-                    await this.wallet.createFrozenSettlementEarning(
-                        {
-                            userId,
-                            amount: settlementFinal,
-                            unlockAt,
-                            sourceType: 'ORDER_SETTLEMENT',
-                            sourceId: settlementId, // ✅ 幂等锚点
-                            orderId,
-                            dispatchId,
-                            settlementId,
-                            allowRecalc: canRecalc,
-                        },
-                        tx,
-                    );
-
-                    return;
-                }
-
-                settlementId = found.id;
-
-                if (canRecalc) {
+                } else {
                     const updated = await tx.orderSettlement.update({
-                        where: { id: settlementId },
+                        where: { id: found.id },
                         data: {
                             settlementBatchId,
+
                             calculatedEarnings: calculated,
-                            manualAdjustment: final - calculated,
+                            manualAdjustment: this.round1(final - calculated),
                             finalEarnings: final,
-                            clubEarnings: calculated - final,
+                            clubEarnings: this.round1(calculated - final),
                         },
                         select: { id: true, finalEarnings: true },
                     });
 
+                    settlementId = updated.id;
                     settlementFinal = updated.finalEarnings;
-
-                    const canRecalc =
-                        !found ||
-                        (found.paymentStatus === PaymentStatus.UNPAID && Number(found.manualAdjustment ?? 0) === 0);
-
-                    await this.wallet.createFrozenSettlementEarning(
-                        {
-                            userId,
-                            amount: settlementFinal,
-                            unlockAt,
-                            sourceType: 'ORDER_SETTLEMENT',
-                            sourceId: updated.id, // ✅ 幂等锚点
-                            orderId,
-                            dispatchId,
-                            settlementId: updated.id,
-                            allowRecalc: canRecalc,
-                        },
-                        tx,
-                    );
-                } else {
-                    // ✅ 幂等策略：不覆盖人工调整，只补 batchId
-                    await tx.orderSettlement.update({
-                        where: { id: settlementId },
-                        data: { settlementBatchId },
-                    });
-
-                    // ✅ 不做钱包调整：避免覆盖人工调整/已支付
                 }
+
+                // ✅ 钱包同步：允许 0/负数（负数即时入账，不冻结；正数冻结；0 释放）
+                await this.wallet.syncSettlementEarningByFinalEarnings(
+                    {
+                        userId,
+                        finalEarnings: settlementFinal,
+                        unlockAt,
+                        sourceType: 'ORDER_SETTLEMENT',
+                        sourceId: settlementId, // ✅ 幂等锚点（uniq_wallet_tx_source）
+                        orderId,
+                        dispatchId,
+                        settlementId,
+                    },
+                    tx,
+                );
             }),
         );
 
         // ===========================
+        // ✅ 5.9 炸单池兑付补偿（可跨多轮，不仅最后一组）
+        // 规则：
+        // - grossRmb>0 时，先 repay=min(grossRmb, carryRemaining)
+        // - repayRmb 均摊给本轮参与者
+        // - 不抽成、不评级（multiplier=1），并且不占用订单 paidAmount 池（它是“补偿池兑付”）
+        // - settlementType 使用 'CARRY_COMPENSATION'（String，不需迁移）
+        // ===========================
+        if (grossRmb !== null && repayRmb > 0) {
+            const n = participants.length;
+            const avg = this.round1(repayRmb / n);
+
+            // ✅ 先查本轮已有补偿 settlement（避免 N 次 findUnique）
+            const existingComp = await tx.orderSettlement.findMany({
+                where: {
+                    dispatchId,
+                    settlementType: 'CARRY_COMPENSATION',
+                    userId: { in: userIds },
+                },
+                select: { id: true, userId: true },
+            });
+            const compMap = new Map<number, { id: number }>();
+            for (const e of existingComp) compMap.set(e.userId, e);
+
+            for (let idx = 0; idx < n; idx++) {
+                const p = participants[idx];
+                const userId = (p as any).userId;
+
+                let calculated = avg;
+                if (idx === n - 1) {
+                    const sumBeforeLast = this.round1(avg * (n - 1));
+                    calculated = this.round1(repayRmb - sumBeforeLast);
+                }
+
+                // ✅ 补偿不抽成/不评级
+                const final = calculated;
+
+                const found = compMap.get(userId);
+
+                let settlementId: number;
+                let settlementFinal: number;
+
+                if (!found) {
+                    const created = await tx.orderSettlement.create({
+                        data: {
+                            orderId,
+                            dispatchId,
+                            userId,
+                            settlementType: 'CARRY_COMPENSATION',
+                            settlementBatchId,
+
+                            calculatedEarnings: calculated,
+                            manualAdjustment: 0,
+                            finalEarnings: final,
+                            clubEarnings: 0,
+
+                            csEarnings: null,
+                            inviteEarnings: null,
+                            paymentStatus: PaymentStatus.UNPAID,
+                        },
+                        select: { id: true, finalEarnings: true },
+                    });
+
+                    settlementId = created.id;
+                    settlementFinal = created.finalEarnings;
+                } else {
+                    const updated = await tx.orderSettlement.update({
+                        where: { id: found.id },
+                        data: {
+                            settlementBatchId,
+                            calculatedEarnings: calculated,
+                            manualAdjustment: 0,
+                            finalEarnings: final,
+                            clubEarnings: 0,
+                        },
+                        select: { id: true, finalEarnings: true },
+                    });
+
+                    settlementId = updated.id;
+                    settlementFinal = updated.finalEarnings;
+                }
+
+                // ✅ 钱包同步：补偿为正数 → 冻结；若极端出现 0，也能对齐释放
+                await this.wallet.syncSettlementEarningByFinalEarnings(
+                    {
+                        userId,
+                        finalEarnings: settlementFinal,
+                        unlockAt,
+                        sourceType: 'ORDER_SETTLEMENT',
+                        sourceId: settlementId,
+                        orderId,
+                        dispatchId,
+                        settlementId,
+                    },
+                    tx,
+                );
+            }
+        }
+
+        // ===========================
         // 6️⃣ 客服分红（如有）
-        // ✅ 优化：独立块，逻辑保持，仍在事务内
+        // ✅ 保持独立：不参与 carry；理论上不应出现负数
         // ===========================
         if (CUSTOMER_SERVICE_SHARE_RATE > 0 && order.dispatcherId) {
             const csAmount = this.round1((order.paidAmount ?? 0) * CUSTOMER_SERVICE_SHARE_RATE);
@@ -1212,8 +1801,11 @@ export class OrdersService {
                             settlementType: 'CUSTOMER_SERVICE',
                         },
                     },
-                    select: { id: true, paymentStatus: true, manualAdjustment: true },
+                    select: { id: true },
                 });
+
+                let csId: number;
+                let csFinal: number;
 
                 if (!csFound) {
                     const created = await tx.orderSettlement.create({
@@ -1223,73 +1815,48 @@ export class OrdersService {
                             userId: order.dispatcherId,
                             settlementType: 'CUSTOMER_SERVICE',
                             settlementBatchId,
+
                             calculatedEarnings: csAmount,
                             manualAdjustment: 0,
                             finalEarnings: csAmount,
+                            clubEarnings: 0,
+                            csEarnings: null,
+                            inviteEarnings: null,
                             paymentStatus: PaymentStatus.UNPAID,
                         },
                         select: { id: true, finalEarnings: true },
                     });
-
-                    const canRecalc =
-                        !csFound ||
-                        (csFound.paymentStatus === PaymentStatus.UNPAID && Number(csFound.manualAdjustment ?? 0) === 0);
-                    await this.wallet.createFrozenSettlementEarning(
-                        {
-                            userId: order.dispatcherId,
-                            amount: created.finalEarnings,
-                            unlockAt,
-                            sourceType: 'ORDER_SETTLEMENT',
-                            sourceId: created.id,
-                            orderId,
-                            dispatchId,
-                            settlementId: created.id,
-                            allowRecalc: canRecalc,
-                        },
-                        tx,
-                    );
+                    csId = created.id;
+                    csFinal = created.finalEarnings;
                 } else {
-                    const canRecalc =
-                        csFound.paymentStatus === PaymentStatus.UNPAID && Number(csFound.manualAdjustment ?? 0) === 0;
-
-                    if (canRecalc) {
-                        const updated = await tx.orderSettlement.update({
-                            where: { id: csFound.id },
-                            data: {
-                                settlementBatchId,
-                                calculatedEarnings: csAmount,
-                                finalEarnings: csAmount,
-                                clubEarnings: 0,
-                                manualAdjustment: 0,
-                            },
-                            select: { id: true, finalEarnings: true },
-                        });
-
-                        const canRecalc =
-                            !csFound ||
-                            (csFound.paymentStatus === PaymentStatus.UNPAID && Number(csFound.manualAdjustment ?? 0) === 0);
-
-                        await this.wallet.createFrozenSettlementEarning(
-                            {
-                                userId: order.dispatcherId,
-                                amount: updated.finalEarnings,
-                                unlockAt,
-                                sourceType: 'ORDER_SETTLEMENT',
-                                sourceId: updated.id,
-                                orderId,
-                                dispatchId,
-                                settlementId: updated.id,
-                                allowRecalc: canRecalc,
-                            },
-                            tx,
-                        );
-                    } else {
-                        await tx.orderSettlement.update({
-                            where: { id: csFound.id },
-                            data: { settlementBatchId },
-                        });
-                    }
+                    const updated = await tx.orderSettlement.update({
+                        where: { id: csFound.id },
+                        data: {
+                            settlementBatchId,
+                            calculatedEarnings: csAmount,
+                            manualAdjustment: 0,
+                            finalEarnings: csAmount,
+                            clubEarnings: 0,
+                        },
+                        select: { id: true, finalEarnings: true },
+                    });
+                    csId = updated.id;
+                    csFinal = updated.finalEarnings;
                 }
+
+                await this.wallet.syncSettlementEarningByFinalEarnings(
+                    {
+                        userId: order.dispatcherId,
+                        finalEarnings: csFinal,
+                        unlockAt,
+                        sourceType: 'ORDER_SETTLEMENT',
+                        sourceId: csId,
+                        orderId,
+                        dispatchId,
+                        settlementId: csId,
+                    },
+                    tx,
+                );
             }
         }
 
@@ -1314,6 +1881,7 @@ export class OrdersService {
 
         // ===========================
         // 8️⃣ 操作日志（原有逻辑，保持）
+        // ✅ 增强：记录本轮 gross/carry/pool 追溯字段，便于你验算 A/B/C 多轮场景
         // ===========================
         await this.logOrderAction(
             order.dispatcherId,
@@ -1331,13 +1899,28 @@ export class OrdersService {
                 // ✅ 记录使用的抽成快照（便于对账/追溯）
                 orderCut: isSet(orderCutRaw) ? normalizeToRatio(orderCutRaw, 0) : null,
                 projectCut: !isSet(orderCutRaw) && isSet(projectCutRaw) ? normalizeToRatio(projectCutRaw, 0) : null,
-                staffCutHint: (!isSet(orderCutRaw) && !isSet(projectCutRaw)) ? 'STAFF_RATING_RATE' : null,
+                staffCutHint: !isSet(orderCutRaw) && !isSet(projectCutRaw) ? 'STAFF_RATING_RATE' : null,
+
+                // ✅ 本轮 progress → gross 口径（只有录入 progress 时才有）
+                rateWanPerYuan,
+                dispatchProgressWan: hasAnyProgressInput ? dispatchProgressWan : null,
+                grossRmb,
+
+                // ✅ 炸单池（carry）兑付与订单收益池封顶口径
+                carryDebt,
+                carryPaid,
+                carryRemaining,
+                repayRmb,
+                normalGrossRmb,
+                remainingPaidPool,
+                excessNormalRmb,
             },
             tx,
         );
 
         return true;
     }
+
 
 
 
@@ -1989,41 +2572,129 @@ export class OrdersService {
         return this.getOrderDetail(Number(after?.orderId));
     }
 
-
-    async adjustSettlementFinalEarnings(dto: { settlementId: number; finalEarnings: number; remark?: string }, operatorId: number) {
+    /** 结算手动调整（管理端/财务） */
+    async adjustSettlementFinalEarnings(
+        dto: { settlementId: number; finalEarnings: number; remark?: string },
+        operatorId: number,
+    ) {
         const settlementId = Number(dto.settlementId);
         const finalEarnings = Number(dto.finalEarnings);
 
         if (!settlementId) throw new BadRequestException('settlementId 必填');
         if (!Number.isFinite(finalEarnings)) throw new BadRequestException('finalEarnings 非法');
 
-        const s = await this.prisma.orderSettlement.findUnique({
-            where: {id: settlementId},
-            select: {id: true, orderId: true, calculatedEarnings: true, finalEarnings: true, manualAdjustment: true},
-        });
-        if (!s) throw new NotFoundException('结算记录不存在');
+        return this.prisma.$transaction(async (tx) => {
+            const s = await tx.orderSettlement.findUnique({
+                where: { id: settlementId },
+                select: {
+                    id: true,
+                    orderId: true,
+                    dispatchId: true,
+                    userId: true,
+                    settlementType: true,
+                    calculatedEarnings: true,
+                    finalEarnings: true,
+                    manualAdjustment: true,
+                },
+            });
+            if (!s) throw new NotFoundException('结算记录不存在');
 
-        const manualAdjustment = finalEarnings - Number(s.calculatedEarnings ?? 0);
+            // ===========================
+            // ✅ 校验：已解冻/不冻结则禁止调整
+            // ===========================
+            const earningTx = await tx.walletTransaction.findUnique({
+                where: {
+                    sourceType_sourceId: {
+                        sourceType: 'ORDER_SETTLEMENT',
+                        sourceId: settlementId,
+                    },
+                },
+                select: { id: true, status: true },
+            });
 
-        const updated = await this.prisma.orderSettlement.update({
-            where: {id: settlementId},
-            data: {
-                finalEarnings,
+            // 兼容历史：如果没有 walletTx（老数据），允许调整（并会在同步方法里补建）
+            if (earningTx) {
+                if (earningTx.status !== 'FROZEN') {
+                    throw new ForbiddenException('该结算已解冻/已入账，禁止手动调整');
+                }
+
+                const hold = await tx.walletHold.findUnique({
+                    where: { earningTxId: earningTx.id },
+                    select: { status: true },
+                });
+
+                // 若 hold 存在且不是 FROZEN，也视为已解冻/不可调整
+                if (hold && hold.status !== 'FROZEN') {
+                    throw new ForbiddenException('该结算已解冻/已入账，禁止手动调整');
+                }
+            }
+
+            // ===========================
+            // 1) 更新结算记录
+            // ===========================
+            const calculated = Number(s.calculatedEarnings ?? 0);
+            const manualAdjustment = finalEarnings - calculated;
+
+            const updated = await tx.orderSettlement.update({
+                where: { id: settlementId },
+                data: {
+                    finalEarnings,
+                    manualAdjustment,
+
+                    // 如果你 schema 里有这些字段就保留；没有就删掉
+                    adjustedBy: operatorId,
+                    adjustedAt: new Date(),
+                    adjustRemark: dto.remark ? `MANUAL_ADJUST:${dto.remark}` : 'MANUAL_ADJUST',
+                } as any,
+            });
+
+            // ===========================
+            // 2) 同步钱包（关键）
+            // ✅ 正数：冻结
+            // ✅ 负数：即时扣款（availableBalance 立即变化）
+            // ✅ 0：释放冻结并不影响余额
+            // ===========================
+            // 解冻时间：手工调整不应改变 unlockAt
+            // - 若已有 hold，用原 unlockAt
+            // - 若无 hold 且 final>0，需要一个 unlockAt（这里用 now，满足“先满足需求”）
+            let unlockAt = new Date();
+            if (earningTx?.id) {
+                const hold = await tx.walletHold.findUnique({
+                    where: { earningTxId: earningTx.id },
+                    select: { unlockAt: true },
+                });
+                if (hold?.unlockAt) unlockAt = hold.unlockAt;
+            }
+
+            await this.wallet.syncSettlementEarningByFinalEarnings(
+                {
+                    userId: s.userId,
+                    finalEarnings,
+                    unlockAt,
+                    sourceType: 'ORDER_SETTLEMENT',
+                    sourceId: settlementId,
+                    orderId: s.orderId,
+                    dispatchId: s.dispatchId ?? null,
+                    settlementId: settlementId,
+                },
+                tx as any,
+            );
+
+            // ✅ 日志
+            await this.logOrderAction(operatorId, s.orderId, 'ADJUST_SETTLEMENT', {
+                settlementId,
+                targetUserId: s.userId,
+                settlementType: s.settlementType,
+                oldFinalEarnings: s.finalEarnings,
+                newFinalEarnings: finalEarnings,
                 manualAdjustment,
-            },
-        });
+                remark: dto.remark ?? null,
+            });
 
-        // ✅ 记录日志（要求关键动作必须记录）
-        await this.logOrderAction(operatorId, s.orderId, 'ADJUST_SETTLEMENT', {
-            settlementId,
-            oldFinalEarnings: s.finalEarnings,
-            newFinalEarnings: finalEarnings,
-            manualAdjustment,
-            remark: dto.remark ?? null,
+            return updated;
         });
-
-        return updated;
     }
+
 
     //退款功能
     async refundOrder(orderId: number, operatorId: number, remark?: string) {

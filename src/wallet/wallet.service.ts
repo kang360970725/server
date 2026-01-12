@@ -732,4 +732,205 @@ export class WalletService {
         return { data, total, page, limit };
     }
 
+    /**
+     * ✅ 将某一条 OrderSettlement（sourceType+sourceId）对应的钱包流水与冻结单同步到指定 finalEarnings
+     * - finalEarnings > 0：IN + FROZEN + hold(FROZEN)，影响 frozenBalance
+     * - finalEarnings = 0：REVERSED，释放/取消 hold，回滚 frozenBalance / availableBalance 影响
+     * - finalEarnings < 0：OUT + AVAILABLE（立刻扣款），取消 hold，影响 availableBalance（实时）
+     *
+     * ⚠️ 不新增流水：始终 upsert 同一条 WalletTransaction（uniq_wallet_tx_source）
+     */
+    async syncSettlementEarningByFinalEarnings(
+        params: {
+            userId: number;
+            finalEarnings: number; // ✅ 允许负数
+            unlockAt?: Date; // 仅在需要补建冻结单且 final>0 时使用
+            sourceType?: string; // default ORDER_SETTLEMENT
+            sourceId: number; // settlementId
+            orderId?: number | null;
+            dispatchId?: number | null;
+            settlementId?: number | null;
+        },
+        tx?: PrismaTx,
+    ) {
+        const db = (tx as any) ?? this.prisma;
+        const sourceType = params.sourceType ?? 'ORDER_SETTLEMENT';
+
+        const final = round2(Number(params.finalEarnings ?? 0));
+        const absAmt = round2(Math.abs(final));
+
+        // ✅ 兜底确保账户存在
+        await this.ensureWalletAccount(params.userId, db as any);
+
+        const now = new Date();
+
+        // 1) 锁定/获取现有 tx（同一来源唯一）
+        const existingTx = await db.walletTransaction.findUnique({
+            where: {
+                sourceType_sourceId: {
+                    sourceType,
+                    sourceId: params.sourceId,
+                },
+            },
+            select: { id: true, userId: true, amount: true, status: true, direction: true },
+        });
+
+        // 2) 若存在 tx，则查对应 hold（可能缺失）
+        const existingHold = existingTx
+            ? await db.walletHold.findUnique({
+                where: { earningTxId: existingTx.id },
+                select: { id: true, amount: true, status: true, unlockAt: true },
+            })
+            : null;
+
+        // 3) 计算旧影响（用于 delta 修正账户汇总）
+        const oldAmount = round2(Number(existingTx?.amount ?? 0));
+        const oldFrozen = existingTx?.status === 'FROZEN' ? oldAmount : 0;
+
+        const oldAvailImpact =
+            existingTx?.status === 'AVAILABLE'
+                ? existingTx.direction === 'IN'
+                ? oldAmount
+                : existingTx.direction === 'OUT'
+                    ? -oldAmount
+                    : 0
+                : 0;
+
+        // 4) 计算新目标状态
+        let newStatus: WalletTxStatus;
+        let newDirection: WalletDirection;
+        let newAmount: number;
+
+        // ✅ newFrozen / newAvailImpact 用于账户 delta
+        let newFrozen = 0;
+        let newAvailImpact = 0;
+
+        if (final > 0) {
+            newStatus = 'FROZEN';
+            newDirection = 'IN';
+            newAmount = absAmt;
+            newFrozen = newAmount;
+            newAvailImpact = 0;
+        } else if (final === 0) {
+            // 你要“无冻结逻辑+不影响余额”，最干净就是标记 REVERSED 并释放 hold
+            newStatus = 'REVERSED';
+            newDirection = 'IN';
+            newAmount = 0;
+            newFrozen = 0;
+            newAvailImpact = 0;
+        } else {
+            // final < 0：罚款/赔付
+            // ✅ 不冻结，立刻纳入可用余额（等价于扣款）
+            newStatus = 'AVAILABLE';
+            newDirection = 'OUT';
+            newAmount = absAmt;
+            newFrozen = 0;
+            newAvailImpact = -newAmount;
+        }
+
+        const deltaFrozen = round2(newFrozen - oldFrozen);
+        const deltaAvail = round2(newAvailImpact - oldAvailImpact);
+
+        // 5) upsert / update WalletTransaction（不新增第二条）
+        const earningTx = await db.walletTransaction.upsert({
+            where: {
+                sourceType_sourceId: {
+                    sourceType,
+                    sourceId: params.sourceId,
+                },
+            },
+            create: {
+                userId: params.userId,
+                direction: newDirection,
+                bizType: 'SETTLEMENT_EARNING', // ✅ 仍属于结算收益（只是方向不同表示扣款）
+                amount: newAmount,
+                status: newStatus,
+                sourceType,
+                sourceId: params.sourceId,
+                orderId: params.orderId ?? null,
+                dispatchId: params.dispatchId ?? null,
+                settlementId: params.settlementId ?? params.sourceId,
+            },
+            update: {
+                direction: newDirection,
+                status: newStatus,
+                amount: newAmount,
+                // 冗余字段对齐
+                orderId: params.orderId ?? null,
+                dispatchId: params.dispatchId ?? null,
+                settlementId: params.settlementId ?? params.sourceId,
+            },
+            select: { id: true, amount: true, status: true, direction: true },
+        });
+
+        // 6) 处理冻结单（hold）
+        if (final > 0) {
+            // ✅ 需要冻结：hold(FROZEN) 必须存在
+            const unlockAt = existingHold?.unlockAt ?? params.unlockAt ?? now;
+
+            await db.walletHold.upsert({
+                where: { earningTxId: earningTx.id },
+                create: {
+                    userId: params.userId,
+                    earningTxId: earningTx.id,
+                    amount: newAmount,
+                    status: 'FROZEN',
+                    unlockAt,
+                },
+                update: {
+                    amount: newAmount,
+                    status: 'FROZEN',
+                    unlockAt,
+                    releasedAt: null,
+                },
+            });
+        } else {
+            // ✅ final <= 0：不应存在冻结
+            if (existingHold) {
+                // - 负数/0：统一 CANCELLED（你备注：被退款/冲正直接取消冻结）
+                await db.walletHold.update({
+                    where: { id: existingHold.id },
+                    data: {
+                        status: 'CANCELLED',
+                        releasedAt: now,
+                    },
+                });
+            }
+        }
+
+        // 7) 同步账户汇总（按 delta 修正，保证一致）
+        // frozenBalance：按 deltaFrozen 增减
+        if (deltaFrozen !== 0) {
+            if (deltaFrozen > 0) {
+                await db.walletAccount.update({
+                    where: { userId: params.userId },
+                    data: { frozenBalance: { increment: deltaFrozen } },
+                });
+            } else {
+                await db.walletAccount.update({
+                    where: { userId: params.userId },
+                    data: { frozenBalance: { decrement: Math.abs(deltaFrozen) } },
+                });
+            }
+        }
+
+        // availableBalance：按 deltaAvail 增减（负数就是扣款）
+        if (deltaAvail !== 0) {
+            if (deltaAvail > 0) {
+                await db.walletAccount.update({
+                    where: { userId: params.userId },
+                    data: { availableBalance: { increment: deltaAvail } },
+                });
+            } else {
+                await db.walletAccount.update({
+                    where: { userId: params.userId },
+                    data: { availableBalance: { decrement: Math.abs(deltaAvail) } },
+                });
+            }
+        }
+
+        return { tx: earningTx };
+    }
+
+
 }
