@@ -1,6 +1,6 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, ConflictException } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
-import { Prisma, PrismaClient, WalletBizType, WalletDirection, WalletHoldStatus, WalletTxStatus } from '@prisma/client';
+import { Prisma, PrismaClient, WalletBizType, WalletDirection, WalletHoldStatus, WalletTxStatus,  } from '@prisma/client';
 import {QueryWalletHoldsDto} from "./dto/query-wallet-holds.dto";
 import {QueryWalletTransactionsDto} from "./dto/query-wallet-transactions.dto";
 
@@ -747,14 +747,27 @@ export class WalletService {
             unlockAt?: Date; // 仅在需要补建冻结单且 final>0 时使用
             sourceType?: string; // default ORDER_SETTLEMENT
             sourceId: number; // settlementId
+            // ✅ 新增：业务类型（默认基础结算收益）
+            bizType?: WalletBizType;
+
             orderId?: number | null;
             dispatchId?: number | null;
             settlementId?: number | null;
         },
         tx?: PrismaTx,
     ) {
+
         const db = (tx as any) ?? this.prisma;
         const sourceType = params.sourceType ?? 'ORDER_SETTLEMENT';
+
+        const bizType = params.bizType ?? WalletBizType.SETTLEMENT_EARNING_BASE;
+
+        // ✅ 方向 + 金额归一：finalEarnings 可以是负数
+        const raw = Number(params.finalEarnings ?? 0);
+        if (!Number.isFinite(raw)) throw new BadRequestException('finalEarnings 非法');
+
+        // const direction: WalletDirection = raw >= 0 ? 'IN' : 'OUT';
+        // const amount = round2(Math.abs(raw)); // 始终正数
 
         const final = round2(Number(params.finalEarnings ?? 0));
         const absAmt = round2(Math.abs(final));
@@ -830,8 +843,12 @@ export class WalletService {
 
         const deltaFrozen = round2(newFrozen - oldFrozen);
         const deltaAvail = round2(newAvailImpact - oldAvailImpact);
-
         // 5) upsert / update WalletTransaction（不新增第二条）
+        // ✅ 如果已存在 tx，但 userId 不一致，直接报错（避免串账）
+        if (existingTx && existingTx.userId !== params.userId) {
+            throw new ConflictException('钱包流水来源已存在但用户不一致，疑似串账，请联系管理员处理');
+        }
+
         const earningTx = await db.walletTransaction.upsert({
             where: {
                 sourceType_sourceId: {
@@ -842,7 +859,7 @@ export class WalletService {
             create: {
                 userId: params.userId,
                 direction: newDirection,
-                bizType: 'SETTLEMENT_EARNING', // ✅ 仍属于结算收益（只是方向不同表示扣款）
+                bizType,
                 amount: newAmount,
                 status: newStatus,
                 sourceType,
@@ -852,21 +869,33 @@ export class WalletService {
                 settlementId: params.settlementId ?? params.sourceId,
             },
             update: {
+                // ✅ 关键：bizType 必须允许被重算时更新，否则前端永远看不到区分
+                bizType,
+
+                // ✅ 再次对齐（避免历史错误）
+                userId: params.userId,
+
                 direction: newDirection,
                 status: newStatus,
                 amount: newAmount,
+
                 // 冗余字段对齐
                 orderId: params.orderId ?? null,
                 dispatchId: params.dispatchId ?? null,
                 settlementId: params.settlementId ?? params.sourceId,
             },
-            select: { id: true, amount: true, status: true, direction: true },
+            select: { id: true, amount: true, status: true, direction: true, bizType: true },
         });
 
         // 6) 处理冻结单（hold）
         if (final > 0) {
             // ✅ 需要冻结：hold(FROZEN) 必须存在
-            const unlockAt = existingHold?.unlockAt ?? params.unlockAt ?? now;
+            // - 已有 hold：沿用原 unlockAt（避免手动调整时改变冻结到期）
+            // - 没有 hold：必须传 unlockAt（避免错误默认 now 立即解冻）
+            const unlockAt = existingHold?.unlockAt ?? params.unlockAt;
+            if (!unlockAt) {
+                throw new BadRequestException('缺少 unlockAt：首次创建冻结收益时必须提供解冻时间');
+            }
 
             await db.walletHold.upsert({
                 where: { earningTxId: earningTx.id },
@@ -885,15 +914,10 @@ export class WalletService {
                 },
             });
         } else {
-            // ✅ final <= 0：不应存在冻结
+            // ✅ final <= 0：不应存在冻结（删除更稳，避免写不存在的枚举状态）
             if (existingHold) {
-                // - 负数/0：统一 CANCELLED（你备注：被退款/冲正直接取消冻结）
-                await db.walletHold.update({
+                await db.walletHold.delete({
                     where: { id: existingHold.id },
-                    data: {
-                        status: 'CANCELLED',
-                        releasedAt: now,
-                    },
                 });
             }
         }

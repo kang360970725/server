@@ -293,9 +293,24 @@ enum WalletDirection {
 
 /// 钱包流水业务类型（V0.1 先覆盖收益/解冻/退款冲正）
 enum WalletBizType {
-  SETTLEMENT_EARNING // 结算收益入账（先冻结）
+  /// 兼容历史：旧的“结算收益”
+  SETTLEMENT_EARNING
+
+  /// ✅ 基础结算收益（建议新数据都用这个）
+  SETTLEMENT_EARNING_BASE
+
+  /// ✅ 补单收益（炸单池补偿）
+  SETTLEMENT_EARNING_CARRY
+
+  /// ✅ 炸单损耗（负收益/成本扣减）
+  SETTLEMENT_BOMB_LOSS
+
+  /// ✅ 客服分红
+  SETTLEMENT_EARNING_CS
+
   RELEASE_FROZEN // 解冻：frozen -> available（内部划转）
   REFUND_REVERSAL // 退款冲正：对冲收益（负向）
+
   /// ✅ 提现：申请时的资金预扣（available -> frozen）
   WITHDRAW_RESERVE
 
