@@ -556,7 +556,8 @@ export class WalletService {
                     if (!existingRelease) {
                         const amount = round2(hold.amount);
 
-                        await tx.walletTransaction.create({
+                        // 1) 先创建解冻流水（不写快照，等 account 更新后回写）
+                        const releaseTx = await tx.walletTransaction.create({
                             data: {
                                 userId: hold.userId,
                                 direction: 'IN',
@@ -566,20 +567,37 @@ export class WalletService {
                                 sourceType: releaseSourceType,
                                 sourceId: hold.earningTxId,
                             },
+                            select: { id: true },
                         });
 
-                        await tx.walletAccount.update({
+                        // 2) 更新账户余额：frozen-- available++
+                        const accountAfter = await tx.walletAccount.update({
                             where: { userId: hold.userId },
                             data: {
                                 frozenBalance: { decrement: amount },
                                 availableBalance: { increment: amount },
                             },
+                            select: { availableBalance: true, frozenBalance: true },
                         });
 
-                        // 同步把原收益流水标记为 AVAILABLE（可选但建议）
+                        // 3) ✅ 回写余额快照（本笔落账后的余额）
+                        await tx.walletTransaction.update({
+                            where: { id: releaseTx.id },
+                            data: {
+                                availableAfter: round2(Number((accountAfter as any).availableBalance ?? 0)),
+                                frozenAfter: round2(Number((accountAfter as any).frozenBalance ?? 0)),
+                            },
+                        });
+
+                        // 4) 同步把原收益流水标记为 AVAILABLE（可选但建议）
+                        //    同时把它的快照补齐（便于对账）
                         await tx.walletTransaction.update({
                             where: { id: hold.earningTxId },
-                            data: { status: 'AVAILABLE' },
+                            data: {
+                                status: 'AVAILABLE',
+                                availableAfter: round2(Number((accountAfter as any).availableBalance ?? 0)),
+                                frozenAfter: round2(Number((accountAfter as any).frozenBalance ?? 0)),
+                            },
                         });
                     }
 
@@ -598,6 +616,7 @@ export class WalletService {
 
         return { releasedCount };
     }
+
 
     /**
      * 多批处理：while 循环调用单批处理直到跑空
@@ -693,6 +712,11 @@ export class WalletService {
                     bizType: true,
                     amount: true,
                     status: true,
+
+                    // ✅ Wallet v0.3：余额快照（可能为空，历史记录兼容）
+                    availableAfter: true,
+                    frozenAfter: true,
+
                     sourceType: true,
                     sourceId: true,
                     orderId: true,
@@ -723,27 +747,24 @@ export class WalletService {
                 return { deltaAvailable: 0, deltaFrozen: 0 };
             }
 
-            // ✅ 结算收益：事件发生时“先冻结”（即便后来 status 被改成 AVAILABLE，也不改这条的余额口径）
+            // ✅ 结算收益：事件发生时“先冻结”
             if (
                 biz === 'SETTLEMENT_EARNING' ||
                 biz === 'SETTLEMENT_EARNING_BASE' ||
                 biz === 'SETTLEMENT_EARNING_CARRY' ||
                 biz === 'SETTLEMENT_EARNING_CS'
             ) {
-                // 你的结算收益目前 amount 永远正数；冻结就是 frozen += amount
-                // 如果未来你有负向收益 tx（OUT/AVAILABLE），那应走 BOMB_LOSS 或另外的 bizType
                 if (tx.direction === 'IN' && amt > 0) deltaFrozen += amt;
                 return { deltaAvailable, deltaFrozen };
             }
 
             // ✅ 炸单损耗：即时扣款（可用余额减少）
             if (biz === 'SETTLEMENT_BOMB_LOSS') {
-                // 统一按可用余额扣除（你已明确负数不冻结、即时纳入余额）
                 if (amt > 0) deltaAvailable -= amt;
                 return { deltaAvailable, deltaFrozen };
             }
 
-            // ✅ 解冻入账：冻结转可用（你 releaseDueHoldsOnce 就是这个逻辑）
+            // ✅ 解冻入账：冻结转可用
             if (biz === 'RELEASE_FROZEN') {
                 if (amt > 0) {
                     deltaFrozen -= amt;
@@ -778,8 +799,7 @@ export class WalletService {
                 return { deltaAvailable, deltaFrozen };
             }
 
-            // ✅ 退款冲正（对冲收益）：通常是可用余额减少 or 冻结减少，取决于你怎么落账
-            // 这里先按 direction 来做通用口径（你后面如果要更严格，可单独约束）
+            // ✅ 退款冲正：通用按 direction 口径
             if (biz === 'REFUND_REVERSAL') {
                 if (amt > 0) {
                     if (tx.direction === 'IN') deltaAvailable += amt;
@@ -792,21 +812,24 @@ export class WalletService {
         };
 
         // ✅ 4) 从“当前余额”倒推本页每条 before/after（只保证本页内一致）
-        // 说明：这是“本页视角”的余额快照，老于本页的记录未纳入回算，所以最老一条的 before 不等于真实历史余额。
-        // 但对“微信式展示”已经足够（尤其 page=1 的体验最好）。
         let availAfter = toNum(accountNow?.availableBalance);
         let frozenAfter = toNum(accountNow?.frozenBalance);
 
         const enriched = rows.map((r: any) => {
             const { deltaAvailable, deltaFrozen } = calcDelta(r);
 
-            const availableAfter = availAfter;
-            const frozenAfterV = frozenAfter;
+            const storedAvailAfter = r.availableAfter;
+            const storedFrozenAfter = r.frozenAfter;
+
+            // ✅ 优先使用“数据库记录的余额快照”（Wallet v0.3）
+            // - 历史记录可能为空：回退到“本页倒推计算”的快照
+            const availableAfter = storedAvailAfter !== null && storedAvailAfter !== undefined ? toNum(storedAvailAfter) : availAfter;
+            const frozenAfterV = storedFrozenAfter !== null && storedFrozenAfter !== undefined ? toNum(storedFrozenAfter) : frozenAfter;
 
             const availableBefore = Number((availableAfter - deltaAvailable).toFixed(2));
             const frozenBefore = Number((frozenAfterV - deltaFrozen).toFixed(2));
 
-            // 下一条（更老）以本条 before 作为 after
+            // 下一条（更老）以本条 before 作为 after（仅用于回退计算）
             availAfter = availableBefore;
             frozenAfter = frozenBefore;
 
@@ -837,6 +860,7 @@ export class WalletService {
             },
         };
     }
+
 
 
 
@@ -984,6 +1008,7 @@ export class WalletService {
 
         const deltaFrozen = round2(newFrozen - oldFrozen);
         const deltaAvail = round2(newAvailImpact - oldAvailImpact);
+
         // 5) upsert / update WalletTransaction（不新增第二条）
         // ✅ 如果已存在 tx，但 userId 不一致，直接报错（避免串账）
         if (existingTx && existingTx.userId !== params.userId) {
@@ -1094,8 +1119,26 @@ export class WalletService {
             }
         }
 
+        // 8) ✅ 写入余额快照（本笔落账后的余额）
+        // - 必须在同一个事务里完成（db 可能是 tx）
+        const accountAfter = await db.walletAccount.findUnique({
+            where: { userId: params.userId },
+            select: { availableBalance: true, frozenBalance: true },
+        });
+
+        if (accountAfter) {
+            await db.walletTransaction.update({
+                where: { id: earningTx.id },
+                data: {
+                    availableAfter: round2(Number((accountAfter as any).availableBalance ?? 0)),
+                    frozenAfter: round2(Number((accountAfter as any).frozenBalance ?? 0)),
+                },
+            });
+        }
+
         return { tx: earningTx };
     }
+
 
 
     /** ✅ 截断到 1 位小数（不四舍五入） */

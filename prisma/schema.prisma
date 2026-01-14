@@ -666,6 +666,11 @@ model WalletTransaction {
 
   status WalletTxStatus @default(FROZEN)
 
+  /// ✅ 余额快照：本笔落账后的余额（用于前端展示“本笔后余额”/对账）
+    /// - 兼容历史：允许为空；新写入必须赋值
+    availableAfter Decimal? @db.Decimal(18, 2)
+    frozenAfter    Decimal? @db.Decimal(18, 2)
+
   /// 资金来源（用于幂等与追溯）
   /// V0.1：sourceType 固定用 "ORDER_SETTLEMENT"
   sourceType String

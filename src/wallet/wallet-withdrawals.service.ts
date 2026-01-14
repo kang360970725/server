@@ -1,6 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 
+/** ✅ 截断到 2 位小数（不四舍五入） */
+const round2 = (v: any): number => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return 0;
+    return Math.trunc(n * 100) / 100;
+};
+
 /**
  * 提现服务（Wallet 子能力）
  *
@@ -62,12 +69,13 @@ export class WalletWithdrawalsService {
             }
 
             // 2️⃣ 预扣资金（防并发）
-            await tx.walletAccount.update({
+            const accountAfterReserve = await tx.walletAccount.update({
                 where: { userId },
                 data: {
                     availableBalance: { decrement: amount },
                     frozenBalance: { increment: amount },
                 },
+                select: { availableBalance: true, frozenBalance: true },
             });
 
             // 3️⃣ 冻结流水（此时不是出款，只是“锁钱”）
@@ -80,6 +88,9 @@ export class WalletWithdrawalsService {
                     status: 'FROZEN',
                     sourceType: 'WITHDRAWAL_REQUEST',
                     sourceId: 0, // 创建申请单后再回填
+                    // ✅ 余额快照（本笔预扣后的余额）
+                    availableAfter: round2(Number((accountAfterReserve as any).availableBalance ?? 0)),
+                    frozenAfter: round2(Number((accountAfterReserve as any).frozenBalance ?? 0)),
                 },
             });
 
@@ -145,13 +156,6 @@ export class WalletWithdrawalsService {
 
             // ===========================
             // ✅ 审批通过：当前阶段按“通过即出款完成”处理（最小改动）
-            // 目标：
-            // 1) 冻结余额 frozenBalance 扣除（真正出款）
-            // 2) 生成出款流水 WITHDRAW_PAYOUT（OUT, AVAILABLE）
-            // 3) 申请单置为 PAID
-            //
-            // ⚠️ 前提：applyWithdrawal 阶段已经把资金从 available -> frozen 预扣了（WITHDRAW_RESERVE）
-            //    如果你没做预扣，这里扣 frozen 会变成负数（需要你确认 applyWithdrawal 逻辑）
             // ===========================
             if (approve) {
                 // 1) 幂等：是否已存在出款流水（避免重复扣 frozen）
@@ -166,12 +170,13 @@ export class WalletWithdrawalsService {
 
                 if (!existingPayout) {
                     // 2) 扣除冻结余额（真正扣款）
-                    await tx.walletAccount.update({
+                    const accountAfterPayout = await tx.walletAccount.update({
                         where: { userId: req.userId },
                         data: {
                             frozenBalance: { decrement: req.amount },
                             // availableBalance 不动（因为申请时就已扣过 available）
                         },
+                        select: { availableBalance: true, frozenBalance: true },
                     });
 
                     // 3) 写出款流水（WITHDRAW_PAYOUT）
@@ -187,12 +192,17 @@ export class WalletWithdrawalsService {
                             status: 'AVAILABLE', // ✅ 已完成的资金变动
                             sourceType: PAYOUT_SOURCE_TYPE,
                             sourceId: req.id,
+                            // ✅ 余额快照（本笔出款后的余额）
+                            availableAfter: round2(Number((accountAfterPayout as any).availableBalance ?? 0)),
+                            frozenAfter: round2(Number((accountAfterPayout as any).frozenBalance ?? 0)),
                         },
                         update: {
                             direction: 'OUT',
                             bizType: 'WITHDRAW_PAYOUT',
                             amount: req.amount,
                             status: 'AVAILABLE',
+                            availableAfter: round2(Number((accountAfterPayout as any).availableBalance ?? 0)),
+                            frozenAfter: round2(Number((accountAfterPayout as any).frozenBalance ?? 0)),
                         },
                     });
                 }
@@ -205,7 +215,6 @@ export class WalletWithdrawalsService {
                         reviewedBy: reviewerId,
                         reviewedAt: now,
                         reviewRemark,
-                        // 如你有 paidAt 字段可加：paidAt: now
                     },
                 });
             }
@@ -225,12 +234,13 @@ export class WalletWithdrawalsService {
 
             if (!existingReleaseTx) {
                 // 2) 资金退回：frozen -amount, available +amount
-                await tx.walletAccount.update({
+                const accountAfterRelease = await tx.walletAccount.update({
                     where: { userId: req.userId },
                     data: {
                         frozenBalance: { decrement: req.amount },
                         availableBalance: { increment: req.amount },
                     },
+                    select: { availableBalance: true, frozenBalance: true },
                 });
 
                 // 3) 写退回流水（WITHDRAW_RELEASE）
@@ -246,12 +256,17 @@ export class WalletWithdrawalsService {
                         status: 'AVAILABLE',
                         sourceType: RELEASE_SOURCE_TYPE,
                         sourceId: req.id,
+                        // ✅ 余额快照（本笔退回后的余额）
+                        availableAfter: round2(Number((accountAfterRelease as any).availableBalance ?? 0)),
+                        frozenAfter: round2(Number((accountAfterRelease as any).frozenBalance ?? 0)),
                     },
                     update: {
                         direction: 'IN',
                         bizType: 'WITHDRAW_RELEASE',
                         amount: req.amount,
                         status: 'AVAILABLE',
+                        availableAfter: round2(Number((accountAfterRelease as any).availableBalance ?? 0)),
+                        frozenAfter: round2(Number((accountAfterRelease as any).frozenBalance ?? 0)),
                     },
                 });
             }
@@ -268,7 +283,6 @@ export class WalletWithdrawalsService {
             });
         });
     }
-
 
     /** 打手端：我的提现记录 */
     async listMine(userId: number) {
