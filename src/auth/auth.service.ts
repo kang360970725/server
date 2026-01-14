@@ -74,22 +74,28 @@ export class AuthService {
   async login(loginDto: LoginDto) {
     const { phone, password } = loginDto;
 
-    // 查找用户
     const user = await this.prisma.user.findUnique({
       where: { phone },
     });
 
+    // ✅ 账号不存在：返回 200 + success=false（不抛 401）
     if (!user) {
-      throw new UnauthorizedException('手机号或密码错误');
+      return {
+        success: false,
+        message: '手机号或密码错误',
+      };
     }
 
-    // 验证密码
+    // ✅ 密码错误：同样返回 200 + success=false
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
-      throw new UnauthorizedException('手机号或密码错误');
+      return {
+        success: false,
+        message: '手机号或密码错误',
+      };
     }
 
-    // 生成 token
+    // ✅ 登录成功
     const payload = { phone: user.phone, sub: user.id };
     const access_token = this.jwtService.sign(payload);
 
@@ -97,10 +103,12 @@ export class AuthService {
     const { password: _, ...userWithoutPassword } = user;
 
     return {
+      success: true,
       access_token,
       user: userWithoutPassword,
     };
   }
+
 
   async validateUser(userId: number) {
     return this.prisma.user.findUnique({
