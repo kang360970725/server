@@ -633,6 +633,7 @@ export class WalletService {
             select: {
                 id: true,
                 userId: true,
+                walletUid: true,
                 availableBalance: true,
                 frozenBalance: true,
                 createdAt: true,
@@ -653,11 +654,14 @@ export class WalletService {
         const limit = Math.min(100, Math.max(1, Number(query.limit ?? 20)));
         const skip = (page - 1) * limit;
 
+        // 1) 组 where（WalletTransaction）
         const where: any = { userId };
 
-        if (query.status) where.status = query.status;
-        if (query.bizType) where.bizType = query.bizType;
         if (query.direction) where.direction = query.direction;
+        if (query.bizType) where.bizType = query.bizType;
+        if (query.status) where.status = query.status;
+
+        // 你原本有重复设置，这里保留也不影响，但建议去掉重复
         if (query.orderId) where.orderId = Number(query.orderId);
         if (query.dispatchId) where.dispatchId = Number(query.dispatchId);
 
@@ -668,7 +672,14 @@ export class WalletService {
             if (query.endAt) where.createdAt.lte = new Date(query.endAt);
         }
 
-        const [total, data] = await this.prisma.$transaction([
+        // ✅ 2) 先查当前账户余额（作为“本页最新余额锚点”）
+        await this.ensureWalletAccount(userId, this.prisma as any);
+        const accountNow = await this.prisma.walletAccount.findUnique({
+            where: { userId },
+            select: { availableBalance: true, frozenBalance: true },
+        });
+
+        const [total, rows] = await this.prisma.$transaction([
             this.prisma.walletTransaction.count({ where }),
             this.prisma.walletTransaction.findMany({
                 where,
@@ -693,8 +704,141 @@ export class WalletService {
             }),
         ]);
 
-        return { data, total, page, limit };
+        // ✅ 3) 计算每条流水对 “available / frozen” 的影响（用 bizType，不用 status）
+        const toNum = (v: any) => {
+            const n = Number(v ?? 0);
+            return Number.isFinite(n) ? n : 0;
+        };
+
+        const calcDelta = (tx: any) => {
+            const amt = toNum(tx.amount);
+            const biz = tx.bizType;
+
+            // 默认无影响
+            let deltaAvailable = 0;
+            let deltaFrozen = 0;
+
+            // 已冲正/无效：不影响余额（避免脏数据干扰）
+            if (tx.status === 'REVERSED') {
+                return { deltaAvailable: 0, deltaFrozen: 0 };
+            }
+
+            // ✅ 结算收益：事件发生时“先冻结”（即便后来 status 被改成 AVAILABLE，也不改这条的余额口径）
+            if (
+                biz === 'SETTLEMENT_EARNING' ||
+                biz === 'SETTLEMENT_EARNING_BASE' ||
+                biz === 'SETTLEMENT_EARNING_CARRY' ||
+                biz === 'SETTLEMENT_EARNING_CS'
+            ) {
+                // 你的结算收益目前 amount 永远正数；冻结就是 frozen += amount
+                // 如果未来你有负向收益 tx（OUT/AVAILABLE），那应走 BOMB_LOSS 或另外的 bizType
+                if (tx.direction === 'IN' && amt > 0) deltaFrozen += amt;
+                return { deltaAvailable, deltaFrozen };
+            }
+
+            // ✅ 炸单损耗：即时扣款（可用余额减少）
+            if (biz === 'SETTLEMENT_BOMB_LOSS') {
+                // 统一按可用余额扣除（你已明确负数不冻结、即时纳入余额）
+                if (amt > 0) deltaAvailable -= amt;
+                return { deltaAvailable, deltaFrozen };
+            }
+
+            // ✅ 解冻入账：冻结转可用（你 releaseDueHoldsOnce 就是这个逻辑）
+            if (biz === 'RELEASE_FROZEN') {
+                if (amt > 0) {
+                    deltaFrozen -= amt;
+                    deltaAvailable += amt;
+                }
+                return { deltaAvailable, deltaFrozen };
+            }
+
+            // ✅ 提现：预扣（available -> frozen）
+            if (biz === 'WITHDRAW_RESERVE') {
+                if (amt > 0) {
+                    deltaAvailable -= amt;
+                    deltaFrozen += amt;
+                }
+                return { deltaAvailable, deltaFrozen };
+            }
+
+            // ✅ 提现：驳回/取消退回（frozen -> available）
+            if (biz === 'WITHDRAW_RELEASE') {
+                if (amt > 0) {
+                    deltaFrozen -= amt;
+                    deltaAvailable += amt;
+                }
+                return { deltaAvailable, deltaFrozen };
+            }
+
+            // ✅ 提现：出款成功（冻结真正扣除）
+            if (biz === 'WITHDRAW_PAYOUT') {
+                if (amt > 0) {
+                    deltaFrozen -= amt;
+                }
+                return { deltaAvailable, deltaFrozen };
+            }
+
+            // ✅ 退款冲正（对冲收益）：通常是可用余额减少 or 冻结减少，取决于你怎么落账
+            // 这里先按 direction 来做通用口径（你后面如果要更严格，可单独约束）
+            if (biz === 'REFUND_REVERSAL') {
+                if (amt > 0) {
+                    if (tx.direction === 'IN') deltaAvailable += amt;
+                    if (tx.direction === 'OUT') deltaAvailable -= amt;
+                }
+                return { deltaAvailable, deltaFrozen };
+            }
+
+            return { deltaAvailable, deltaFrozen };
+        };
+
+        // ✅ 4) 从“当前余额”倒推本页每条 before/after（只保证本页内一致）
+        // 说明：这是“本页视角”的余额快照，老于本页的记录未纳入回算，所以最老一条的 before 不等于真实历史余额。
+        // 但对“微信式展示”已经足够（尤其 page=1 的体验最好）。
+        let availAfter = toNum(accountNow?.availableBalance);
+        let frozenAfter = toNum(accountNow?.frozenBalance);
+
+        const enriched = rows.map((r: any) => {
+            const { deltaAvailable, deltaFrozen } = calcDelta(r);
+
+            const availableAfter = availAfter;
+            const frozenAfterV = frozenAfter;
+
+            const availableBefore = Number((availableAfter - deltaAvailable).toFixed(2));
+            const frozenBefore = Number((frozenAfterV - deltaFrozen).toFixed(2));
+
+            // 下一条（更老）以本条 before 作为 after
+            availAfter = availableBefore;
+            frozenAfter = frozenBefore;
+
+            return {
+                ...r,
+                deltaAvailable,
+                deltaFrozen,
+
+                availableBefore,
+                availableAfter,
+                frozenBefore,
+                frozenAfter: frozenAfterV,
+
+                balanceBefore: Number((availableBefore + frozenBefore).toFixed(2)),
+                balanceAfter: Number((availableAfter + frozenAfterV).toFixed(2)),
+            };
+        });
+
+        return {
+            data: enriched,
+            total,
+            page,
+            limit,
+            accountNow: {
+                availableBalance: toNum(accountNow?.availableBalance),
+                frozenBalance: toNum(accountNow?.frozenBalance),
+                balance: Number((toNum(accountNow?.availableBalance) + toNum(accountNow?.frozenBalance)).toFixed(2)),
+            },
+        };
     }
+
+
 
     /**
      * 查询当前用户冻结单（分页）
@@ -766,11 +910,8 @@ export class WalletService {
         const raw = Number(params.finalEarnings ?? 0);
         if (!Number.isFinite(raw)) throw new BadRequestException('finalEarnings 非法');
 
-        // const direction: WalletDirection = raw >= 0 ? 'IN' : 'OUT';
-        // const amount = round2(Math.abs(raw)); // 始终正数
-
-        const final = round2(Number(params.finalEarnings ?? 0));
-        const absAmt = round2(Math.abs(final));
+        const final = this.trunc1(Number(params.finalEarnings ?? 0));
+        const absAmt = this.trunc1(Math.abs(final));
 
         // ✅ 兜底确保账户存在
         await this.ensureWalletAccount(params.userId, db as any);
@@ -956,5 +1097,15 @@ export class WalletService {
         return { tx: earningTx };
     }
 
+
+    /** ✅ 截断到 1 位小数（不四舍五入） */
+    private trunc1(v: any): number {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return 0;
+
+        // 1位：乘10后截断再除10
+        // 注意：Math.trunc 对负数也是“向0截断”，符合“舍弃”直觉
+        return Math.trunc(n * 10) / 10;
+    }
 
 }

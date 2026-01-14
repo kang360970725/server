@@ -63,7 +63,10 @@ export class SettlementsService {
 
         const totalIncome = settlements.reduce((sum, s) => sum + (s.order?.paidAmount || 0), 0);
         const clubIncome = settlements.reduce((sum, s) => sum + (s.order?.clubEarnings || 0), 0);
-        const payableToPlayers = settlements.reduce((sum, s) => sum + (s.finalEarnings || 0), 0);
+        const payableToPlayers = settlements.reduce(
+            (sum, s) => sum + Number((s as any).finalEarnings ?? 0),
+            0,
+        );
 
         return {
             period: { start, end },

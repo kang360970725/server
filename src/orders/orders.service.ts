@@ -1276,7 +1276,10 @@ export class OrdersService {
                 }
 
                 // ✅ final：本轮实际到手（人民币，可正可负）
-                const final = this.round1(calculated * multiplier);
+                const calculated1 = this.trunc1(calculated);
+                const final1 = this.trunc1(calculated1 * multiplier); // ✅ 乘完再截断
+                const manualAdj1 = this.trunc1(final1 - calculated1);
+                const club1 = this.trunc1(calculated1 - final1);
 
                 console.log(
                     '[SETTLE]',
@@ -1291,7 +1294,7 @@ export class OrdersService {
                     'normalGrossRmb=', normalGrossRmb,
                     'repayRmb=', repayRmb,
                     'calculated=', calculated,
-                    'final=', final,
+                    'final=', final1,
                 );
 
                 const found = baseMap.get(userId);
@@ -1308,13 +1311,13 @@ export class OrdersService {
                             settlementType: baseSettlementType,
                             settlementBatchId,
 
-                            calculatedEarnings: calculated,
-                            manualAdjustment: this.round1(final - calculated),
-                            finalEarnings: final,
+                            calculatedEarnings: calculated1,
+                            manualAdjustment: manualAdj1,
+                            finalEarnings: final1,
 
                             // ✅ 正常：平台差额 = calculated - final
                             // ✅ 炸单：multiplier=1 → 差额为 0
-                            clubEarnings: this.round1(calculated - final),
+                            clubEarnings: club1,
 
                             csEarnings: null,
                             inviteEarnings: null,
@@ -1332,9 +1335,9 @@ export class OrdersService {
                             settlementBatchId,
 
                             calculatedEarnings: calculated,
-                            manualAdjustment: this.round1(final - calculated),
-                            finalEarnings: final,
-                            clubEarnings: this.round1(calculated - final),
+                            manualAdjustment: this.round1(final1 - calculated),
+                            finalEarnings: final1,
+                            clubEarnings: this.round1(calculated - final1),
                         },
                         select: { id: true, finalEarnings: true },
                     });
@@ -1399,7 +1402,8 @@ export class OrdersService {
                 }
 
                 // ✅ 补偿不抽成/不评级
-                const final = calculated;
+                const calculated1 = this.trunc1(calculated);
+                const final1 = calculated1;
 
                 const found = compMap.get(userId);
 
@@ -1415,9 +1419,9 @@ export class OrdersService {
                             settlementType: 'CARRY_COMPENSATION',
                             settlementBatchId,
 
-                            calculatedEarnings: calculated,
+                            calculatedEarnings: calculated1,
                             manualAdjustment: 0,
-                            finalEarnings: final,
+                            finalEarnings: final1,
                             clubEarnings: 0,
 
                             csEarnings: null,
@@ -1436,7 +1440,7 @@ export class OrdersService {
                             settlementBatchId,
                             calculatedEarnings: calculated,
                             manualAdjustment: 0,
-                            finalEarnings: final,
+                            finalEarnings: final1,
                             clubEarnings: 0,
                         },
                         select: { id: true, finalEarnings: true },
@@ -1469,7 +1473,7 @@ export class OrdersService {
         // ✅ 保持独立：不参与 carry；理论上不应出现负数
         // ===========================
         if (CUSTOMER_SERVICE_SHARE_RATE > 0 && order.dispatcherId) {
-            const csAmount = this.round1((order.paidAmount ?? 0) * CUSTOMER_SERVICE_SHARE_RATE);
+            const csAmount = this.trunc1((order.paidAmount ?? 0) * CUSTOMER_SERVICE_SHARE_RATE);
             if (csAmount > 0) {
                 const csFound = await tx.orderSettlement.findUnique({
                     where: {
@@ -1553,8 +1557,8 @@ export class OrdersService {
         await tx.order.update({
             where: { id: orderId },
             data: {
-                totalPlayerEarnings: Number(agg._sum.finalEarnings ?? 0),
-                clubEarnings: Number(agg._sum.clubEarnings ?? 0),
+                totalPlayerEarnings: this.trunc1(Number(agg._sum.finalEarnings ?? 0)),
+                clubEarnings: this.trunc1(Number(agg._sum.clubEarnings ?? 0)),
             },
         });
 
@@ -1640,7 +1644,10 @@ export class OrdersService {
 
         const totalIncome = settlements.reduce((sum, s) => sum + (s.order?.paidAmount ?? 0), 0);
         const clubIncome = settlements.reduce((sum, s) => sum + (s.order?.clubEarnings ?? 0), 0);
-        const payableToPlayers = settlements.reduce((sum, s) => sum + (s.finalEarnings ?? 0), 0);
+        const payableToPlayers = settlements.reduce(
+            (sum, s) => sum + Number((s as any).finalEarnings ?? 0),
+            0,
+        );
 
         const map = new Map<number, any>();
         for (const s of settlements) {
@@ -2751,6 +2758,16 @@ export class OrdersService {
         return clamp01(1 - cut);
     }
 
+
+    /** ✅ 截断到 1 位小数（不四舍五入） */
+    private trunc1(v: any): number {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return 0;
+
+        // 1位：乘10后截断再除10
+        // 注意：Math.trunc 对负数也是“向0截断”，符合“舍弃”直觉
+        return Math.trunc(n * 10) / 10;
+    }
 
 
 }

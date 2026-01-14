@@ -57,7 +57,7 @@ export class WalletWithdrawalsService {
             // 1️⃣ 校验钱包
             const account = await tx.walletAccount.findUnique({ where: { userId } });
             if (!account) throw new Error('钱包账户不存在');
-            if (account.availableBalance < amount) {
+            if (Number((account as any).availableBalance ?? 0) < Number(amount ?? 0)) {
                 throw new Error('可用余额不足（仅可提现已解冻余额）');
             }
 
@@ -133,56 +133,142 @@ export class WalletWithdrawalsService {
                 where: { id: requestId },
             });
             if (!req) throw new Error('提现申请不存在');
+
+            // ✅ 幂等：终态直接返回，避免重复扣减/重复流水
+            if (req.status === 'PAID' || req.status === 'REJECTED') return req;
+
             if (req.status !== 'PENDING_REVIEW') {
                 throw new Error('该提现申请不在待审核状态');
             }
 
-            // ✅ 审批通过：仅改状态（资金继续冻结，等待后续打款成功再真正扣除）
+            const now = new Date();
+
+            // ===========================
+            // ✅ 审批通过：当前阶段按“通过即出款完成”处理（最小改动）
+            // 目标：
+            // 1) 冻结余额 frozenBalance 扣除（真正出款）
+            // 2) 生成出款流水 WITHDRAW_PAYOUT（OUT, AVAILABLE）
+            // 3) 申请单置为 PAID
+            //
+            // ⚠️ 前提：applyWithdrawal 阶段已经把资金从 available -> frozen 预扣了（WITHDRAW_RESERVE）
+            //    如果你没做预扣，这里扣 frozen 会变成负数（需要你确认 applyWithdrawal 逻辑）
+            // ===========================
             if (approve) {
+                // 1) 幂等：是否已存在出款流水（避免重复扣 frozen）
+                const PAYOUT_SOURCE_TYPE = 'WITHDRAWAL_REQUEST_PAYOUT';
+
+                const existingPayout = await tx.walletTransaction.findUnique({
+                    where: {
+                        sourceType_sourceId: { sourceType: PAYOUT_SOURCE_TYPE, sourceId: req.id },
+                    },
+                    select: { id: true },
+                });
+
+                if (!existingPayout) {
+                    // 2) 扣除冻结余额（真正扣款）
+                    await tx.walletAccount.update({
+                        where: { userId: req.userId },
+                        data: {
+                            frozenBalance: { decrement: req.amount },
+                            // availableBalance 不动（因为申请时就已扣过 available）
+                        },
+                    });
+
+                    // 3) 写出款流水（WITHDRAW_PAYOUT）
+                    await tx.walletTransaction.upsert({
+                        where: {
+                            sourceType_sourceId: { sourceType: PAYOUT_SOURCE_TYPE, sourceId: req.id },
+                        },
+                        create: {
+                            userId: req.userId,
+                            direction: 'OUT',
+                            bizType: 'WITHDRAW_PAYOUT',
+                            amount: req.amount,
+                            status: 'AVAILABLE', // ✅ 已完成的资金变动
+                            sourceType: PAYOUT_SOURCE_TYPE,
+                            sourceId: req.id,
+                        },
+                        update: {
+                            direction: 'OUT',
+                            bizType: 'WITHDRAW_PAYOUT',
+                            amount: req.amount,
+                            status: 'AVAILABLE',
+                        },
+                    });
+                }
+
+                // 4) 更新申请单为 PAID（并记录审核信息）
                 return tx.walletWithdrawalRequest.update({
                     where: { id: requestId },
                     data: {
-                        status: 'APPROVED',
+                        status: 'PAID', // ✅ 当前阶段：通过即视为已打款
                         reviewedBy: reviewerId,
-                        reviewedAt: new Date(),
+                        reviewedAt: now,
                         reviewRemark,
+                        // 如你有 paidAt 字段可加：paidAt: now
                     },
                 });
             }
 
-            // ❌ 审批驳回：资金退回
-            await tx.walletAccount.update({
-                where: { userId: req.userId },
-                data: {
-                    frozenBalance: { decrement: req.amount },
-                    availableBalance: { increment: req.amount },
+            // ===========================
+            // ❌ 审批驳回：资金退回（frozen -> available）+ 幂等退回流水
+            // ===========================
+            const RELEASE_SOURCE_TYPE = 'WITHDRAWAL_REQUEST_RELEASE';
+
+            // 1) 先查“退回流水”是否已存在：存在则说明已退回过，避免重复回滚余额
+            const existingReleaseTx = await tx.walletTransaction.findUnique({
+                where: {
+                    sourceType_sourceId: { sourceType: RELEASE_SOURCE_TYPE, sourceId: req.id },
                 },
+                select: { id: true },
             });
 
-            // 写退回流水（WITHDRAW_RELEASE）
-            await tx.walletTransaction.create({
-                data: {
-                    userId: req.userId,
-                    direction: 'IN',
-                    bizType: 'WITHDRAW_RELEASE',
-                    amount: req.amount,
-                    status: 'AVAILABLE',
-                    sourceType: 'WITHDRAWAL_REQUEST',
-                    sourceId: req.id,
-                },
-            });
+            if (!existingReleaseTx) {
+                // 2) 资金退回：frozen -amount, available +amount
+                await tx.walletAccount.update({
+                    where: { userId: req.userId },
+                    data: {
+                        frozenBalance: { decrement: req.amount },
+                        availableBalance: { increment: req.amount },
+                    },
+                });
 
+                // 3) 写退回流水（WITHDRAW_RELEASE）
+                await tx.walletTransaction.upsert({
+                    where: {
+                        sourceType_sourceId: { sourceType: RELEASE_SOURCE_TYPE, sourceId: req.id },
+                    },
+                    create: {
+                        userId: req.userId,
+                        direction: 'IN',
+                        bizType: 'WITHDRAW_RELEASE',
+                        amount: req.amount,
+                        status: 'AVAILABLE',
+                        sourceType: RELEASE_SOURCE_TYPE,
+                        sourceId: req.id,
+                    },
+                    update: {
+                        direction: 'IN',
+                        bizType: 'WITHDRAW_RELEASE',
+                        amount: req.amount,
+                        status: 'AVAILABLE',
+                    },
+                });
+            }
+
+            // 4) 更新申请单为 REJECTED
             return tx.walletWithdrawalRequest.update({
                 where: { id: requestId },
                 data: {
                     status: 'REJECTED',
                     reviewedBy: reviewerId,
-                    reviewedAt: new Date(),
+                    reviewedAt: now,
                     reviewRemark,
                 },
             });
         });
     }
+
 
     /** 打手端：我的提现记录 */
     async listMine(userId: number) {

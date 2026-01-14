@@ -564,15 +564,16 @@ model OrderSettlement {
   settlementBatchId String @db.VarChar(36)
 
   /// 计算结果（结单时自动生成）
-  calculatedEarnings Float
+  calculatedEarnings Decimal? @db.Decimal(10, 1)
+
 
   /// 人工调整：客服主管/财务可对“单个陪玩-单个订单”调整收益（你明确要求）
   /// finalEarnings = calculatedEarnings + manualAdjustment
-  manualAdjustment Float @default(0)
-  finalEarnings    Float
+  manualAdjustment   Decimal? @db.Decimal(10, 1)
+  finalEarnings      Decimal? @db.Decimal(10, 1)
 
   /// 拆分记录（用于对账展示，可选）
-  clubEarnings   Float?
+  clubEarnings       Decimal? @db.Decimal(10, 1)
   csEarnings     Float?
   inviteEarnings Float?
 
@@ -636,11 +637,13 @@ model WalletAccount {
   userId    Int     @unique
   user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+
+
   /// 可用余额（可提现/可抵扣）
-  availableBalance Float @default(0)
+  availableBalance Decimal @db.Decimal(10, 1) @default(0)
 
   /// 冻结余额（未到解冻时间）
-  frozenBalance Float @default(0)
+  frozenBalance    Decimal @db.Decimal(10, 1) @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
