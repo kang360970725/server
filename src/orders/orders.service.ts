@@ -1467,12 +1467,11 @@ export class OrdersService {
                 );
             }
         }
-
         // ===========================
         // 6️⃣ 客服分红（如有）
-        // ✅ 保持独立：不参与 carry；理论上不应出现负数
+        // ✅ 修复：仅在结单（COMPLETE）时写入，存单（ARCHIVE）不写入
         // ===========================
-        if (CUSTOMER_SERVICE_SHARE_RATE > 0 && order.dispatcherId) {
+        if (mode === 'COMPLETE' && CUSTOMER_SERVICE_SHARE_RATE > 0 && order.dispatcherId) {
             const csAmount = this.trunc1((order.paidAmount ?? 0) * CUSTOMER_SERVICE_SHARE_RATE);
             if (csAmount > 0) {
                 const csFound = await tx.orderSettlement.findUnique({
@@ -1542,6 +1541,7 @@ export class OrdersService {
                 );
             }
         }
+
 
         // ===========================
         // 7️⃣ 聚合回写订单（原有逻辑，保持）

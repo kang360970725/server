@@ -680,7 +680,6 @@ export class WalletService {
         if (query.bizType) where.bizType = query.bizType;
         if (query.status) where.status = query.status;
 
-        // 你原本有重复设置，这里保留也不影响，但建议去掉重复
         if (query.orderId) where.orderId = Number(query.orderId);
         if (query.dispatchId) where.dispatchId = Number(query.dispatchId);
 
@@ -728,6 +727,26 @@ export class WalletService {
             }),
         ]);
 
+        // ✅ 2.5) 本页批量补订单编号 autoSerial（不改 schema，不做 relation）
+        const orderIds = Array.from(
+            new Set(
+                (rows || [])
+                    .map((r: any) => Number(r?.orderId))
+                    .filter((n: number) => Number.isFinite(n) && n > 0),
+            ),
+        );
+
+        let orderSerialMap = new Map<number, string>();
+        if (orderIds.length > 0) {
+            const orders = await this.prisma.order.findMany({
+                where: { id: { in: orderIds } },
+                select: { id: true, autoSerial: true },
+            });
+            orderSerialMap = new Map<number, string>(
+                orders.map((o: any) => [Number(o.id), String(o.autoSerial ?? '')]),
+            );
+        }
+
         // ✅ 3) 计算每条流水对 “available / frozen” 的影响（用 bizType，不用 status）
         const toNum = (v: any) => {
             const n = Number(v ?? 0);
@@ -738,7 +757,6 @@ export class WalletService {
             const amt = toNum(tx.amount);
             const biz = tx.bizType;
 
-            // 默认无影响
             let deltaAvailable = 0;
             let deltaFrozen = 0;
 
@@ -815,16 +833,17 @@ export class WalletService {
         let availAfter = toNum(accountNow?.availableBalance);
         let frozenAfter = toNum(accountNow?.frozenBalance);
 
-        const enriched = rows.map((r: any) => {
+        const enriched = (rows || []).map((r: any) => {
             const { deltaAvailable, deltaFrozen } = calcDelta(r);
 
             const storedAvailAfter = r.availableAfter;
             const storedFrozenAfter = r.frozenAfter;
 
             // ✅ 优先使用“数据库记录的余额快照”（Wallet v0.3）
-            // - 历史记录可能为空：回退到“本页倒推计算”的快照
-            const availableAfter = storedAvailAfter !== null && storedAvailAfter !== undefined ? toNum(storedAvailAfter) : availAfter;
-            const frozenAfterV = storedFrozenAfter !== null && storedFrozenAfter !== undefined ? toNum(storedFrozenAfter) : frozenAfter;
+            const availableAfter =
+                storedAvailAfter !== null && storedAvailAfter !== undefined ? toNum(storedAvailAfter) : availAfter;
+            const frozenAfterV =
+                storedFrozenAfter !== null && storedFrozenAfter !== undefined ? toNum(storedFrozenAfter) : frozenAfter;
 
             const availableBefore = Number((availableAfter - deltaAvailable).toFixed(2));
             const frozenBefore = Number((frozenAfterV - deltaFrozen).toFixed(2));
@@ -833,8 +852,16 @@ export class WalletService {
             availAfter = availableBefore;
             frozenAfter = frozenBefore;
 
+            const oid = Number(r?.orderId);
+            const orderAutoSerial =
+                Number.isFinite(oid) && oid > 0 ? (orderSerialMap.get(oid) || null) : null;
+
             return {
                 ...r,
+
+                // ✅ 修复：返回订单编号（autoSerial）
+                orderAutoSerial,
+
                 deltaAvailable,
                 deltaFrozen,
 
@@ -860,6 +887,8 @@ export class WalletService {
             },
         };
     }
+
+
 
 
 
