@@ -801,31 +801,98 @@ export class OrdersService {
      * - 保底单：写 participants.progressBaseWan（允许负数）
      * - 小时单：仅记录 deductMinutesOption（实际计算在 computeAndPersistBillingHours）
      */
+    // private async applyProgressAndDeduct(
+    //     tx: any,
+    //     dispatch: any,
+    //     dto: { progresses?: Array<{ userId: number; progressBaseWan?: number }>; deductMinutesOption?: string },
+    // ) {
+    //     // ✅ 只处理 progress（保底单）；小时单扣时由 computeAndPersistBillingHours 统一计算并落库
+    //     if (!dto.progresses || dto.progresses.length === 0) return;
+    //
+    //     // 小优化：转 Map，避免查找 O(n^2)
+    //     const map = new Map<number, number | null>();
+    //     for (const p of dto.progresses) {
+    //         map.set(p.userId, p.progressBaseWan ?? null);
+    //     }
+    //
+    //     // ✅ participants 通常最多 2 人，逐条 update 其实非常快
+    //     // 若未来支持更多人，也可以考虑批量 update（需要 CASE WHEN 写法，不建议 Prisma 做）
+    //     for (const part of dispatch.participants) {
+    //         if (map.has(part.userId)) {
+    //             await tx.orderParticipant.update({
+    //                 where: { id: part.id },
+    //                 data: { progressBaseWan: map.get(part.userId) },
+    //             });
+    //         }
+    //     }
+    // }
+
     private async applyProgressAndDeduct(
         tx: any,
         dispatch: any,
         dto: { progresses?: Array<{ userId: number; progressBaseWan?: number }>; deductMinutesOption?: string },
     ) {
         // ✅ 只处理 progress（保底单）；小时单扣时由 computeAndPersistBillingHours 统一计算并落库
-        if (!dto.progresses || dto.progresses.length === 0) return;
+        const progresses = Array.isArray(dto?.progresses) ? dto.progresses : [];
+        if (progresses.length === 0) return;
 
-        // 小优化：转 Map，避免查找 O(n^2)
-        const map = new Map<number, number | null>();
-        for (const p of dto.progresses) {
-            map.set(p.userId, p.progressBaseWan ?? null);
-        }
+        const parts = Array.isArray(dispatch?.participants) ? dispatch.participants : [];
+        const activeParts = parts.filter((p: any) => p?.isActive && !p?.rejectedAt);
+        if (activeParts.length === 0) return;
 
-        // ✅ participants 通常最多 2 人，逐条 update 其实非常快
-        // 若未来支持更多人，也可以考虑批量 update（需要 CASE WHEN 写法，不建议 Prisma 做）
-        for (const part of dispatch.participants) {
-            if (map.has(part.userId)) {
+        const normalize = (v: any) => {
+            if (v === null || v === undefined) return null;
+            const n = Number(v);
+            if (!Number.isFinite(n)) return null;
+            return this.round1(n); // ✅ 允许负数
+        };
+
+        // ✅ 情况1：只传 1 条（前端未拆分）=> 按人数平均拆分写入每个 active participant
+        if (progresses.length === 1 && activeParts.length > 1) {
+            const total = normalize(progresses[0]?.progressBaseWan);
+            if (total === null) return;
+
+            const n = activeParts.length;
+            const avg = this.round1(total / n);
+
+            // 尾差给最后一个（保证 sum 精确等于 total）
+            for (let i = 0; i < n; i++) {
+                const part = activeParts[i];
+                let v = avg;
+                if (i === n - 1) {
+                    const sumBeforeLast = this.round1(avg * (n - 1));
+                    v = this.round1(total - sumBeforeLast);
+                }
+
                 await tx.orderParticipant.update({
                     where: { id: part.id },
-                    data: { progressBaseWan: map.get(part.userId) },
+                    data: { progressBaseWan: v },
                 });
             }
+            return;
+        }
+
+        // ✅ 情况2：传多条（前端已拆分 or 按人录入）=> 精确写入
+        const map = new Map<number, number | null>();
+        for (const p of progresses) {
+            const uid = Number(p?.userId);
+            if (!Number.isFinite(uid) || uid <= 0) continue;
+            map.set(uid, normalize(p?.progressBaseWan));
+        }
+
+        for (const part of activeParts) {
+            const uid = Number(part?.userId);
+            if (!Number.isFinite(uid) || uid <= 0) continue;
+            if (!map.has(uid)) continue;
+
+            await tx.orderParticipant.update({
+                where: { id: part.id },
+                data: { progressBaseWan: map.get(uid) },
+            });
         }
     }
+
+
 
     //便捷函数
     private ensureDispatchStatus(dispatch: { status: DispatchStatus }, allowed: DispatchStatus[], message: string) {
@@ -960,12 +1027,9 @@ export class OrdersService {
 
         // ===========================
         // v0.2 测试参数：冻结时间用“分钟”
-        // ✅ 后续上线再改回“天 / 按等级配置”
         // ===========================
-        // const EXPERIENCE_UNLOCK_MINUTES = 3 * 24 * 60;
-        // const REGULAR_UNLOCK_MINUTES = 7 * 24 * 60;
-        const EXPERIENCE_UNLOCK_MINUTES = 5;
-        const REGULAR_UNLOCK_MINUTES = 30;
+        const EXPERIENCE_UNLOCK_MINUTES = 3 * 60 * 24;
+        const REGULAR_UNLOCK_MINUTES = 7 * 60 * 24;
 
         // ===========================
         // 客服分红比例（不落库，纯规则）
@@ -993,8 +1057,10 @@ export class OrdersService {
         });
         if (!dispatch) throw new NotFoundException('派单批次不存在');
 
-        // 2️⃣ 本轮参与者（只结算 active 的，避免历史重复结算）
-        const participants = (dispatch.participants || []).filter((p: any) => p.isActive);
+        // 2️⃣ 本轮参与者（只结算 active 且未拒单的，避免历史重复结算/拒单参与分摊）
+        const participants = (dispatch.participants || []).filter(
+            (p: any) => p?.isActive && !p?.rejectedAt,
+        );
         if (participants.length === 0) return true;
 
         // 3️⃣ 本轮基础结算类型（体验单 / 正价单）
@@ -1006,10 +1072,7 @@ export class OrdersService {
                 ? new Date(Date.now() + EXPERIENCE_UNLOCK_MINUTES * 60 * 1000)
                 : new Date(Date.now() + REGULAR_UNLOCK_MINUTES * 60 * 1000);
 
-        // 4️⃣ 分摊规则（原有逻辑，保持兼容）
-        // ✅ ARCHIVE 按 progress 比例分摊：ratioMap key 为 participant.id
-        // ⚠️ 说明：新需求里“炸单/正收益”若录入了 progressWan，会改用 grossRmb 均摊；
-        //    ratioMap 仍作为“未录入 progress 时”的兼容回退逻辑（例如小时单/未填进度）。
+        // 4️⃣ 分摊规则（原有逻辑兼容）
         const ratioMap = this.buildProgressRatioMap(participants);
 
         const dispatchCount = await tx.orderDispatch.count({
@@ -1017,10 +1080,8 @@ export class OrdersService {
         });
 
         // ---------- 4.1) 结算瞬间快照：抽成规则输入 ----------
-        // ✅ 订单抽成：只认 customClubRate；clubRate 仅做历史快照展示
         const orderCutRaw = isSet(order.customClubRate) ? order.customClubRate : null;
 
-        // ✅ 项目抽成：快照优先，避免项目后改影响历史
         const snap: any = order.projectSnapshot || {};
         const projectCutRaw = isSet(snap.clubRate)
             ? snap.clubRate
@@ -1029,7 +1090,6 @@ export class OrdersService {
                 : null;
 
         // ---------- 4.2) 员工评级抽成快照（仅当订单/项目都未设置抽成时才需要） ----------
-        // 员工评级表是 staffRating，对应抽成比例字段为 rate（抽成比例，不是到手比例）
         let staffCutMap: Map<number, number> | undefined;
 
         if (!isSet(orderCutRaw) && !isSet(projectCutRaw)) {
@@ -1041,12 +1101,10 @@ export class OrdersService {
 
             staffCutMap = new Map<number, number>();
             for (const u of users) {
-                // ✅ staffRating.rate = 抽成比例（例如 0.4/40 表示抽 40%）
                 staffCutMap.set(u.id, Number(u.staffRating?.rate ?? 0));
             }
         }
 
-        // ✅ 用于日志：命中哪个优先级
         const multiplierPriority = isSet(orderCutRaw)
             ? 'ORDER_CUT'
             : isSet(projectCutRaw)
@@ -1054,57 +1112,55 @@ export class OrdersService {
                 : 'PLAYER_CUT';
 
         // ===========================
-        // ✅ 4.3 本轮“progressWan → 人民币 gross”口径 + 炸单池（carry）兑付口径
-        // 说明：
-        // - order.baseAmountWan 固定不变（订单保底万）
-        // - 本轮 progressWan = active participants.progressBaseWan 求和（允许负数）
-        // - rate = round1(baseAmountWan / paidAmount)（万/元，取 1 位小数）
-        // - grossRmb = round1(progressWan / rate)（人民币，可正可负）
-        // - carryRemaining（炸单池剩余）通过历史 settlement 聚合计算（不改表结构）
-        // - 正常收益受订单 paidAmount 池封顶（避免“某轮打太多导致总收益>实收”）
+        // ✅ 4.3 HOURLY 不走保底口径；GUARANTEED 才走 progress→gross/carry
         // ===========================
+        const billingMode =
+            (order.projectSnapshot as any)?.billingMode ?? (order.project as any)?.billingMode;
 
-        // ✅ rate = baseAmountWan / paidAmount（万/元），按你要求取 1 位小数
-        const baseAmountWan = Number((order as any).baseAmountWan ?? 0);
+        const isHourly = billingMode === BillingMode.HOURLY;
+
+        // paidAmount 仍要校验（旧口径也依赖它）
         const paidAmount = Number((order as any).paidAmount ?? 0);
-        if (!Number.isFinite(baseAmountWan) || baseAmountWan <= 0) {
-            throw new BadRequestException('订单 baseAmountWan 非法');
-        }
         if (!Number.isFinite(paidAmount) || paidAmount <= 0) {
             throw new BadRequestException('订单 paidAmount 非法');
         }
-        const rateWanPerYuan = this.round1(baseAmountWan / paidAmount); // ✅ 1 位小数
 
-        // ✅ 本轮 progress 总额（万）：active participants.progressBaseWan 求和（允许负数）
-        let dispatchProgressWan = 0;
+        // ✅ 本轮 progress 汇总（抗“只填自己/重复填同一个值”）
+        // ✅ 本轮 progress 汇总（口径统一：progressBaseWan 永远是“每个参与者各自的进度(万)”）
+// - 因此前端传 150/150 时，本轮总进度必须是 300
+// - 允许负数（炸单）
         let hasAnyProgressInput = false;
+        let dispatchProgressWan = 0;
+
+        const filledProgress: number[] = [];
         for (const p of participants) {
             const v = (p as any).progressBaseWan;
-            if (v !== null && v !== undefined) {
-                const n = Number(v);
-                if (Number.isFinite(n)) {
-                    dispatchProgressWan += n;
-                    hasAnyProgressInput = true;
-                }
-            }
+            if (v === null || v === undefined) continue;
+            const n = Number(v);
+            if (!Number.isFinite(n)) continue;
+            filledProgress.push(this.round1(n));
         }
 
-        // ===========================
-        // ✅ 结单自动补齐剩余保底（最小改动）
-        // 目的：保证 COMPLETE 时一定走 progress→gross→carry 口径，自动把“剩余保底”当作本轮 progressWan
-        // 规则：remainingWan = order.baseAmountWan - sum(all dispatch participants.progressBaseWan)
-        // - sumProgressWan 允许为负（炸单），因此 remainingWan 会变大（符合你的示例：788 - (-300) = 1088）
-        // - 仅在 mode=COMPLETE 且本轮未录入 progress 时触发（不覆盖人工已录入）
-        // ===========================
-        if (mode === 'COMPLETE' && !hasAnyProgressInput) {
-            // 1) 拉取该订单所有 dispatch 的所有 participants.progressBaseWan
-            // ⚠️ 注意：这里只读必要字段，尽量轻
+        if (filledProgress.length > 0) {
+            hasAnyProgressInput = true;
+            dispatchProgressWan = this.round1(filledProgress.reduce((s, x) => s + x, 0));
+        }
+
+        console.log(
+            '[EARN_DBG][PROGRESS_SUM]',
+            'orderId=', orderId,
+            'dispatchId=', dispatchId,
+            'mode=', mode,
+            'participantsLen=', participants.length,
+            'filledProgress=', filledProgress,
+            'dispatchProgressWan=', dispatchProgressWan,
+        );
+
+        // ✅ COMPLETE 自动补齐剩余保底：小时单跳过（没有保底概念）
+        if (mode === 'COMPLETE' && !hasAnyProgressInput && !isHourly) {
             const allDispatches = await tx.orderDispatch.findMany({
                 where: { orderId },
-                select: {
-                    id: true,
-                    participants: { select: { progressBaseWan: true } },
-                },
+                select: { participants: { select: { progressBaseWan: true } } },
             });
 
             let sumProgressWan = 0;
@@ -1118,84 +1174,71 @@ export class OrdersService {
                 }
             }
 
-            // 2) remainingWan = baseAmountWan - sumProgressWan
             const baseWan = Number((order as any).baseAmountWan ?? 0);
             if (!Number.isFinite(baseWan) || baseWan <= 0) {
-                throw new BadRequestException('订单 baseAmountWan 非法');
+                throw new BadRequestException('订单 baseAmountWan 非法-02');
             }
 
             const remainingWan = this.round1(baseWan - sumProgressWan);
-
-            // 3) 兜底：如果 remainingWan <= 0，说明本单保底已被“打满或超出”
-            //    在这种情况下，本轮 progressWan 用 0 走口径即可（不会产生收益，也不会产生补偿）
             dispatchProgressWan = remainingWan > 0 ? remainingWan : 0;
-
-            // 4) 标记本轮为“已输入 progress”（虽然是后端补齐），确保 grossRmb 不为 null
             hasAnyProgressInput = true;
-
-            // ✅ 可选日志（你现在在排查，建议先保留）
-            console.log(
-                '[SETTLE][AUTO_PROGRESS_COMPLETE]',
-                'orderId=', orderId,
-                'dispatchId=', dispatchId,
-                'baseAmountWan=', baseWan,
-                'sumProgressWan=', this.round1(sumProgressWan),
-                'remainingWan=', dispatchProgressWan,
-            );
         }
 
-
-        // ✅ 本轮 gross（人民币，可正可负）
-        // - 若本轮未填任何 progress（全为 0/空）：保持兼容，后续仍走你原“paidAmount 均分”口径
-        const grossRmb = hasAnyProgressInput ? this.round1(dispatchProgressWan / rateWanPerYuan) : null;
-
-        // ✅ 聚合历史：计算 carryRemaining + remainingPaidPool（最小改动：findMany + reduce）
-        // - carryDebt：历史基础结算（REGULAR/EXPERIENCE）里 calculatedEarnings<0 的绝对值之和
-        // - carryPaid：历史补偿结算（CARRY_COMPENSATION）里 calculatedEarnings>0 的之和
-        // - consumedPaidPool：历史基础结算里 calculatedEarnings>0 的之和（用于 paidAmount 池封顶）
-        const allForOrder = await tx.orderSettlement.findMany({
-            where: { orderId },
-            select: { settlementType: true, calculatedEarnings: true },
-        });
+        // ✅ gross/carry 相关变量：必须都有默认值（避免 undefined）
+        let rateWanPerYuan: number | null = null;
+        let grossRmb: number | null = null;
 
         let consumedPaidPool = 0;
         let carryDebt = 0;
         let carryPaid = 0;
+        let carryRemaining = 0;
+        let remainingPaidPool = 0;
 
-        for (const s of allForOrder) {
-            const cal = Number((s as any).calculatedEarnings ?? 0);
-            if (!Number.isFinite(cal) || cal === 0) continue;
-
-            // ✅ 只看基础结算类型（REGULAR/EXPERIENCE）作为“订单收益池消耗/炸单池负债”来源
-            if ((s as any).settlementType === baseSettlementType) {
-                if (cal > 0) consumedPaidPool += cal;
-                if (cal < 0) carryDebt += -cal;
-            }
-
-            // ✅ 补偿结算：历史已兑付
-            if ((s as any).settlementType === 'CARRY_COMPENSATION') {
-                if (cal > 0) carryPaid += cal;
-            }
-        }
-
-        consumedPaidPool = this.round1(consumedPaidPool);
-        carryDebt = this.round1(carryDebt);
-        carryPaid = this.round1(carryPaid);
-
-        const carryRemaining = Math.max(0, this.round1(carryDebt - carryPaid));
-        const remainingPaidPool = Math.max(0, this.round1(paidAmount - consumedPaidPool));
-
-        // ✅ 把 gross 拆成：repay（本轮从炸单池兑付的补偿）+ normalGross（本轮正常收益，受 paidPool 封顶）
-        // - gross<0：炸单 → normalGross 为负数，repay=0
-        // - gross>0：先 repay=min(gross, carryRemaining)；normalGross = min(gross-repay, remainingPaidPool)
         let repayRmb = 0;
         let normalGrossRmb = 0;
-        let excessNormalRmb = 0; // ✅ 超出 paidPool 的部分（不发放，只做日志追溯）
+        let excessNormalRmb = 0;
 
-        if (grossRmb !== null) {
+        if (!isHourly && hasAnyProgressInput) {
+            const baseAmountWan = Number((order as any).baseAmountWan ?? 0);
+            if (!Number.isFinite(baseAmountWan) || baseAmountWan <= 0) {
+                throw new BadRequestException('订单 baseAmountWan 非法-01');
+            }
+
+            rateWanPerYuan = this.round1(baseAmountWan / paidAmount);
+            grossRmb = this.round1(dispatchProgressWan / rateWanPerYuan);
+
+            // ✅ carry/pool 聚合
+            const allForOrder = await tx.orderSettlement.findMany({
+                where: { orderId },
+                select: { settlementType: true, calculatedEarnings: true },
+            });
+
+            for (const s of allForOrder) {
+                const cal = Number((s as any).calculatedEarnings ?? 0);
+                if (!Number.isFinite(cal) || cal === 0) continue;
+
+                if ((s as any).settlementType === baseSettlementType) {
+                    if (cal > 0) consumedPaidPool += cal;
+                    if (cal < 0) carryDebt += -cal;
+                }
+
+                if ((s as any).settlementType === 'CARRY_COMPENSATION') {
+                    if (cal > 0) carryPaid += cal;
+                }
+            }
+
+            consumedPaidPool = this.round1(consumedPaidPool);
+            carryDebt = this.round1(carryDebt);
+            carryPaid = this.round1(carryPaid);
+
+            carryRemaining = Math.max(0, this.round1(carryDebt - carryPaid));
+            remainingPaidPool = Math.max(0, this.round1(paidAmount - consumedPaidPool));
+
+            // ✅ gross 拆分：repay + normalGross
             if (grossRmb < 0) {
                 repayRmb = 0;
-                normalGrossRmb = grossRmb; // 负数
+                normalGrossRmb = grossRmb; // ✅ 负数
+                excessNormalRmb = 0;
             } else if (grossRmb > 0) {
                 repayRmb = Math.min(grossRmb, carryRemaining);
 
@@ -1208,16 +1251,18 @@ export class OrdersService {
                 normalGrossRmb = 0;
                 excessNormalRmb = 0;
             }
+        } else {
+            // ✅ 小时单：强制走旧口径
+            grossRmb = null;
+            rateWanPerYuan = null;
         }
 
         // ===========================
         // 5️⃣ 逐个陪玩生成基础结算（幂等）
-        // ✅ 重要：本轮若有 progress 输入，基础结算按 normalGrossRmb 均摊；
-        //    炸单（gross<0）强制 multiplier=1，不受评级影响；
-        //    正收益才按抽成优先级计算 multiplier。
+        // - grossRmb!=null：按 normalGrossRmb 均摊（可负）
+        // - grossRmb==null：走旧口径 calcPlayerEarning（小时单）
         // ===========================
 
-        // 5.0 先查已有基础 settlement（用于幂等 update）
         const userIds = participants.map((p: any) => p.userId);
         const existingBase = await tx.orderSettlement.findMany({
             where: {
@@ -1225,13 +1270,7 @@ export class OrdersService {
                 settlementType: baseSettlementType,
                 userId: { in: userIds },
             },
-            select: {
-                id: true,
-                userId: true,
-                paymentStatus: true,
-                manualAdjustment: true,
-                finalEarnings: true,
-            },
+            select: { id: true, userId: true },
         });
         const baseMap = new Map<number, any>();
         for (const e of existingBase) baseMap.set(e.userId, e);
@@ -1240,13 +1279,23 @@ export class OrdersService {
             participants.map(async (p: any, idx: number) => {
                 const userId = p.userId;
 
-                // ✅ calculated：本轮该陪玩的“基础收益”（人民币，可正可负）
-                // - 若本轮有 progress 输入：使用 normalGrossRmb 均摊（炸单时为负数）
-                // - 否则：保持兼容（小时单/未录入进度）仍用旧口径 paidAmount 均分 * ratio
                 let calculated: number;
 
                 if (grossRmb !== null) {
-                    // ✅ 均摊 normalGrossRmb（按 round1 口径），尾差给最后一个
+                    console.log(
+                        '[EARN_DBG][GROSS_CTX]',
+                        'orderId=', orderId,
+                        'dispatchId=', dispatchId,
+                        'userId=', userId,
+                        'participantsLen=', participants.length,
+                        'grossRmb=', grossRmb,
+                        'normalGrossRmb=', normalGrossRmb,
+                        'repayRmb=', repayRmb,
+                        'paidAmount=', Number(order?.paidAmount ?? 0),
+                        'dispatchProgressWan=', dispatchProgressWan,
+                        'rateWanPerYuan=', rateWanPerYuan,
+                        'mode=', mode,
+                    );
                     const avg = this.round1(normalGrossRmb / participants.length);
                     calculated = avg;
 
@@ -1254,19 +1303,45 @@ export class OrdersService {
                         const sumBeforeLast = this.round1(avg * (participants.length - 1));
                         calculated = this.round1(normalGrossRmb - sumBeforeLast);
                     }
+                    console.log(
+                        '[EARN_DBG][GROSS_RESULT]',
+                        'orderId=', orderId,
+                        'dispatchId=', dispatchId,
+                        'userId=', userId,
+                        'idx=', idx,
+                        'avg=', avg,
+                        'calculated=', calculated,
+                    );
                 } else {
                     const ratio = ratioMap.get(p.id) ?? 1;
+                    console.log(
+                        '[EARN_DBG][INPUT]',
+                        'orderId=', orderId,
+                        'dispatchId=', dispatchId,
+                        'userId=', userId,
+                        'participantsLen=', participants.length,
+                        'ratio=', ratio,
+                        'paidAmount=', Number(order?.paidAmount ?? 0),
+                        'grossRmb=', grossRmb,
+                        'mode=', mode,
+                    );
                     calculated = this.calcPlayerEarning({
                         order,
                         participantsCount: participants.length,
                         ratio,
+                        _dbg: { orderId, dispatchId, userId },
                     });
+                    console.log(
+                        '[EARN_DBG][RESULT]',
+                        'orderId=', orderId,
+                        'dispatchId=', dispatchId,
+                        'userId=', userId,
+                        'calculated=', calculated,
+                    );
                 }
 
-                // ✅ 平台抽成 / 项目抽成 / 员工评级优先级（正收益才适用）
-                // ✅ 炸单（gross<0）：不受抽成/评级影响
+                // ✅ 炸单（gross<0）：不抽成
                 let multiplier = 1;
-
                 if (!(grossRmb !== null && grossRmb < 0)) {
                     multiplier = this.resolveMultiplier(order, p, {
                         orderCutRaw,
@@ -1275,27 +1350,10 @@ export class OrdersService {
                     });
                 }
 
-                // ✅ final：本轮实际到手（人民币，可正可负）
                 const calculated1 = this.trunc1(calculated);
-                const final1 = this.trunc1(calculated1 * multiplier); // ✅ 乘完再截断
+                const final1 = this.trunc1(calculated1 * multiplier);
                 const manualAdj1 = this.trunc1(final1 - calculated1);
                 const club1 = this.trunc1(calculated1 - final1);
-
-                console.log(
-                    '[SETTLE]',
-                    'orderId=', orderId,
-                    'dispatchId=', dispatchId,
-                    'userId=', p.userId,
-                    'orderCutRaw=', orderCutRaw,
-                    'projectCutRaw=', projectCutRaw,
-                    'staffCut=', staffCutMap?.get(p.userId),
-                    'multiplier=', multiplier,
-                    'grossRmb=', grossRmb,
-                    'normalGrossRmb=', normalGrossRmb,
-                    'repayRmb=', repayRmb,
-                    'calculated=', calculated,
-                    'final=', final1,
-                );
 
                 const found = baseMap.get(userId);
 
@@ -1314,9 +1372,6 @@ export class OrdersService {
                             calculatedEarnings: calculated1,
                             manualAdjustment: manualAdj1,
                             finalEarnings: final1,
-
-                            // ✅ 正常：平台差额 = calculated - final
-                            // ✅ 炸单：multiplier=1 → 差额为 0
                             clubEarnings: club1,
 
                             csEarnings: null,
@@ -1327,26 +1382,26 @@ export class OrdersService {
                     });
 
                     settlementId = created.id;
-                    settlementFinal = created.finalEarnings;
+                    settlementFinal = Number(created.finalEarnings ?? 0) as any;
                 } else {
                     const updated = await tx.orderSettlement.update({
                         where: { id: found.id },
                         data: {
                             settlementBatchId,
 
-                            calculatedEarnings: calculated,
-                            manualAdjustment: this.round1(final1 - calculated),
+                            calculatedEarnings: calculated1,
+                            manualAdjustment: manualAdj1,
                             finalEarnings: final1,
-                            clubEarnings: this.round1(calculated - final1),
+                            clubEarnings: club1,
                         },
                         select: { id: true, finalEarnings: true },
                     });
 
                     settlementId = updated.id;
-                    settlementFinal = updated.finalEarnings;
+                    settlementFinal = Number(updated.finalEarnings ?? 0) as any;
                 }
 
-                // ✅ 钱包同步：允许 0/负数（负数即时入账，不冻结；正数冻结；0 释放）
+                // ✅ 钱包同步：负收益会写 direction=OUT（你贴的钱包方法已支持）
                 await this.wallet.syncSettlementEarningByFinalEarnings(
                     {
                         userId,
@@ -1357,7 +1412,7 @@ export class OrdersService {
                             grossRmb !== null && grossRmb < 0
                                 ? WalletBizType.SETTLEMENT_BOMB_LOSS
                                 : WalletBizType.SETTLEMENT_EARNING_BASE,
-                        sourceId: settlementId, // ✅ 幂等锚点（uniq_wallet_tx_source）
+                        sourceId: settlementId,
                         orderId,
                         dispatchId,
                         settlementId,
@@ -1368,18 +1423,12 @@ export class OrdersService {
         );
 
         // ===========================
-        // ✅ 5.9 炸单池兑付补偿（可跨多轮，不仅最后一组）
-        // 规则：
-        // - grossRmb>0 时，先 repay=min(grossRmb, carryRemaining)
-        // - repayRmb 均摊给本轮参与者
-        // - 不抽成、不评级（multiplier=1），并且不占用订单 paidAmount 池（它是“补偿池兑付”）
-        // - settlementType 使用 'CARRY_COMPENSATION'（String，不需迁移）
+        // 5.9 炸单池补偿（仅非小时单 + grossRmb>0 + repayRmb>0）
         // ===========================
         if (grossRmb !== null && repayRmb > 0) {
             const n = participants.length;
             const avg = this.round1(repayRmb / n);
 
-            // ✅ 先查本轮已有补偿 settlement（避免 N 次 findUnique）
             const existingComp = await tx.orderSettlement.findMany({
                 where: {
                     dispatchId,
@@ -1401,7 +1450,6 @@ export class OrdersService {
                     calculated = this.round1(repayRmb - sumBeforeLast);
                 }
 
-                // ✅ 补偿不抽成/不评级
                 const calculated1 = this.trunc1(calculated);
                 const final1 = calculated1;
 
@@ -1432,13 +1480,13 @@ export class OrdersService {
                     });
 
                     settlementId = created.id;
-                    settlementFinal = created.finalEarnings;
+                    settlementFinal = Number(created.finalEarnings ?? 0) as any;
                 } else {
                     const updated = await tx.orderSettlement.update({
                         where: { id: found.id },
                         data: {
                             settlementBatchId,
-                            calculatedEarnings: calculated,
+                            calculatedEarnings: calculated1,
                             manualAdjustment: 0,
                             finalEarnings: final1,
                             clubEarnings: 0,
@@ -1447,10 +1495,9 @@ export class OrdersService {
                     });
 
                     settlementId = updated.id;
-                    settlementFinal = updated.finalEarnings;
+                    settlementFinal = Number(updated.finalEarnings ?? 0) as any;
                 }
 
-                // ✅ 钱包同步：补偿为正数 → 冻结；若极端出现 0，也能对齐释放
                 await this.wallet.syncSettlementEarningByFinalEarnings(
                     {
                         userId,
@@ -1467,9 +1514,9 @@ export class OrdersService {
                 );
             }
         }
+
         // ===========================
-        // 6️⃣ 客服分红（如有）
-        // ✅ 修复：仅在结单（COMPLETE）时写入，存单（ARCHIVE）不写入
+        // 6️⃣ 客服分红（仅 COMPLETE 写入）
         // ===========================
         if (mode === 'COMPLETE' && CUSTOMER_SERVICE_SHARE_RATE > 0 && order.dispatcherId) {
             const csAmount = this.trunc1((order.paidAmount ?? 0) * CUSTOMER_SERVICE_SHARE_RATE);
@@ -1508,7 +1555,7 @@ export class OrdersService {
                         select: { id: true, finalEarnings: true },
                     });
                     csId = created.id;
-                    csFinal = created.finalEarnings;
+                    csFinal = Number(created.finalEarnings ?? 0) as any;
                 } else {
                     const updated = await tx.orderSettlement.update({
                         where: { id: csFound.id },
@@ -1522,7 +1569,7 @@ export class OrdersService {
                         select: { id: true, finalEarnings: true },
                     });
                     csId = updated.id;
-                    csFinal = updated.finalEarnings;
+                    csFinal = Number(updated.finalEarnings ?? 0) as any;
                 }
 
                 await this.wallet.syncSettlementEarningByFinalEarnings(
@@ -1542,16 +1589,12 @@ export class OrdersService {
             }
         }
 
-
         // ===========================
-        // 7️⃣ 聚合回写订单（原有逻辑，保持）
+        // 7️⃣ 聚合回写订单
         // ===========================
         const agg = await tx.orderSettlement.aggregate({
             where: { orderId },
-            _sum: {
-                finalEarnings: true,
-                clubEarnings: true,
-            },
+            _sum: { finalEarnings: true, clubEarnings: true },
         });
 
         await tx.order.update({
@@ -1563,8 +1606,7 @@ export class OrdersService {
         });
 
         // ===========================
-        // 8️⃣ 操作日志（原有逻辑，保持）
-        // ✅ 增强：记录本轮 gross/carry/pool 追溯字段，便于你验算 A/B/C 多轮场景
+        // 8️⃣ 操作日志（记录关键追溯字段）
         // ===========================
         await this.logOrderAction(
             order.dispatcherId,
@@ -1573,23 +1615,18 @@ export class OrdersService {
             {
                 dispatchId,
                 settlementBatchId,
-                rule:
-                    dispatchCount === 1 && mode === 'COMPLETE'
-                        ? 'SINGLE_COMPLETE_FULL'
-                        : 'RATIO_BY_PROGRESS',
+                rule: dispatchCount === 1 && mode === 'COMPLETE' ? 'SINGLE_COMPLETE_FULL' : 'RATIO_BY_PROGRESS',
                 multiplierPriority,
 
-                // ✅ 记录使用的抽成快照（便于对账/追溯）
                 orderCut: isSet(orderCutRaw) ? normalizeToRatio(orderCutRaw, 0) : null,
                 projectCut: !isSet(orderCutRaw) && isSet(projectCutRaw) ? normalizeToRatio(projectCutRaw, 0) : null,
                 staffCutHint: !isSet(orderCutRaw) && !isSet(projectCutRaw) ? 'STAFF_RATING_RATE' : null,
 
-                // ✅ 本轮 progress → gross 口径（只有录入 progress 时才有）
+                billingMode,
                 rateWanPerYuan,
                 dispatchProgressWan: hasAnyProgressInput ? dispatchProgressWan : null,
                 grossRmb,
 
-                // ✅ 炸单池（carry）兑付与订单收益池封顶口径
                 carryDebt,
                 carryPaid,
                 carryRemaining,
@@ -1603,6 +1640,8 @@ export class OrdersService {
 
         return true;
     }
+
+
 
 
 
@@ -1946,12 +1985,15 @@ export class OrdersService {
     }
 
     // ✅ 我的接单记录 / 工作台
+    // ✅ 我的接单记录（陪玩端/员工端查看自己参与的派单批次）
+// mode: 'WORKBENCH' -> 工作台：只看当前轮 + 自己是有效参与者
+// mode: 'HISTORY'   -> 接单记录：包含拒单/被替换等历史（只要参与过即可）
     async listMyDispatches(params: {
         userId: number;
         page: number;
         limit: number;
         status?: string;
-        mode?: 'workbench' | 'history';
+        mode?: 'WORKBENCH' | 'HISTORY';
     }) {
         const userId = Number(params.userId);
         const page = Math.max(1, Number(params.page ?? 1));
@@ -1960,15 +2002,15 @@ export class OrdersService {
 
         if (!userId) throw new BadRequestException('userId 缺失');
 
-        const isWorkbench = params.mode === 'workbench';
+        const mode = (params.mode ?? 'HISTORY') as 'WORKBENCH' | 'HISTORY';
 
-        // ✅ workbench：当前轮（每个订单 round 最大的 dispatch），且 participant 必须有效
-        if (isWorkbench) {
-            // 1) 先拿“我参与且有效”的 dispatch 的 (orderId, round) 聚合：每个 order 最大 round
-            const grouped = await this.prisma.orderDispatch.groupBy({
-                by: ['orderId'],
-                where: {
-                    ...(params.status ? { status: params.status as any } : {}),
+        const where: any = {};
+
+        if (mode === 'WORKBENCH') {
+            // ✅ 工作台：只查“派给我的当前轮”，要求我在本轮仍有效参与（isActive=true 且未拒单）
+            where.order = { currentDispatchId: undefined }; // 占位，下面用 AND 写更清晰
+            where.AND = [
+                {
                     participants: {
                         some: {
                             userId,
@@ -1977,81 +2019,20 @@ export class OrdersService {
                         },
                     },
                 },
-                _max: { round: true },
-            });
-
-            // 没有当前单
-            if (!grouped || grouped.length === 0) {
-                return { data: [], total: 0, page, limit, totalPages: 0 };
-            }
-
-            // 2) 用 (orderId, maxRound) 找到对应 dispatchId
-            // Prisma 不支持 tuple IN，这里用 OR 组合（订单数一般不会太大，工作台足够用）
-            const pairOr = grouped
-                .filter((g) => Number.isFinite(Number(g.orderId)) && g._max?.round != null)
-                .map((g) => ({
-                    orderId: g.orderId,
-                    round: g._max.round!,
-                }));
-
-            if (pairOr.length === 0) {
-                return { data: [], total: 0, page, limit, totalPages: 0 };
-            }
-
-            const currentDispatches = await this.prisma.orderDispatch.findMany({
-                where: {
-                    OR: pairOr as any,
-                    ...(params.status ? { status: params.status as any } : {}),
-                    participants: {
+                // ✅ 当前轮：只能是订单 currentDispatchId 指向的那条 dispatch
+                {
+                    currentForOrders: {
                         some: {
-                            userId,
-                            isActive: true,
-                            rejectedAt: null,
+                            id: { gt: 0 }, // 只要存在 currentForOrders 即可
                         },
                     },
                 },
-                select: { id: true },
-            });
-
-            const dispatchIds = currentDispatches.map((d) => d.id);
-            if (dispatchIds.length === 0) {
-                return { data: [], total: 0, page, limit, totalPages: 0 };
-            }
-
-            // 3) 再分页查详情
-            const [data, total] = await Promise.all([
-                this.prisma.orderDispatch.findMany({
-                    where: { id: { in: dispatchIds } },
-                    skip,
-                    take: limit,
-                    orderBy: [{ id: 'desc' }], // 或 round desc 再 id desc
-                    include: {
-                        order: {
-                            include: {
-                                project: true,
-                                dispatcher: { select: { id: true, name: true, phone: true } },
-                            },
-                        },
-                        participants: {
-                            where: { userId, isActive: true, rejectedAt: null },
-                            include: {
-                                user: { select: { id: true, name: true, phone: true } },
-                            },
-                        },
-                    },
-                }),
-                this.prisma.orderDispatch.count({
-                    where: { id: { in: dispatchIds } },
-                }),
-            ]);
-
-            return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+            ];
+        } else {
+            // ✅ 历史：只要参与过（包含拒单/被替换）
+            where.participants = { some: { userId } };
         }
 
-        // ✅ history：按“我出现过的 participant”查（不限制 isActive，拒单也要展示）
-        const where: any = {
-            participants: { some: { userId } },
-        };
         if (params.status) where.status = params.status as any;
 
         const [data, total] = await Promise.all([
@@ -2067,12 +2048,19 @@ export class OrdersService {
                             dispatcher: { select: { id: true, name: true, phone: true } },
                         },
                     },
-                    participants: {
-                        where: { userId },
-                        include: {
-                            user: { select: { id: true, name: true, phone: true } },
-                        },
-                    },
+
+                    // ✅ 关键修复：participants 不再过滤 userId=当前陪玩
+                    // - WORKBENCH：返回本轮所有有效参与者（isActive=true 且未拒单），前端才能看到“另一人”
+                    // - HISTORY：返回本轮所有参与者（含拒单/被替换），前端才能展示“拒单记录”
+                    participants:
+                        mode === 'WORKBENCH'
+                            ? {
+                                where: { isActive: true, rejectedAt: null },
+                                include: { user: { select: { id: true, name: true, phone: true } } },
+                            }
+                            : {
+                                include: { user: { select: { id: true, name: true, phone: true } } },
+                            },
                 },
             }),
             this.prisma.orderDispatch.count({ where }),
@@ -2080,6 +2068,7 @@ export class OrdersService {
 
         return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
     }
+
 
 
 
@@ -2769,74 +2758,105 @@ export class OrdersService {
 
         const now = new Date();
 
-        // ✅ 仍按服务器本地时区切分（后续要统一北京时间再集中处理）
         const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
         const endToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
 
         const startMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
         const endMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
 
-        // ✅ 钱包收益流水口径：只统计“结算收益入账”，并排除已冲正（退款）流水
-        // - 这样 Workbench 与钱包列表、解冻统计一致
+        // ✅ 1) 今日/月 接单次数：存单+结单都算（每轮一次）
+        const dispatchParticipantWhere: any = {
+            participants: {
+                some: {
+                    userId,
+                    isActive: true,
+                    rejectedAt: null,
+                },
+            },
+        };
+
+        const [todayArchiveCount, todayCompleteCount, monthArchiveCount, monthCompleteCount] =
+            await Promise.all([
+                this.prisma.orderDispatch.count({
+                    where: { ...dispatchParticipantWhere, archivedAt: { gte: startToday, lte: endToday } },
+                }),
+                this.prisma.orderDispatch.count({
+                    where: { ...dispatchParticipantWhere, completedAt: { gte: startToday, lte: endToday } },
+                }),
+                this.prisma.orderDispatch.count({
+                    where: { ...dispatchParticipantWhere, archivedAt: { gte: startMonth, lte: endMonth } },
+                }),
+                this.prisma.orderDispatch.count({
+                    where: { ...dispatchParticipantWhere, completedAt: { gte: startMonth, lte: endMonth } },
+                }),
+            ]);
+
+        const todayCount = Number(todayArchiveCount) + Number(todayCompleteCount);
+        const monthCount = Number(monthArchiveCount) + Number(monthCompleteCount);
+
+        // ✅ 2) 收入净额：IN - OUT（包含冻结），排除 REVERSED
+        // 说明：
+        // - 正收益：direction=IN（通常 FROZEN/AVAILABLE 都算）
+        // - 炸单负收益：你钱包实现会写 direction=OUT（AVAILABLE），这里会被抵扣
+        const incomeBizTypes = [
+            'SETTLEMENT_EARNING',       // 兼容旧
+            'SETTLEMENT_EARNING_BASE',  // 基础收益
+            'SETTLEMENT_EARNING_CARRY', // 补偿收益
+            'SETTLEMENT_EARNING_CS',    // 客服分红
+            'SETTLEMENT_BOMB_LOSS',     // 炸单损耗（OUT）
+        ];
+
         const baseWhere: any = {
             userId,
-            direction: 'IN',
-            bizType: 'SETTLEMENT_EARNING',
+            bizType: { in: incomeBizTypes },
             status: { not: 'REVERSED' },
-            // 可选：确保有 dispatchId（正常都会有）
-            dispatchId: { not: null },
         };
 
-        const whereToday = {
-            ...baseWhere,
-            createdAt: { gte: startToday, lte: endToday },
-        };
-
-        const whereMonth = {
-            ...baseWhere,
-            createdAt: { gte: startMonth, lte: endMonth },
-        };
-
-        // ✅ 今日/月 接单数：按 dispatchId 去重计数
-        // Prisma 的 count 不支持 distinct 字段计数时，这里用 findMany + distinct 再 length（数据量小，性能OK）
-        const [todayDispatches, monthDispatches] = await Promise.all([
-            this.prisma.walletTransaction.findMany({
-                where: whereToday,
-                select: { dispatchId: true },
-                distinct: ['dispatchId'],
-            }),
-            this.prisma.walletTransaction.findMany({
-                where: whereMonth,
-                select: { dispatchId: true },
-                distinct: ['dispatchId'],
-            }),
-        ]);
-
-        const todayCount = todayDispatches.length;
-        const monthCount = monthDispatches.length;
-
-        // ✅ 今日/月 收益：sum(amount)
-        const [todayIncomeAgg, monthIncomeAgg] = await Promise.all([
+        const [todayAgg, monthAgg] = await Promise.all([
             this.prisma.walletTransaction.aggregate({
-                where: whereToday,
+                where: { ...baseWhere, createdAt: { gte: startToday, lte: endToday } },
                 _sum: { amount: true },
             }),
             this.prisma.walletTransaction.aggregate({
-                where: whereMonth,
+                where: { ...baseWhere, createdAt: { gte: startMonth, lte: endMonth } },
                 _sum: { amount: true },
             }),
         ]);
 
-        const todayIncome = Number(todayIncomeAgg?._sum?.amount ?? 0);
-        const monthIncome = Number(monthIncomeAgg?._sum?.amount ?? 0);
+        // ❗aggregate 无法按 direction 分组，所以最小改动：再查一次 OUT 的 sum（两次 aggregate）
+        const [todayOutAgg, monthOutAgg] = await Promise.all([
+            this.prisma.walletTransaction.aggregate({
+                where: {
+                    ...baseWhere,
+                    direction: 'OUT',
+                    createdAt: { gte: startToday, lte: endToday },
+                },
+                _sum: { amount: true },
+            }),
+            this.prisma.walletTransaction.aggregate({
+                where: {
+                    ...baseWhere,
+                    direction: 'OUT',
+                    createdAt: { gte: startMonth, lte: endMonth },
+                },
+                _sum: { amount: true },
+            }),
+        ]);
 
-        return {
-            todayCount,
-            todayIncome,
-            monthCount,
-            monthIncome,
-        };
+        const todayTotal = Number(todayAgg?._sum?.amount ?? 0);
+        const monthTotal = Number(monthAgg?._sum?.amount ?? 0);
+
+        const todayOut = Number(todayOutAgg?._sum?.amount ?? 0);
+        const monthOut = Number(monthOutAgg?._sum?.amount ?? 0);
+
+        // ✅ 净额 = 总额 - OUT（因为 amount 始终为正数，OUT 用来表达扣款）
+        const todayIncome = todayTotal - todayOut;
+        const monthIncome = monthTotal - monthOut;
+
+        return { todayCount, todayIncome, monthCount, monthIncome };
     }
+
+
 
     // ✅ 关键：dispatch 结算互斥抢占
     // - 只能从 ACCEPTED -> SETTLING
@@ -2916,21 +2936,38 @@ export class OrdersService {
     private calcPlayerEarning(params: {
         order: { paidAmount: number };
         participantsCount: number;
-        ratio?: number; // ARCHIVE 模式用：按进度比例分摊
+        ratio?: number;
+        // 可选：给日志用（不传也行）
+        _dbg?: { orderId?: number; dispatchId?: number; userId?: number };
     }) {
-        const { order, participantsCount, ratio } = params;
+        const { order, participantsCount, ratio, _dbg } = params;
 
         const paid = Number(order?.paidAmount || 0);
         const count = Math.max(1, Number(participantsCount || 1));
 
-        // ✅ 默认：总收益先平均分给所有陪玩（后续可替换为“陪玩分成比例”）
+        // 你原逻辑
         const base = paid / count;
-
-        // ✅ ARCHIVE 模式：如果传入 ratio，则按 ratio 分摊（否则仍按平均）
         const r = ratio != null ? Number(ratio) : 1;
+        const out = this.round1(base * r);
 
-        return this.round1(base * r);
+        console.log(
+            '[EARN_DBG][calcPlayerEarning]',
+            'orderId=', _dbg?.orderId,
+            'dispatchId=', _dbg?.dispatchId,
+            'userId=', _dbg?.userId,
+            'paid=', paid,
+            'participantsCount=', participantsCount,
+            'countUsed=', count,
+            'ratio=', ratio,
+            'rUsed=', r,
+            'base=paid/count=', base,
+            'out=round1(base*r)=', out,
+        );
+
+        return out;
     }
+
+
 
     /**
      * 计算到手 multiplier（优先级：订单抽成 > 项目抽成 > 陪玩抽成）
