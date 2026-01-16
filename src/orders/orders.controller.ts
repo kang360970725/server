@@ -224,19 +224,21 @@ export class OrdersController {
         return this.ordersService.rejectDispatch(dispatchId, req.user?.userId, reason);
     }
 
-    /** 我的接单记录（陪玩端） */
+    /** 我的接单记录 / 工作台（陪玩端） */
     @Post('my-dispatches')
     @UseGuards(PermissionsGuard)
     @Permissions('staff:my-orders:page')
     async myDispatches(@Body() body: any, @Request() req: any) {
         const page = Math.max(1, Number(body.page ?? 1));
         const limit = Math.min(100, Math.max(1, Number(body.limit ?? 20)));
-        const userId = req.user?.userId;
+        const userId = Number(req.user?.userId);
+
         return this.ordersService.listMyDispatches({
             userId,
             page,
             limit,
             status: body.status,
+            mode: body.mode, // ✅ workbench | history
         });
     }
 
