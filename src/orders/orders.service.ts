@@ -1962,21 +1962,97 @@ export class OrdersService {
 
         const isWorkbench = params.mode === 'workbench';
 
-        const where: any = {
-            participants: {
-                some: {
-                    userId,
-                    ...(isWorkbench
-                        ? {
+        // ✅ workbench：当前轮（每个订单 round 最大的 dispatch），且 participant 必须有效
+        if (isWorkbench) {
+            // 1) 先拿“我参与且有效”的 dispatch 的 (orderId, round) 聚合：每个 order 最大 round
+            const grouped = await this.prisma.orderDispatch.groupBy({
+                by: ['orderId'],
+                where: {
+                    ...(params.status ? { status: params.status as any } : {}),
+                    participants: {
+                        some: {
+                            userId,
                             isActive: true,
                             rejectedAt: null,
-                        }
-                        : {}),
+                        },
+                    },
                 },
-            },
-            ...(params.status ? { status: params.status as any } : {}),
-            ...(isWorkbench ? { isLatest: true } : {}), // ✅ 当前轮
+                _max: { round: true },
+            });
+
+            // 没有当前单
+            if (!grouped || grouped.length === 0) {
+                return { data: [], total: 0, page, limit, totalPages: 0 };
+            }
+
+            // 2) 用 (orderId, maxRound) 找到对应 dispatchId
+            // Prisma 不支持 tuple IN，这里用 OR 组合（订单数一般不会太大，工作台足够用）
+            const pairOr = grouped
+                .filter((g) => Number.isFinite(Number(g.orderId)) && g._max?.round != null)
+                .map((g) => ({
+                    orderId: g.orderId,
+                    round: g._max.round!,
+                }));
+
+            if (pairOr.length === 0) {
+                return { data: [], total: 0, page, limit, totalPages: 0 };
+            }
+
+            const currentDispatches = await this.prisma.orderDispatch.findMany({
+                where: {
+                    OR: pairOr as any,
+                    ...(params.status ? { status: params.status as any } : {}),
+                    participants: {
+                        some: {
+                            userId,
+                            isActive: true,
+                            rejectedAt: null,
+                        },
+                    },
+                },
+                select: { id: true },
+            });
+
+            const dispatchIds = currentDispatches.map((d) => d.id);
+            if (dispatchIds.length === 0) {
+                return { data: [], total: 0, page, limit, totalPages: 0 };
+            }
+
+            // 3) 再分页查详情
+            const [data, total] = await Promise.all([
+                this.prisma.orderDispatch.findMany({
+                    where: { id: { in: dispatchIds } },
+                    skip,
+                    take: limit,
+                    orderBy: [{ id: 'desc' }], // 或 round desc 再 id desc
+                    include: {
+                        order: {
+                            include: {
+                                project: true,
+                                dispatcher: { select: { id: true, name: true, phone: true } },
+                            },
+                        },
+                        participants: {
+                            where: { userId, isActive: true, rejectedAt: null },
+                            include: {
+                                user: { select: { id: true, name: true, phone: true } },
+                            },
+                        },
+                    },
+                }),
+                this.prisma.orderDispatch.count({
+                    where: { id: { in: dispatchIds } },
+                }),
+            ]);
+
+            return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+        }
+
+        // ✅ history：按“我出现过的 participant”查（不限制 isActive，拒单也要展示）
+        const where: any = {
+            participants: { some: { userId } },
         };
+        if (params.status) where.status = params.status as any;
 
         const [data, total] = await Promise.all([
             this.prisma.orderDispatch.findMany({
@@ -1992,9 +2068,7 @@ export class OrdersService {
                         },
                     },
                     participants: {
-                        where: isWorkbench
-                            ? { userId, isActive: true, rejectedAt: null }
-                            : { userId },
+                        where: { userId },
                         include: {
                             user: { select: { id: true, name: true, phone: true } },
                         },
@@ -2006,6 +2080,7 @@ export class OrdersService {
 
         return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
     }
+
 
 
     /***
