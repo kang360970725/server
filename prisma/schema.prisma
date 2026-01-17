@@ -360,16 +360,17 @@ model Order {
   /// 金额：手工录入（你已确认 Q1=A）
   /// receivableAmount：应收金额（理论金额）
   /// paidAmount：实付金额（用于结算计算）
-  receivableAmount Float
-  paidAmount       Float
+  receivableAmount Float  //应收金额（理论金额）
+  paidAmount       Float  //实付金额（用于结算计算）
 
   /// 时间字段：
-  /// orderTime：下单时间（未来接线上商城平台）
-  /// paymentTime：付款时间（未来接支付）
-  /// openedAt：开单时间（默认录入时间）
-  orderTime   DateTime?
-  paymentTime DateTime?
-  openedAt    DateTime  @default(now())
+  orderTime   DateTime? //下单时间（未来接线上商城平台）
+  paymentTime DateTime? //付款时间（未来接支付）
+  /// 是否已确认收款（人工确认）
+  /// - 先打后付场景：结单后可能仍未收款
+  /// - 确认收款接口会同时写入 paymentTime=now() 与 paidAmount（允许修正）
+  isPaid Boolean @default(false)
+  openedAt    DateTime  @default(now())  //开单时间（默认录入时间）
 
   /// 保底数额（单位：万）
   /// 仅保底/护航类项目使用；小时单可为空
@@ -399,17 +400,13 @@ model Order {
   revisitStatus RevisitStatus @default(NOT_REVISITED)
 
   /// 分佣比例（可调）
-  /// csRate：客服收益比例（默认 1%，体验单可设为 0）
-  /// inviteRate：邀请/推广分佣（默认 5%）
-  csRate     Float?
-  inviteRate Float?
+  csRate     Float?  //客服收益比例（默认 1%，体验单可设为 0）
+  inviteRate Float? //邀请/推广分佣（默认 5%）
   inviter    String? // 邀请/推广人（可字符串或后期关联用户）
 
   /// 俱乐部抽成比例（订单级固定抽成）
-  /// customClubRate：录单时可自定义；优先级最高
-  /// clubRate：实际使用的抽成（落库快照，便于对账）
-  customClubRate Float?
-  clubRate       Float?
+  customClubRate Float? //录单时可自定义；优先级最高
+  clubRate       Float? //实际使用的抽成（落库快照，便于对账）
 
   /// 结算汇总（可选，结单自动结算后写入，用于对账与校验）
   clubEarnings        Float? // 本单俱乐部收益

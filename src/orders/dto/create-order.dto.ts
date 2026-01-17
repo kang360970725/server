@@ -72,4 +72,14 @@ export class CreateOrderDto {
     @IsOptional()
     @IsBoolean()
     isGifted?: boolean;
+
+    /**
+     * 是否已收款（人工确认）
+     * - 前端必须显式传递，不从 paymentTime 推断
+     * - 先打后付：isPaid=false
+     */
+    @IsOptional()
+    @IsBoolean()
+    isPaid?: boolean;
+
 }

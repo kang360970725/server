@@ -12,6 +12,7 @@ import {
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { OrdersService } from './orders.service';
 import { AdjustSettlementDto } from './dto/adjust-settlement.dto';
+import { MarkPaidDto } from './dto/mark-paid.dto';
 
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { Permissions } from '../auth/decorators/permissions.decorator';
@@ -42,6 +43,7 @@ export class OrdersController {
             projectId: body.projectId != null ? Number(body.projectId) : undefined,
             dispatcherId: body.dispatcherId != null ? Number(body.dispatcherId) : undefined,
             playerId: body.playerId != null ? Number(body.playerId) : undefined,
+            isPaid: body.isPaid === undefined ? undefined : Boolean(body.isPaid),
         });
     }
 
@@ -126,6 +128,8 @@ export class OrdersController {
             Number(body.paidAmount),
             req.user?.userId,
             body.remark,
+            // 小时单补收通常意味着款项已补收入账，这里支持前端显式取消
+            body.confirmPaid,
         );
     }
 
@@ -174,6 +178,15 @@ export class OrdersController {
     update(@Body() dto: any, @Req() req: any) {
         const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
         return this.ordersService.updateOrderEditable(dto, operatorId);
+    }
+
+    /** 确认收款（管理端/财务） */
+    @Post('mark-paid')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:list:page')
+    markPaid(@Body() dto: MarkPaidDto, @Req() req: any) {
+        const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+        return this.ordersService.markOrderPaid(dto, operatorId);
     }
 
     /** 修改存单记录的保底进度（管理端） */
