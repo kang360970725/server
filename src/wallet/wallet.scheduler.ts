@@ -21,11 +21,11 @@ export class WalletScheduler {
 
     /**
      * 每 每天早上8点开启定时任务
-     * - 你也可以改成每小时：'0 * * * *'
+     * - 也可以改成每小时：'0 * * * *'
      */
 
-    // @Cron('0 0 8 * * *')
-    @Cron('0 */15 * * * *')
+    @Cron('0 0 8 * * *')
+    // @Cron('0 */15 * * * *')
     async releaseDueHoldsDaily() {
         try {
             const result = await this.wallet.releaseDueHoldsInBatches({ batchSize: 200 });

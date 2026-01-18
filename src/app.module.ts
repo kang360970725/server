@@ -15,6 +15,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { WalletModule } from './wallet/wallet.module';
 import {DashboardModule} from "./dashboard/dashboard.module";
 import { UserLogsModule } from './user-logs/user-logs.module';
+import { FinanceModule } from './finance/finance.module';
 
 
 @Module({
@@ -31,7 +32,8 @@ import { UserLogsModule } from './user-logs/user-logs.module';
         WalletModule,
         DashboardModule,
         UserLogsModule,
-        MetaModule
+        MetaModule,
+        FinanceModule,
     ],
     controllers: [AppController],
     providers: [AppService, PrismaService],

@@ -148,5 +148,21 @@ IDLE → WORKING → IDLE
 - 陪玩端收益与记录页面
 
 ---
+## 九、审计日志 Action 规范（必须同步 /meta/enums）
+
+> 约束：UserLog.action 必须来自 `/meta/enums` 的 Action 字典。  
+> 原则：只允许新增 key，不允许修改旧 key（否则历史日志展示会失真）。
+
+### Action（示例，持续补全）
+- ORDER_CREATE：创建订单
+- ORDER_ASSIGN：派单
+- ORDER_REPLACE_PLAYER：替换打手
+- ORDER_ACCEPT：接单
+- ORDER_ARCHIVE：存单
+- ORDER_COMPLETE：结单
+- PAID_AMOUNT_UPDATE：修改实付金额
+- SETTLEMENT_CREATE：生成结算记录
+- WALLET_FREEZE：钱包冻结
+- WITHDRAW_APPROVE：审核通过提现
 
 > ⚡ 本文档是项目“记忆锚点”，任何重要决策都应同步更新。
