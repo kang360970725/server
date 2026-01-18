@@ -84,9 +84,9 @@ export class OrdersService {
                 // paidAmount: dto.paidAmount,
                 // paymentTime: dto.paymentTime ? new Date(dto.paymentTime) : null,
 
-                // ✅ 赠送单强制清零金额
-                receivableAmount: isGifted ? 0 : dto.receivableAmount,
-                paidAmount: isGifted ? 0 : dto.paidAmount,
+                // ✅ 赠送单不可强制清零金额，清零后结算会产生错误
+                receivableAmount: dto.receivableAmount,
+                paidAmount: dto.paidAmount,
 
                 // ✅ 赠送单一般不应有付款时间（也可以按业务改成 now）
                 paymentTime: isGifted || isPaid ? null : (dto.paymentTime ? new Date(dto.paymentTime) : null),

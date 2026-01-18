@@ -14,6 +14,7 @@ import { MetaModule } from './meta/meta.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { WalletModule } from './wallet/wallet.module';
 import {DashboardModule} from "./dashboard/dashboard.module";
+import { UserLogsModule } from './user-logs/user-logs.module';
 
 
 @Module({
@@ -29,6 +30,7 @@ import {DashboardModule} from "./dashboard/dashboard.module";
         ScheduleModule.forRoot(),
         WalletModule,
         DashboardModule,
+        UserLogsModule,
         MetaModule
     ],
     controllers: [AppController],

@@ -192,6 +192,10 @@ model UserLog {
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId], map: "user_logs_userId_fkey")
+  @@index([targetType, targetId], map: "user_logs_target")
+  @@index([action], map: "user_logs_action")
+  @@index([createdAt], map: "user_logs_createdAt")
+
   @@map("user_logs")
 }
 
@@ -357,9 +361,7 @@ model Order {
   /// 自动单号：建议 YYYYMMDD-0001（由代码生成，不靠 DB 自增）
   autoSerial String @unique
 
-  /// 金额：手工录入（你已确认 Q1=A）
-  /// receivableAmount：应收金额（理论金额）
-  /// paidAmount：实付金额（用于结算计算）
+  /// 金额：手工录入（已确认 Q1=A）
   receivableAmount Float  //应收金额（理论金额）
   paidAmount       Float  //实付金额（用于结算计算）
 
