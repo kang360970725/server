@@ -6,27 +6,35 @@ export class MetaController {
     @Post('enums')
     enums() {
         return {
+            // =========================
+            // Order / Dispatch
+            // =========================
             OrderStatus: {
                 WAIT_ASSIGN: '待派单',
                 WAIT_ACCEPT: '待接单',
                 ACCEPTED: '已接单',
                 ARCHIVED: '已存单',
                 COMPLETED: '已结单',
+                REFUNDED: '已退款', // ✅ 补充：核账/退款用
                 CANCELLED: '已取消',
                 // 你后面扩展：待评价/已评价/售后/退款…继续加
             },
+
             DispatchStatus: {
                 WAIT_ASSIGN: '待派单',
                 WAIT_ACCEPT: '待接单',
                 ACCEPTED: '已接单',
+                SETTLING: '结算中', // ✅ 补充：你结算锁定/结算中场景会用到
                 ARCHIVED: '已存单',
                 COMPLETED: '已结单',
             },
+
             PlayerWorkStatus: {
                 IDLE: '空闲',
                 WORKING: '接单中',
                 RESTING: '休息',
             },
+
             OrderType: {
                 EXPERIENCE: '体验单',
                 FUN: '趣味玩法',
@@ -36,20 +44,80 @@ export class MetaController {
                 CUSTOM: '定制',
                 CUSTOMIZED: '自定义',
             },
+
             BillingMode: {
                 HOURLY: '小时单',
                 GUARANTEED: '保底单',
             },
+
+            // =========================
+            // Settlement / Finance
+            // =========================
+
+            /**
+             * ✅ 结算打款状态（你核账抽屉“结算明细”要用）
+             * 说明：具体枚举名你库里叫啥不确定，所以这里提供通用 PaymentStatus
+             */
+            PaymentStatus: {
+                UNPAID: '未打款',
+                PAID: '已打款',
+            },
+
+            /**
+             * ✅ 结算批次类型（如果你后端已有对应逻辑/字段，前端可直接用）
+             */
+            SettlementBatchType: {
+                EXPERIENCE_3DAY: '体验单/福袋单 3 天结算',
+                MONTHLY_REGULAR: '正价单次月结算',
+            },
+
+            /**
+             * ✅ 扣时长选项（如果你有“扣分钟”规则/枚举）
+             * 后续你真实值如果不同，按真实枚举 key 替换即可；冗余允许，不影响旧逻辑
+             */
+            DeductMinutesOption: {
+                M10: '扣 10 分钟',
+                M20: '扣 20 分钟',
+                M30: '扣 30 分钟',
+                M40: '扣 40 分钟',
+                M50: '扣 50 分钟',
+                M60: '扣 60 分钟',
+            },
+
+            // =========================
+            // Wallet
+            // =========================
             WalletDirection: {
                 IN: '收入',
                 OUT: '支出',
             },
+
             WalletTxStatus: {
                 FROZEN: '冻结中',
                 AVAILABLE: '可用',
                 REVERSED: '已冲正',
+                CANCELLED: '已取消', // ✅ 你现有的保留（即使 schema 不一定有，也允许冗余）
+            },
+
+            /**
+             * ✅ 冻结记录状态（你钱包冻结/解冻、核账追溯可能会用）
+             */
+            WalletHoldStatus: {
+                FROZEN: '冻结中',
+                RELEASED: '已解冻',
                 CANCELLED: '已取消',
             },
+
+            WithdrawalStatus: {
+                PENDING_REVIEW: '待审核',
+                APPROVED: '已审核通过',
+                REJECTED: '已驳回',
+                PAYING: '打款中',
+                PAID: '已打款成功',
+                FAILED: '打款失败',
+                CANCELED: '已取消',
+            },
+
             WalletBizType: {
                 SETTLEMENT_EARNING: '结算收益（旧）',
 
@@ -65,8 +133,14 @@ export class MetaController {
                 WITHDRAW_RELEASE: '提现退回',
                 WITHDRAW_PAYOUT: '提现出款',
             },
+
+            WithdrawalChannel: {
+                WECHAT: '微信自动打款（预留）',
+                MANUAL: '人工线下打款',
+            },
+
             // =========================
-            // ✅ 日志 Action 明文字典（新增）
+            // ✅ 日志 Action 明文字典（你现有 + 补齐）
             // =========================
             Action: {
                 // -------- 订单域 --------
