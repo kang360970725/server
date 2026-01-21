@@ -22,7 +22,8 @@ export class FinanceController {
     }
 
     /**
-     * 财务核账：每单一列（按“收款时间”口径）
+     * 财务核账：每单一列
+     * ✅ 已按你的确认修复：默认展示全部订单（不论状态/是否退款/是否付款），时间按 openedAt
      * - 支持：按订单号(autoSerial) / 按打手(userId) 筛选
      */
     @Post('orders')
@@ -37,5 +38,25 @@ export class FinanceController {
     @Post('order-detail')
     async orderDetail(@Body() dto: ReconcileOrderDetailDto, @Req() req: any) {
         return this.financeService.orderDetail(req?.user, dto, req);
+    }
+
+    /**
+     * 财务核账：打手流水查询（只读审计）
+     * - 仅财务/超管可用（权限在 service 内严格校验）
+     * - 路径：POST /finance/reconcile/player/transactions
+     */
+    @Post('player/transactions')
+    async playerTransactions(
+        @Body()
+            dto: {
+            playerId: number;
+            startAt?: string;
+            endAt?: string;
+            page?: number;
+            pageSize?: number;
+        },
+        @Req() req: any,
+    ) {
+        return this.financeService.playerTransactions(req?.user, dto, req);
     }
 }

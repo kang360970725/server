@@ -17,6 +17,7 @@ export class MetaController {
                 COMPLETED: '已结单',
                 REFUNDED: '已退款', // ✅ 补充：核账/退款用
                 CANCELLED: '已取消',
+                COMPLETED_PENDING_CONFIRM: '已结单待确认',
                 // 你后面扩展：待评价/已评价/售后/退款…继续加
             },
 
@@ -119,7 +120,7 @@ export class MetaController {
             },
 
             WalletBizType: {
-                SETTLEMENT_EARNING: '结算收益（旧）',
+                SETTLEMENT_EARNING: '结算收益（常规）',
 
                 SETTLEMENT_EARNING_BASE: '基础结算收益',
                 SETTLEMENT_EARNING_CARRY: '补单收益（炸单补偿）',
@@ -222,6 +223,8 @@ export class MetaController {
                 FINANCE_RECONCILE_SUMMARY: '财务核账-总览统计查询',
                 FINANCE_RECONCILE_ORDERS: '财务核账-订单明细查询',
                 FINANCE_RECONCILE_ORDER_DETAIL: '财务核账-订单抽查详情',
+
+                FINANCE_PLAYER_TRANSACTIONS: '财务核账-打手流水查询',
             },
         };
     }

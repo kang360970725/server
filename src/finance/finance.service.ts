@@ -10,12 +10,13 @@ import { UserType, WalletBizType } from '@prisma/client';
  *
  * 口径（你已确认）：
  * 1) 收入口径：仅统计 isPaid=true 的订单 paidAmount
- * 2) 统计时间：按“收款时间” Order.paymentTime
+ * 2) 统计时间：按“收款时间” Order.paymentTime（summary 仍按此口径）
  * 3) 退款：退款发生后不扣接单数；支出必须出现冲正流水才算退款完成
  *
- * 注意：
- * - 本模块不改动钱包/订单核心逻辑，只做“聚合查询 + 抽查明细”
- * - 接口默认 POST（符合锚点铁律）
+ * ✅ 本次修复重点（你确认 1.A）：
+ * - orders 列表：默认展示“全部订单”（不论状态/是否退款/是否已付款）
+ * - orders 列表时间：按 Order.openedAt 范围筛选（而不是 paymentTime）
+ * - 退款未冲正的订单必须能被看到（避免被过滤掉）
  */
 @Injectable()
 export class FinanceService {
@@ -23,7 +24,6 @@ export class FinanceService {
 
     // ------------------------
     // 权限：FINANCE / SUPER_ADMIN 才能用核账
-    // （你目前 schema 里已有 UserType.FINANCE）
     // ------------------------
     private ensureFinanceAccess(reqUser: any) {
         const t = reqUser?.userType;
@@ -120,7 +120,7 @@ export class FinanceService {
     }
 
     // =========================================================
-    // 1) 总览统计
+    // 1) 总览统计（口径不变：paymentTime + isPaid=true）
     // =========================================================
     async summary(reqUser: any, dto: ReconcileSummaryDto, req?: any) {
         this.ensureFinanceAccess(reqUser);
@@ -224,7 +224,7 @@ export class FinanceService {
     }
 
     // =========================================================
-    // 2) 每单一列
+    // 2) 每单一列（✅修复：默认查全部订单，按 openedAt）
     // =========================================================
     async orders(reqUser: any, dto: ReconcileOrdersDto, req?: any) {
         this.ensureFinanceAccess(reqUser);
@@ -240,24 +240,53 @@ export class FinanceService {
 
         const includeGifted = this.isTruthyBoolean(dto.includeGifted);
 
-        // base where：收入口径 + 收款时间口径
+        /**
+         * ✅【核心修复点】
+         * 核账 orders 列表必须“默认展示全部订单”，用于发现：
+         * - 已退款但未冲正（必须能看到）
+         * - 未付款但已结算/已产生支出（异常）
+         * - 其它状态机边界问题
+         *
+         * 因此：
+         * - 不再用 isPaid/paymentTime 过滤列表
+         * - 列表时间口径：按 openedAt（你确认 1.A）
+         */
         const where: any = {
-            isPaid: true,
-            paymentTime: { gte: startAt, lte: endAt },
+            openedAt: { gte: startAt, lte: endAt },
         };
         if (!includeGifted) where.isGifted = false;
-
         if (dto.autoSerial) where.autoSerial = dto.autoSerial;
 
-        // playerId 过滤：通过结算表反查 orderId 集合（严格按“打手参与结算”判定）
+        /**
+         * playerId 过滤（最小改动策略）：
+         * - 你原实现：通过结算表反查 orderId（“严格按参与结算”）
+         * - 这是稳定逻辑，我不推翻
+         * - 注意：如果订单还没结算，则不会被此过滤命中（符合“按结算参与核账”的严格口径）
+         */
         if (dto.playerId) {
             const rows = await this.prisma.orderSettlement.findMany({
                 where: { userId: Number(dto.playerId) },
                 select: { orderId: true },
             });
             const ids = Array.from(new Set(rows.map((r) => Number(r.orderId))));
-            // 如果一个都没有，直接返回空分页
             if (!ids.length) {
+                await this.writeUserLog({
+                    userId: operatorId,
+                    action: 'FINANCE_RECONCILE_ORDERS',
+                    remark: '财务核账-订单列表查询（playerId 过滤命中 0）',
+                    newData: {
+                        startAt: dto.startAt,
+                        endAt: dto.endAt,
+                        includeGifted,
+                        autoSerial: dto.autoSerial ?? null,
+                        playerId: dto.playerId ?? null,
+                        onlyAbnormal: this.isTruthyBoolean(dto.onlyAbnormal),
+                        page,
+                        pageSize,
+                    },
+                    req,
+                });
+
                 return { page, pageSize, total: 0, rows: [] };
             }
             where.id = { in: ids };
@@ -267,7 +296,8 @@ export class FinanceService {
             this.prisma.order.count({ where }),
             this.prisma.order.findMany({
                 where,
-                orderBy: { paymentTime: 'desc' },
+                // ✅ 列表按 openedAt 倒序（与筛选字段一致）
+                orderBy: { openedAt: 'desc' },
                 skip,
                 take: pageSize,
                 select: {
@@ -317,7 +347,11 @@ export class FinanceService {
 
         const rows = orders.map((o) => {
             const oid = Number(o.id);
-            const paidAmount = this.toNumber(o.paidAmount);
+
+            // ✅ 收入口径：展示列“收入(实收)”严格按 isPaid=true
+            const rawPaidAmount = this.toNumber(o.paidAmount);
+            const paidAmount = o.isPaid ? rawPaidAmount : 0;
+
             const sList = byOrder.get(oid) ?? [];
 
             // 参与成员：按你需要的“张三(评级比例)-收益多少”
@@ -334,20 +368,23 @@ export class FinanceService {
             const totalPlayerExpense = sList.reduce((sum, s) => sum + this.toNumber(s.finalEarnings), 0);
             const totalCsExpense = sList.reduce((sum, s) => sum + this.toNumber(s.csEarnings), 0);
             const totalExpense = totalPlayerExpense + totalCsExpense;
+
             const profit = paidAmount - totalExpense;
 
             const isRefunded = o.status === 'REFUNDED';
             const refundCompleted = isRefunded ? reversalMap.get(oid) === true : false;
 
-            // 退款金额：你 schema 里没单独字段，这里按“实收金额口径”先给 paidAmount
-            // 后续你如果加 refundAmount 字段，我会改为优先用 refundAmount
+            // 退款金额：你 schema 里没单独字段，这里按“实收金额口径”先给 paidAmount（已按 isPaid 归零）
             const refundAmount = isRefunded ? paidAmount : 0;
 
             // 异常判定（用于 onlyAbnormal）
             const abnormalReasons: string[] = [];
-            if (!o.isPaid) abnormalReasons.push('未收款但出现在核账范围（理论不应出现）');
+            // 1) 倒挂：支出 > 实收（实收按 isPaid=true）
             if (totalExpense > paidAmount) abnormalReasons.push('累计支出 > 实收（倒挂）');
+            // 2) 已退款但未冲正（你最关心的点）
             if (isRefunded && !refundCompleted) abnormalReasons.push('已退款但未冲正（退款未完成）');
+            // 3) 未收款但已有支出（通常表示流程/数据异常）
+            if (!o.isPaid && totalExpense > 0) abnormalReasons.push('未收款但已产生结算支出（疑似异常）');
 
             return {
                 orderId: oid,
@@ -358,6 +395,9 @@ export class FinanceService {
 
                 income: {
                     paidAmount,
+                    // 冗余给财务抽查：原始字段值，方便定位“paidAmount 有值但 isPaid=false”的异常
+                    rawPaidAmount,
+                    isPaid: o.isPaid,
                     isGifted: o.isGifted,
                 },
 
@@ -384,7 +424,7 @@ export class FinanceService {
         await this.writeUserLog({
             userId: operatorId,
             action: 'FINANCE_RECONCILE_ORDERS',
-            remark: '财务核账-订单列表查询',
+            remark: '财务核账-订单列表查询（默认全状态，按 openedAt）',
             newData: {
                 startAt: dto.startAt,
                 endAt: dto.endAt,
@@ -398,16 +438,21 @@ export class FinanceService {
             req,
         });
 
+        /**
+         * ✅ 注意：onlyAbnormal=true 时，这里 total 仍然返回“查询范围内订单总数”
+         * - 这样分页行为稳定，不会出现“第一页 total=xx，第二页 total=yy”的混乱
+         * - 前端如果希望“异常总数”，可以后续单独加一个 countAbnormal（不影响本次最小改动）
+         */
         return {
             page,
             pageSize,
-            total: dto.onlyAbnormal ? filteredRows.length : total,
+            total,
             rows: filteredRows,
         };
     }
 
     // =========================================================
-    // 3) 单订单抽查
+    // 3) 单订单抽查（原逻辑保留）
     // =========================================================
     async orderDetail(reqUser: any, dto: ReconcileOrderDetailDto, req?: any) {
         this.ensureFinanceAccess(reqUser);
@@ -505,7 +550,7 @@ export class FinanceService {
         const totalExpense = totalPlayerExpense + totalCsExpense;
 
         const paidAmount = this.toNumber(order.paidAmount);
-        const profit = paidAmount - totalExpense;
+        const profit = (order.isPaid ? paidAmount : 0) - totalExpense;
 
         await this.writeUserLog({
             userId: operatorId,
@@ -519,6 +564,7 @@ export class FinanceService {
         return {
             order: {
                 ...order,
+                // 这里不改原字段，只做数字化；前端展示“实收”仍应按 isPaid 口径处理
                 paidAmount,
                 receivableAmount: this.toNumber(order.receivableAmount),
             },
@@ -540,7 +586,7 @@ export class FinanceService {
                 frozenAfter: this.toNumber(t.frozenAfter),
             })),
             stats: {
-                income: paidAmount,
+                income: order.isPaid ? paidAmount : 0,
                 totalPlayerExpense,
                 totalCsExpense,
                 totalExpense,
@@ -548,10 +594,86 @@ export class FinanceService {
                 refund: {
                     isRefunded: order.status === 'REFUNDED',
                     refundCompleted,
-                    // 同 orders：暂按 paidAmount 作为退款金额口径（你没单独字段）
-                    refundAmount: order.status === 'REFUNDED' ? paidAmount : 0,
+                    // 同 orders：暂按 paidAmount（且 isPaid 口径）作为退款金额口径（你没单独字段）
+                    refundAmount: order.status === 'REFUNDED' ? (order.isPaid ? paidAmount : 0) : 0,
                 },
             },
+        };
+    }
+
+    async playerTransactions(
+        reqUser: any,
+        dto: { playerId: number; startAt?: string; endAt?: string; page?: number; pageSize?: number },
+        req?: any,
+    ) {
+        this.ensureFinanceAccess(reqUser);
+        const operatorId = this.getReqUserId(reqUser);
+
+        const playerId = Number(dto.playerId);
+        if (!Number.isFinite(playerId) || playerId <= 0) throw new BadRequestException('playerId 必填');
+
+        const page = Math.max(1, Number(dto.page ?? 1));
+        const pageSize = Math.min(100, Math.max(1, Number(dto.pageSize ?? 20)));
+        const skip = (page - 1) * pageSize;
+
+        const where: any = { userId: playerId };
+        if (dto.startAt && dto.endAt) {
+            where.createdAt = {
+                gte: this.parseDateOrThrow(dto.startAt, 'startAt'),
+                lte: this.parseDateOrThrow(dto.endAt, 'endAt'),
+            };
+        }
+
+        const [total, data] = await this.prisma.$transaction([
+            this.prisma.walletTransaction.count({ where }),
+            this.prisma.walletTransaction.findMany({
+                where,
+                orderBy: { id: 'desc' },
+                skip,
+                take: pageSize,
+                select: {
+                    id: true,
+                    userId: true,
+                    direction: true,
+                    bizType: true,
+                    amount: true,
+                    status: true,
+                    orderId: true,
+                    settlementId: true,
+                    sourceType: true,
+                    sourceId: true,
+                    reversalOfTxId: true,
+                    availableAfter: true,
+                    frozenAfter: true,
+                    createdAt: true,
+                },
+            }),
+        ]);
+
+        await this.writeUserLog({
+            userId: operatorId,
+            action: 'FINANCE_PLAYER_TRANSACTIONS',
+            remark: '财务核账-打手流水查询',
+            newData: {
+                playerId,
+                startAt: dto.startAt ?? null,
+                endAt: dto.endAt ?? null,
+                page,
+                pageSize,
+            },
+            req,
+        });
+
+        return {
+            page,
+            pageSize,
+            total,
+            data: data.map((t) => ({
+                ...t,
+                amount: this.toNumber(t.amount),
+                availableAfter: this.toNumber(t.availableAfter),
+                frozenAfter: this.toNumber(t.frozenAfter),
+            })),
         };
     }
 }

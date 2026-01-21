@@ -240,7 +240,8 @@ enum OrderStatus {
   WAIT_ACCEPT // 待接单：已派单但未全员接单完成
   ACCEPTED // 已接单：当前批次全员已接单
   ARCHIVED // 已存单：本轮存档，可再次派单（创建下一轮 dispatch）
-  COMPLETED // 已结单：打手结单，触发自动结算落库
+  COMPLETED_PENDING_CONFIRM //打手结单后进入待确认
+  COMPLETED //客服确认后才算最终结单（并同步钱包冻结）
   WAIT_REVIEW // 待评价：业务预留
   REVIEWED // 已评价：业务预留
   WAIT_AFTERSALE // 待售后：业务预留

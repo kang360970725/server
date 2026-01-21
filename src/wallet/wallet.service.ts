@@ -346,6 +346,187 @@ export class WalletService {
 
 
     /**
+     * ✅ 幂等修复 settlement 的冻结收益钱包流水
+     * 目标：让 walletTx.amount == expectedAmount，且不会重复计入余额
+     *
+     * 约束：
+     * - 若 walletTx/hold 已非冻结：由上层拦截，不在这里处理
+     */
+    async repairSettlementEarning(
+        params: {
+            userId: number;
+            expectedAmount: number;
+            sourceType: 'ORDER_SETTLEMENT';
+            sourceId: number;
+            orderId: number;
+            dispatchId: number | null;
+            settlementId: number;
+        },
+        tx: any,
+    ) {
+        const { userId, expectedAmount, sourceType, sourceId, orderId, dispatchId, settlementId } = params;
+
+        const expected = Number(expectedAmount ?? 0);
+        if (!Number.isFinite(expected) || expected === 0) return;
+
+        const isNegative = expected < 0;
+
+        // 1️⃣ 查现有流水（幂等锚点）
+        const existing = await tx.walletTransaction.findUnique({
+            where: { sourceType_sourceId: { sourceType, sourceId } },
+            select: { id: true, amount: true, status: true },
+        });
+
+        /**
+         * =========================
+         * A. 不存在流水 → 补建
+         * =========================
+         */
+        if (!existing) {
+            if (isNegative) {
+                // 🔻 炸单损耗：即时生效
+                await tx.walletAccount.upsert({
+                    where: { userId },
+                    update: { availableBalance: { increment: expected } } as any,
+                    create: { userId, availableBalance: expected, frozenBalance: 0 } as any,
+                });
+
+                const walletAmount = Math.abs(expected);
+
+                await tx.walletTransaction.create({
+                    data: {
+                        userId,
+                        amount: walletAmount,
+                        status: 'AVAILABLE', // ✅ enum 对齐
+                        direction: WalletDirection.OUT,
+                        bizType: WalletBizType.SETTLEMENT_BOMB_LOSS,
+                        sourceType,
+                        sourceId,
+                        orderId,
+                        dispatchId,
+                        settlementId,
+                    } as any,
+                });
+
+                return;
+            }
+
+            // 🔺 正数收益：冻结
+            await tx.walletAccount.upsert({
+                where: { userId },
+                update: { frozenBalance: { increment: expected } } as any,
+                create: { userId, availableBalance: 0, frozenBalance: expected } as any,
+            });
+
+            const txRow = await tx.walletTransaction.create({
+                data: {
+                    userId,
+                    amount: expected,
+                    status: 'FROZEN',
+                    direction: WalletDirection.IN,
+                    bizType: WalletBizType.SETTLEMENT_EARNING_BASE, // 或你传入的具体收益类型
+                    sourceType,
+                    sourceId,
+                    orderId,
+                    dispatchId,
+                    settlementId,
+                } as any,
+                select: { id: true },
+            });
+
+            await tx.walletHold.create({
+                data: {
+                    earningTxId: txRow.id,
+                    userId,
+                    amount: expected,
+                    status: 'FROZEN',
+                    unlockAt: new Date(),
+                } as any,
+            });
+
+            return;
+        }
+
+        /**
+         * =========================
+         * B. 已存在流水 → 对齐
+         * =========================
+         */
+        const current = Number(existing.amount ?? 0);
+        if (current === expected && (
+            (isNegative && existing.status === 'AVAILABLE') ||
+            (!isNegative && existing.status === 'FROZEN')
+        )) {
+            return; // 已对齐
+        }
+
+        // 旧影响
+        const oldFrozen = existing.status === 'FROZEN' ? current : 0;
+        const oldAvail = existing.status === 'AVAILABLE' ? current : 0;
+
+        // 新影响
+        const newFrozen = isNegative ? 0 : expected;
+        const newAvail = isNegative ? expected : 0;
+
+        const deltaFrozen = newFrozen - oldFrozen;
+        const deltaAvail = newAvail - oldAvail;
+
+        // 1️⃣ 调整账户余额（幂等核心）
+        await tx.walletAccount.update({
+            where: { userId },
+            data: {
+                frozenBalance: deltaFrozen ? ({ increment: deltaFrozen } as any) : undefined,
+                availableBalance: deltaAvail ? ({ increment: deltaAvail } as any) : undefined,
+            } as any,
+        });
+
+        // 2️⃣ 更新流水
+        await tx.walletTransaction.update({
+            where: { id: existing.id },
+            data: {
+                amount: expected,
+                status: isNegative ? 'AVAILABLE' : 'FROZEN',
+                direction: isNegative ? WalletDirection.OUT : WalletDirection.IN,
+                bizType: isNegative
+                    ? WalletBizType.SETTLEMENT_BOMB_LOSS
+                    : WalletBizType.SETTLEMENT_EARNING_BASE,
+            } as any,
+        });
+
+        // 3️⃣ hold 处理
+        const hold = await tx.walletHold.findUnique({
+            where: { earningTxId: existing.id },
+            select: { id: true },
+        });
+
+        if (isNegative) {
+            // 🔻 炸单损耗：不应存在 hold
+            if (hold) {
+                await tx.walletHold.delete({ where: { id: hold.id } });
+            }
+        } else {
+            // 🔺 正数收益：确保 hold 存在且金额正确
+            if (hold) {
+                await tx.walletHold.update({
+                    where: { id: hold.id },
+                    data: { amount: expected } as any,
+                });
+            } else {
+                await tx.walletHold.create({
+                    data: {
+                        earningTxId: existing.id,
+                        userId,
+                        amount: expected,
+                        status: 'FROZEN',
+                        unlockAt: new Date(),
+                    } as any,
+                });
+            }
+        }
+    }
+
+
+    /**
      * 退款冲正：按订单维度冲正所有“结算收益入账”流水（含冻结/已解冻两种情况）
      *
      * 设计目标：
@@ -1179,5 +1360,40 @@ export class WalletService {
         // 注意：Math.trunc 对负数也是“向0截断”，符合“舍弃”直觉
         return Math.trunc(n * 10) / 10;
     }
+
+
+    // wallet.service.ts
+
+    async getTransactionsByUserId(params: {
+        userId: number;
+        startAt?: string;
+        endAt?: string;
+        page: number;
+        pageSize: number;
+    }) {
+        const { userId, startAt, endAt, page, pageSize } = params;
+
+        const where: any = { userId };
+
+        if (startAt && endAt) {
+            where.createdAt = {
+                gte: new Date(startAt),
+                lte: new Date(endAt),
+            };
+        }
+
+        const [data, total] = await this.prisma.$transaction([
+            this.prisma.walletTransaction.findMany({
+                where,
+                orderBy: { createdAt: 'desc' },
+                skip: (page - 1) * pageSize,
+                take: pageSize,
+            }),
+            this.prisma.walletTransaction.count({ where }),
+        ]);
+
+        return { data, total };
+    }
+
 
 }
