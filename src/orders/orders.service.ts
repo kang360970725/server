@@ -2279,6 +2279,17 @@ export class OrdersService {
         if (!settlementCreateData.length) {
             throw new BadRequestException('settlementsToCreate 为空或缺少 userId/dispatchId，无法重建');
         }
+        const keys = settlementCreateData.map(s =>
+            `${s.dispatchId}_${s.userId}_${s.settlementType}`
+        );
+
+        const dupKeys = keys.filter((k, i) => keys.indexOf(k) !== i);
+
+        console.error('DEBUG_SETTLEMENT_CREATE_KEYS', {
+            total: settlementCreateData.length,
+            keys,
+            dupKeys,
+        });
 
         await tx.orderSettlement.createMany({ data: settlementCreateData as any });
 
