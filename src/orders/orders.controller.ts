@@ -213,30 +213,6 @@ export class OrdersController {
         return this.ordersService.markOrderPaid(dto, operatorId);
     }
 
-    /** 修改存单记录的保底进度（管理端）todo 确认已废弃 */
-    // @Post('dispatch/participant/update-progress')
-    // @UseGuards(PermissionsGuard)
-    // @Permissions('orders:list:page')
-    // async updateArchivedProgress(@Body() body: any, @Request() req: any) {
-    //     const dispatchId = Number(body.dispatchId);
-    //     const participantId = Number(body.participantId);
-    //     const progressBaseWan = body.progressBaseWan;
-    //
-    //     if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
-    //     if (!participantId || Number.isNaN(participantId)) throw new BadRequestException('participantId 必须为数字');
-    //
-    //     const n = Number(progressBaseWan);
-    //     if (!Number.isFinite(n)) throw new BadRequestException('progressBaseWan 非法');
-    //
-    //     return this.ordersService.updateArchivedParticipantProgress(
-    //         dispatchId,
-    //         participantId,
-    //         n,
-    //         req.user?.userId,
-    //         body.remark,
-    //     );
-    // }
-
     /** 新（存单）轮修复订单贡献(保底进度/小时单)；不重算结算、不动钱包 */
     @Post('update-archived-progress-total')
     @Permissions('orders:list:page')

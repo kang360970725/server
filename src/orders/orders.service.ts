@@ -14,7 +14,7 @@ import {
     WalletBizType
 } from '@prisma/client';
 import {WalletService} from '../wallet/wallet.service';
-import {randomUUID} from 'crypto';
+import {randomUUID, randomInt} from 'crypto';
 import {groupByUserId, round2, roundMix1, toNum} from "../utils/money/format";
 import {
     computeBillingGuaranteed,
@@ -2636,98 +2636,169 @@ export class OrdersService {
         operatorId: number;
         settlements: any;
     }) {
-        const {tx, orderId, settlements} = params;
+        const { tx, orderId, settlements } = params;
 
         const settlementsToCreate = settlements;
         if (!settlementsToCreate?.length) {
             throw new BadRequestException('未找到可应用的修复结果，请先 dryRun');
         }
 
-        // 1) 读取订单（仅用于计算冻结截止时间 unlockAt）
+        // 1) 读取订单（仅用于计算冻结截止时间 unlockAt + 判断轮次字段）
         const order = await tx.order.findUnique({
-            where: {id: orderId},
+            where: { id: orderId },
             select: {
                 id: true,
                 projectSnapshot: true,
-                dispatches: {select: {id: true, status: true, completedAt: true, acceptedAllAt: true}},
+                dispatches: { select: { id: true, status: true, completedAt: true, acceptedAllAt: true } },
             },
         });
         if (!order) throw new BadRequestException('订单不存在');
 
-        const freezeInfo = computeSettlementFreezeTime({order});
+        const freezeInfo = computeSettlementFreezeTime({ order });
         const unlockAt = freezeInfo.freezeEndAt;
 
         // ✅ 本次修复批次号：每次 applyRepair 生成 1 个
         const settlementBatchId = randomUUID();
 
-        // 5) 重建：批量创建 OrderSettlement + 写钱包
-        const createdSettlementIds: number[] = [];
-        const walletResults: any[] = [];
-
-        const settlementCreateData = settlementsToCreate
+        // 2) 组装“目标结算数据”（会用于 upsert 覆盖）
+        const settlementUpsertInputs = settlementsToCreate
             .filter((s) => {
                 if (!s?.userId) return false;
                 if (!s?.dispatchId) throw new BadRequestException(`settlementsToCreate 缺 dispatchId：userId=${s.userId}`);
+                if (!s?.settlementType) throw new BadRequestException(`settlementsToCreate 缺 settlementType：userId=${s.userId}`);
                 return true;
             })
             .map((s) => ({
                 orderId,
                 dispatchId: Number(s.dispatchId),
                 userId: Number(s.userId),
-                settlementType: s.settlementType,
+                settlementType: String(s.settlementType),
+
                 calculatedEarnings: s.calculatedEarnings,
                 manualAdjustment: s.manualAdjustment,
                 finalEarnings: s.finalEarnings,
+
                 settlementBatchId,
                 paymentStatus: 'UNPAID',
             }));
-        if (!settlementCreateData.length) {
-            throw new BadRequestException('settlementsToCreate 为空或缺少 userId/dispatchId，无法重建');
-        }
-        await tx.orderSettlement.createMany({ data: settlementCreateData as any });
 
-        const createdSettlements = await tx.orderSettlement.findMany({
-            where: { orderId, settlementBatchId },
-            select: { id: true, userId: true, dispatchId: true, finalEarnings: true },
-        });
-        if (createdSettlements.length !== settlementCreateData.length) {
-            throw new BadRequestException(
-                `重建结算条数不一致：期望=${settlementCreateData.length}, 实际=${createdSettlements.length}`,
-            );
+        if (!settlementUpsertInputs.length) {
+            throw new BadRequestException('settlementsToCreate 为空或缺少 userId/dispatchId/settlementType，无法重建');
         }
-        createdSettlementIds.push(...createdSettlements.map((x) => x.id));
 
-        for (const s of createdSettlements) {
-            const w = await this.wallet.applySettlementEarningToWalletV1({
-                tx,
-                userId: s.userId,
-                settlementId: s.id,
+        // 3) ✅ 兼容历史：判断“是否属于旧口径（已有钱包流水）”
+        //    旧口径特征：该订单下曾经有 settlementId 关联的钱包流水（earning/release 等）
+        const legacyWalletTxCount = await tx.walletTransaction.count({
+            where: {
                 orderId,
-                dispatchId: s.dispatchId,
-                finalEarnings: Number(s.finalEarnings ?? 0),
-                unlockAt,
-                freezeWhenPositive: true,
+                OR: [
+                    { settlementId: { not: null } },
+                    // 如果你历史还有 sourceType=ORDER_SETTLEMENT 但 settlementId 为空，可按需加：
+                    // { sourceType: 'ORDER_SETTLEMENT' },
+                ],
+            },
+        });
+        const shouldApplyWallet = legacyWalletTxCount > 0;
+
+        // 4) ✅ upsert 覆盖写入 settlement（避免 uniq 冲突）
+        const createdSettlementIds: number[] = [];
+        const upsertedSettlements: Array<{ id: number; userId: number; dispatchId: number; finalEarnings: any }> = [];
+
+        for (const s of settlementUpsertInputs) {
+            // 这里依赖你 Prisma schema 里复合唯一约束名：uniq_settlement_dispatch_user_type
+            // 如果你的 where 名称不同，把 uniq_settlement_dispatch_user_type 改成实际名字即可
+            const row = await tx.orderSettlement.upsert({
+                where: {
+                    uniq_settlement_dispatch_user_type: {
+                        dispatchId: s.dispatchId,
+                        userId: s.userId,
+                        settlementType: s.settlementType,
+                    },
+                },
+                create: s as any,
+                update: {
+                    // 覆盖修复字段（保留 orderId/dispatchId/userId/type 不变）
+                    calculatedEarnings: s.calculatedEarnings,
+                    manualAdjustment: s.manualAdjustment,
+                    finalEarnings: s.finalEarnings,
+
+                    settlementBatchId: s.settlementBatchId,
+                    paymentStatus: s.paymentStatus,
+                } as any,
+                select: { id: true, userId: true, dispatchId: true, finalEarnings: true },
             });
-            walletResults.push({ userId: s.userId, settlementId: s.id, wallet: w });
+
+            createdSettlementIds.push(row.id);
+            upsertedSettlements.push(row);
         }
 
+        // 5) ✅ 兼容历史：按 shouldApplyWallet 决定是否写钱包
+        const walletResults: any[] = [];
 
-        // 6) 新流水快照（新增 earningTx + 若测试时触发了解冻，也会抓到 releaseTx）
+        if (shouldApplyWallet) {
+            // 防重复：如果某 settlement 已经有 earning 流水，则跳过本次写钱包
+            // 你这里 bizType/来源字段按你系统实际为准，我先按你之前提到的 SETTLEMENT_EARNING_BASE + settlementId 关联判断
+            const existedEarningTxs = await tx.walletTransaction.findMany({
+                where: {
+                    settlementId: { in: createdSettlementIds },
+                    bizType: 'SETTLEMENT_EARNING_BASE',
+                    // 如你还有 status=REVERSED 的要排除，可加：
+                    // status: { not: 'REVERSED' },
+                },
+                select: { id: true, settlementId: true },
+            });
+            const existedSet = new Set(existedEarningTxs.map((x: any) => Number(x.settlementId)));
+
+            for (const s of upsertedSettlements) {
+                const sid = Number(s.id);
+
+                if (existedSet.has(sid)) {
+                    walletResults.push({
+                        userId: s.userId,
+                        settlementId: sid,
+                        skipped: true,
+                        reason: '已存在结算收益流水（旧口径数据），本次修复不重复入账',
+                    });
+                    continue;
+                }
+
+                const w = await this.wallet.applySettlementEarningToWalletV1({
+                    tx,
+                    userId: s.userId,
+                    settlementId: sid,
+                    orderId,
+                    dispatchId: s.dispatchId,
+                    finalEarnings: Number(s.finalEarnings ?? 0),
+                    unlockAt,
+                    freezeWhenPositive: true,
+                });
+
+                walletResults.push({ userId: s.userId, settlementId: sid, wallet: w });
+            }
+        } else {
+            // 新口径：只记录 settlement，不生成钱包流水
+            walletResults.push({
+                skippedAll: true,
+                reason: '新口径订单（未发现历史 settlement 钱包流水），本次仅修复/覆盖结算记录，不生成钱包流水',
+            });
+        }
+
+        // 6) 新流水快照（若本次没写钱包，则这里也会拿到 0 或仅历史数据）
         const newEarningTxs = await tx.walletTransaction.findMany({
-            where: {settlementId: {in: createdSettlementIds}},
-            select: {id: true},
+            where: { settlementId: { in: createdSettlementIds } },
+            select: { id: true },
         });
         const newEarningTxIds = newEarningTxs.map((x: any) => x.id);
 
         const newWalletTxs = await tx.walletTransaction.findMany({
             where: {
                 OR: [
-                    {settlementId: {in: createdSettlementIds}},
+                    { settlementId: { in: createdSettlementIds } },
                     ...(newEarningTxIds.length > 0
                         ? [
                             {
                                 sourceType: 'WALLET_HOLD_RELEASE',
-                                sourceId: {in: newEarningTxIds},
+                                sourceId: { in: newEarningTxIds },
                             },
                         ]
                         : []),
@@ -2751,7 +2822,7 @@ export class OrdersService {
         const createdTxByUser = groupByUserId(newWalletTxs);
         return {
             createdTxByUser,
-            mode: 'APPLY_REPAIR_V1',
+            mode: shouldApplyWallet ? 'APPLY_REPAIR_LEGACY_WITH_WALLET' : 'APPLY_REPAIR_RECORD_ONLY',
             orderId,
             settlementBatchId,
             rebuiltSettlementCount: createdSettlementIds.length,
@@ -2761,6 +2832,7 @@ export class OrdersService {
             walletResults,
         };
     }
+
 
 
     /** ====================== 陪玩端（不应被管理端 orders 权限误伤） ====================== */
@@ -3178,32 +3250,43 @@ export class OrdersService {
      * 生成订单序列号：YYYYMMDD-0001 Todo 订单编号得改，这个规则有点丑
      * v0.1：用 DB 查询当日最大序号后 +1
      * -----------------------------*/
-    private async generateOrderSerial(): Promise<string> {
-        const now = new Date();
-        const yyyy = now.getFullYear().toString();
-        const mm = String(now.getMonth() + 1).padStart(2, '0');
-        const dd = String(now.getDate()).padStart(2, '0');
-        const prefix = `${yyyy}${mm}${dd}-`;
 
-        // 注意：并发极端情况下可能撞号（开发期可接受）
-        // 如要强一致，可引入专用序列表或在事务/锁上做增强。
-        const last = await this.prisma.order.findFirst({
-            where: {autoSerial: {startsWith: prefix}},
-            orderBy: {autoSerial: 'desc'},
-            select: {autoSerial: true},
+    private async generateOrderSerial(): Promise<string> {
+        const VERSION = 'V01';
+
+        // 1) 时间片：分钟级（你也可以改成秒级 Date.now() / 1000）
+        //    转 base36 后不明显是年月日，但大体递增，利于排序/排查
+        const minuteBucket = Math.floor(Date.now() / 60000);
+        const timePart = minuteBucket.toString(36).toUpperCase(); // e.g. "MZ9K3A"
+
+        // 2) 随机尾巴：4-6 位（base36），强烈降低并发撞号概率
+        const len = randomInt(4, 7); // 4..6
+        const max = 36 ** len;
+        const rand = randomInt(0, max);
+        const randPart = rand.toString(36).toUpperCase().padStart(len, '0');
+
+        // 3) 拼接：无 "-"
+        const candidate = `${VERSION}${timePart}${randPart}`;
+
+        // 4) 可选：做一次轻量去重（极小概率撞号时重试）
+        //    如果你有 autoSerial 唯一索引，下面逻辑更保险（没有也能用）
+        const exists = await this.prisma.order.findFirst({
+            where: { autoSerial: candidate },
+            select: { id: true },
         });
 
-        let next = 1;
-        if (last?.autoSerial) {
-            const suffix = last.autoSerial.replace(prefix, '');
-            const n = parseInt(suffix, 10);
-            if (!Number.isNaN(n)) next = n + 1;
-        }
+        if (!exists) return candidate;
 
-        return `${prefix}${String(next).padStart(4, '0')}`;
+    // 极小概率：再来一次（不搞循环，保持简单；你也可以 while 重试 3 次）
+    const len2 = randomInt(4, 7);
+    const max2 = 36 ** len2;
+    const rand2 = randomInt(0, max2);
+    const randPart2 = rand2.toString(36).toUpperCase().padStart(len2, '0');
+    return `${VERSION}${timePart}${randPart2}`;
     }
 
-    /** -----------------------------
+
+/** -----------------------------
      * 审计日志（UserLog）
      * -----------------------------*/
     private async logOrderAction(
