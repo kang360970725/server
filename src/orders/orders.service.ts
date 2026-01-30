@@ -1053,7 +1053,8 @@ export class OrdersService {
     async confirmCompleteOrderCopy(orderId: number, operatorId: number, dto?: {
         remark?: string; paidAmount?: number; // ✅ 可选：最终实付（若 > 原实付则视为补收）
         confirmPaid?: any; // ✅ 可选：默认 true（补收=钱已收）
-    }) {
+    })
+    {
         orderId = Number(orderId);
         operatorId = Number(operatorId);
         if (!orderId) throw new BadRequestException('orderId 必填');
@@ -2643,7 +2644,7 @@ export class OrdersService {
             throw new BadRequestException('未找到可应用的修复结果，请先 dryRun');
         }
 
-        // 1) 读取订单（仅用于计算冻结截止时间 unlockAt + 判断轮次字段）
+        // 1) 读取订单（仅用于计算冻结截止时间 unlockAt）
         const order = await tx.order.findUnique({
             where: { id: orderId },
             select: {
@@ -2660,15 +2661,15 @@ export class OrdersService {
         // ✅ 本次修复批次号：每次 applyRepair 生成 1 个
         const settlementBatchId = randomUUID();
 
-        // 2) 组装“目标结算数据”（会用于 upsert 覆盖）
+        // 2) 组装目标结算（用于 upsert 覆盖）
         const settlementUpsertInputs = settlementsToCreate
-            .filter((s) => {
+            .filter((s: any) => {
                 if (!s?.userId) return false;
                 if (!s?.dispatchId) throw new BadRequestException(`settlementsToCreate 缺 dispatchId：userId=${s.userId}`);
                 if (!s?.settlementType) throw new BadRequestException(`settlementsToCreate 缺 settlementType：userId=${s.userId}`);
                 return true;
             })
-            .map((s) => ({
+            .map((s: any) => ({
                 orderId,
                 dispatchId: Number(s.dispatchId),
                 userId: Number(s.userId),
@@ -2686,30 +2687,27 @@ export class OrdersService {
             throw new BadRequestException('settlementsToCreate 为空或缺少 userId/dispatchId/settlementType，无法重建');
         }
 
-        // 3) ✅ 兼容历史：判断“是否属于旧口径（已有钱包流水）”
-        //    旧口径特征：该订单下曾经有 settlementId 关联的钱包流水（earning/release 等）
+        // 3) ✅ 判断是否“旧口径”（历史上是否写过 settlement 相关钱包流水）
         const legacyWalletTxCount = await tx.walletTransaction.count({
             where: {
                 orderId,
                 OR: [
                     { settlementId: { not: null } },
-                    // 如果你历史还有 sourceType=ORDER_SETTLEMENT 但 settlementId 为空，可按需加：
-                    // { sourceType: 'ORDER_SETTLEMENT' },
+                    // 如你的旧数据还有别的特征，可在这里加 OR 条件
                 ],
             },
         });
         const shouldApplyWallet = legacyWalletTxCount > 0;
 
-        // 4) ✅ upsert 覆盖写入 settlement（避免 uniq 冲突）
+        // 4) ✅ upsert 覆盖写入 settlement（避免唯一键冲突）
         const createdSettlementIds: number[] = [];
         const upsertedSettlements: Array<{ id: number; userId: number; dispatchId: number; finalEarnings: any }> = [];
 
         for (const s of settlementUpsertInputs) {
-            // 这里依赖你 Prisma schema 里复合唯一约束名：uniq_settlement_dispatch_user_type
-            // 如果你的 where 名称不同，把 uniq_settlement_dispatch_user_type 改成实际名字即可
             const row = await tx.orderSettlement.upsert({
+                // ✅ 关键修正：这里必须用 Prisma Client 生成的复合唯一输入名
                 where: {
-                    uniq_settlement_dispatch_user_type: {
+                    dispatchId_userId_settlementType: {
                         dispatchId: s.dispatchId,
                         userId: s.userId,
                         settlementType: s.settlementType,
@@ -2717,11 +2715,9 @@ export class OrdersService {
                 },
                 create: s as any,
                 update: {
-                    // 覆盖修复字段（保留 orderId/dispatchId/userId/type 不变）
                     calculatedEarnings: s.calculatedEarnings,
                     manualAdjustment: s.manualAdjustment,
                     finalEarnings: s.finalEarnings,
-
                     settlementBatchId: s.settlementBatchId,
                     paymentStatus: s.paymentStatus,
                 } as any,
@@ -2732,17 +2728,16 @@ export class OrdersService {
             upsertedSettlements.push(row);
         }
 
-        // 5) ✅ 兼容历史：按 shouldApplyWallet 决定是否写钱包
+        // 5) ✅ 兼容新旧口径：决定是否写钱包 + 幂等防重复
         const walletResults: any[] = [];
 
         if (shouldApplyWallet) {
-            // 防重复：如果某 settlement 已经有 earning 流水，则跳过本次写钱包
-            // 你这里 bizType/来源字段按你系统实际为准，我先按你之前提到的 SETTLEMENT_EARNING_BASE + settlementId 关联判断
+            // 防重复：若某 settlement 已经存在“结算收益入账流水”，则跳过
             const existedEarningTxs = await tx.walletTransaction.findMany({
                 where: {
                     settlementId: { in: createdSettlementIds },
                     bizType: 'SETTLEMENT_EARNING_BASE',
-                    // 如你还有 status=REVERSED 的要排除，可加：
+                    // 如果你希望排除冲正状态，可加：
                     // status: { not: 'REVERSED' },
                 },
                 select: { id: true, settlementId: true },
@@ -2772,18 +2767,16 @@ export class OrdersService {
                     unlockAt,
                     freezeWhenPositive: true,
                 });
-
                 walletResults.push({ userId: s.userId, settlementId: sid, wallet: w });
             }
         } else {
-            // 新口径：只记录 settlement，不生成钱包流水
             walletResults.push({
                 skippedAll: true,
                 reason: '新口径订单（未发现历史 settlement 钱包流水），本次仅修复/覆盖结算记录，不生成钱包流水',
             });
         }
 
-        // 6) 新流水快照（若本次没写钱包，则这里也会拿到 0 或仅历史数据）
+        // 6) 新流水快照（用于前端展示对账）
         const newEarningTxs = await tx.walletTransaction.findMany({
             where: { settlementId: { in: createdSettlementIds } },
             select: { id: true },
@@ -2832,6 +2825,7 @@ export class OrdersService {
             walletResults,
         };
     }
+
 
 
 
