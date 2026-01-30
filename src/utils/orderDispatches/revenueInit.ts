@@ -159,6 +159,24 @@ export const computeBillingGuaranteed = (order: any) => {
         if (!active.length) {
             throw new BadRequestException(`派单记录有误，无法完成核算`);
         }
+        // 已存在结单，计算客服收益
+        if(order?.dispatcher.userType === 'CUSTOMER_SERVICE' && !gameObjectTypes.includes(projectSnapshot?.type)){
+            settlements.push({
+                orderId: order.id,
+                dispatchId: d.id,
+                userId: order.dispatcherId,
+                userName: order.dispatcher.name,
+                settlementType: 'CUSTOMER_SERVICE',
+                settlementBatchId: order.settlementBatchId, // ✅建议从外部传进来或挂到 order 上
+                calculatedEarnings: roundMix1(orderPaidAmount * 0.01),      // Decimal(10,1) 允许 number（Prisma 会转），不稳就转 string
+                manualAdjustment: 0,
+                finalEarnings: roundMix1(orderPaidAmount * 0.01),
+                // 可选：你现在还没算俱乐部/客服/邀请的拆分，就先不写或写 0
+                // clubEarnings: null,
+                // csEarnings: null,
+                // inviteEarnings: null,
+            })
+        }
         for (const p of active) {
             let thisMoney: number = 0.00;
             if(d.status === DispatchStatus.ARCHIVED){
@@ -175,24 +193,6 @@ export const computeBillingGuaranteed = (order: any) => {
             if (d.status === DispatchStatus.COMPLETED) {
                 const {playerRate, commissionRate} = getPlayerRate(order.customClubRate, projectSnapshot?.clubRate, p.user?.staffRating?.rate);
                 thisMoney = roundMix1((lastPaidAmount / active.length) * playerRate);
-                // 已存在结单，计算客服收益
-                if(order?.dispatcher.userType === 'CUSTOMER_SERVICE' && !gameObjectTypes.includes(projectSnapshot?.type)){
-                    settlements.push({
-                        orderId: order.id,
-                        dispatchId: d.id,
-                        userId: order.dispatcherId,
-                        userName: order.dispatcher.name,
-                        settlementType: 'CUSTOMER_SERVICE',
-                        settlementBatchId: order.settlementBatchId, // ✅建议从外部传进来或挂到 order 上
-                        calculatedEarnings: roundMix1(orderPaidAmount * 0.01),      // Decimal(10,1) 允许 number（Prisma 会转），不稳就转 string
-                        manualAdjustment: 0,
-                        finalEarnings: roundMix1(orderPaidAmount * 0.01),
-                        // 可选：你现在还没算俱乐部/客服/邀请的拆分，就先不写或写 0
-                        // clubEarnings: null,
-                        // csEarnings: null,
-                        // inviteEarnings: null,
-                    })
-                }
             }
             const settlementType = order.settlementType ?? 'REGULAR'; // 或者你传参进来
             settlements.push({
@@ -244,6 +244,27 @@ export const computeBillingMODEPLAY = (order: any, modePlayAllocList: any) => {
         if (!active.length) {
             throw new BadRequestException(`派单记录有误，无法完成核算`);
         }
+        //结单，获取剩余收益
+        if (d.status === DispatchStatus.COMPLETED) {
+            // 已存在结单，需计算客服收益
+            if(order?.dispatcher.userType === 'CUSTOMER_SERVICE' && !gameObjectTypes.includes(projectSnapshot?.type)){
+                settlements.push({
+                    orderId: order.id,
+                    dispatchId: d.id,
+                    userId: order.dispatcherId,
+                    userName: order.dispatcher.name,
+                    settlementType: 'CUSTOMER_SERVICE',
+                    settlementBatchId: order.settlementBatchId, // ✅建议从外部传进来或挂到 order 上
+                    calculatedEarnings: roundMix1(orderPaidAmount * 0.01),      // Decimal(10,1) 允许 number（Prisma 会转），不稳就转 string
+                    manualAdjustment: 0,
+                    finalEarnings: roundMix1(orderPaidAmount * 0.01),
+                    // 可选：你现在还没算俱乐部/客服/邀请的拆分，就先不写或写 0
+                    // clubEarnings: null,
+                    // csEarnings: null,
+                    // inviteEarnings: null,
+                })
+            }
+        }
         for (const p of active) {
             //根据传递进来的每轮收益挨个计算下面参与者的本次收益
             //根据当前轮参与人数均分
@@ -256,27 +277,6 @@ export const computeBillingMODEPLAY = (order: any, modePlayAllocList: any) => {
             const thisMoney = roundMix1(
                 (roundIncomeNum / activeCount) * playerRateNum,
             );
-            //结单，获取剩余收益
-            if (d.status === DispatchStatus.COMPLETED) {
-                // 已存在结单，需计算客服收益
-                if(order?.dispatcher.userType === 'CUSTOMER_SERVICE' && !gameObjectTypes.includes(projectSnapshot?.type)){
-                    settlements.push({
-                        orderId: order.id,
-                        dispatchId: d.id,
-                        userId: order.dispatcherId,
-                        userName: order.dispatcher.name,
-                        settlementType: 'CUSTOMER_SERVICE',
-                        settlementBatchId: order.settlementBatchId, // ✅建议从外部传进来或挂到 order 上
-                        calculatedEarnings: roundMix1(orderPaidAmount * 0.01),      // Decimal(10,1) 允许 number（Prisma 会转），不稳就转 string
-                        manualAdjustment: 0,
-                        finalEarnings: roundMix1(orderPaidAmount * 0.01),
-                        // 可选：你现在还没算俱乐部/客服/邀请的拆分，就先不写或写 0
-                        // clubEarnings: null,
-                        // csEarnings: null,
-                        // inviteEarnings: null,
-                    })
-                }
-            }
             const settlementType = order.settlementType ?? 'REGULAR'; // 或者你传参进来
             settlements.push({
                 orderId: order.id,

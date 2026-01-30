@@ -1,7 +1,6 @@
 import {BadRequestException, ConflictException, Injectable, NotFoundException} from '@nestjs/common';
 import {PrismaService} from '../prisma/prisma.service';
 import {CreateOrderDto} from './dto/create-order.dto';
-import {QueryOrdersDto} from './dto/query-orders.dto';
 import {AcceptDispatchDto} from './dto/accept-dispatch.dto';
 import {MarkPaidDto} from './dto/mark-paid.dto';
 import {
@@ -14,7 +13,7 @@ import {
     WalletBizType
 } from '@prisma/client';
 import {WalletService} from '../wallet/wallet.service';
-import {randomUUID, randomInt} from 'crypto';
+import {randomInt, randomUUID} from 'crypto';
 import {groupByUserId, round2, roundMix1, toNum} from "../utils/money/format";
 import {
     computeBillingGuaranteed,
@@ -1050,160 +1049,6 @@ export class OrdersService {
      * * - 仅允许：COMPLETED_PENDING_CONFIRM -> COMPLETED
      * * - 并非必须收款，赠送单无法确认收款。
      * --------------------------*/
-    async confirmCompleteOrderCopy(orderId: number, operatorId: number, dto?: {
-        remark?: string; paidAmount?: number; // ✅ 可选：最终实付（若 > 原实付则视为补收）
-        confirmPaid?: any; // ✅ 可选：默认 true（补收=钱已收）
-    })
-    {
-        orderId = Number(orderId);
-        operatorId = Number(operatorId);
-        if (!orderId) throw new BadRequestException('orderId 必填');
-        if (!operatorId) throw new BadRequestException('未登录或无权限操作');
-        const remark = dto?.remark;
-        return this.prisma.$transaction(async (tx) => {
-            // 1) 读取订单（带 project，便于 billingMode 读取）
-            const order = await tx.order.findUnique({where: {id: orderId}, include: {project: true},});
-            if (!order) throw new NotFoundException('订单不存在');
-            // 2) 幂等：已最终结单
-            if (order.status === OrderStatus.COMPLETED) {
-                return {
-                    id: order.id,
-                    status: order.status,
-                    isPaid: (order as any).isPaid ?? false,
-                    paidAmount: Number((order as any).paidAmount ?? 0),
-                };
-            }
-            // 3) 必须处于“已结单待确认”（方案2/更规范）
-            const PENDING: any = (OrderStatus as any).COMPLETED_PENDING_CONFIRM;
-            if (!PENDING) {
-                throw new BadRequestException('当前系统未启用“已结单待确认”状态，无法确认结单');
-            }
-            if (order.status !== PENDING) {
-                throw new BadRequestException('仅“已结单待确认”阶段允许确认结单');
-            }
-            // 4) 并发保护：结算中禁止确认
-            await this.assertOrderNotSettlingOrThrow(tx, orderId, '订单正在结算处理中，禁止确认结单');
-            // 5) ✅ 允许在确认结单弹窗里录“补收”（小时单）
-            // 规则：只有当 dto.paidAmount > 原 paidAmount 时才视为补收
-            // 注意：补收逻辑复用 tx 内 helper，避免嵌套 transaction
-            const newPaidAmount = dto?.paidAmount === undefined || dto?.paidAmount === null ? undefined : Number(dto.paidAmount);
-            if (newPaidAmount !== undefined) {
-                // 仅小时单允许补收（若你未来要扩展到其它单型，这里放开并改 helper 校验即可）
-                const billingMode: BillingMode | undefined = this.getBillingModeFromOrder(order);
-                if (billingMode !== BillingMode.HOURLY) {
-                    throw new BadRequestException('仅小时单允许在确认结单时录入补收实付金额');
-                }
-                const oldPaid = Number((order as any).paidAmount ?? 0);
-                if (!Number.isFinite(newPaidAmount) || newPaidAmount < 0) {
-                    throw new BadRequestException('paidAmount 非法');
-                }
-                if (newPaidAmount > oldPaid) {
-                    await this.applyPaidAmountUpdateInTx(tx, order, newPaidAmount, operatorId, remark, dto?.confirmPaid,);
-                } else if (newPaidAmount < oldPaid) {
-                    // 方案B：确认结单入口不允许减少实付（避免口径被破坏）
-                    throw new BadRequestException('确认结单时实付金额仅允许不变或增加（补收），不允许减少');
-                }
-                // 等于 oldPaid：允许，等价于不补收
-            }
-            // 6) 必须已收款（补收时 confirmPaid 默认 true 会顺带把 isPaid 标记上）
-            const orderAfterPaid = await tx.order.findUnique({
-                where: {id: orderId},
-                select: {id: true, isPaid: true, paidAmount: true, paymentTime: true},
-            });
-            if (!orderAfterPaid) throw new NotFoundException('订单不存在');
-            if ((orderAfterPaid as any).isPaid !== true) {
-                throw new BadRequestException('未收款订单不允许最终确认结单');
-            }
-            // 7) ✅ 按最新 paidAmount 重算 settlement（不入钱包）
-            // - 解决你提到的：补收后贡献占比/客服提成未更新、小时单双护被除两次等问题都应在重算逻辑里修
-            const settlementBatchId = randomUUID();
-            const dispatches = await tx.orderDispatch.findMany({
-                where: {
-                    orderId,
-                    status: {in: [DispatchStatus.COMPLETED as any, DispatchStatus.ARCHIVED as any]},
-                }, select: {id: true, status: true}, orderBy: {id: 'asc'},
-            });
-            // 没有 dispatch 也允许确认？这里按严谨：没有可重算批次就报错
-            if (!dispatches || dispatches.length < 1) {
-                throw new BadRequestException('未找到可重算的派单批次，无法确认结单');
-            }
-            // for (const d of dispatches) {
-            //     const mode: 'ARCHIVE' | 'COMPLETE' = (d as any).status === (DispatchStatus as any).ARCHIVED ? 'ARCHIVE' : 'COMPLETE';
-            //     await this.createSettlementsForDispatch({
-            //         orderId, dispatchId: d.id, mode, settlementBatchId,
-            //         // ✅ 关键：此处只重算 settlement，不做钱包落账
-            //         allowWalletSync: false,
-            //     } as any, tx,);
-            // }
-
-            for (const d of dispatches) {
-                const mode: 'ARCHIVE' | 'COMPLETE' =
-                    (d as any).status === (DispatchStatus as any).ARCHIVED ? 'ARCHIVE' : 'COMPLETE';
-
-                // ✅ 强制覆盖：先清掉该轮旧 settlement（避免 skipDuplicates/已存在直接跳过）
-                await tx.orderSettlement.deleteMany({
-                    where: {orderId, dispatchId: d.id},
-                });
-
-                await this.createSettlementsForDispatch(
-                    {
-                        orderId,
-                        dispatchId: d.id,
-                        mode,
-                        settlementBatchId,
-                        allowWalletSync: false, // ✅ 只重算 settlement，不入钱包
-                    } as any,
-                    tx,
-                );
-            }
-            // 8) ✅ 置为最终 COMPLETED
-            const updated = await tx.order.update({
-                where: {id: orderId},
-                data: {status: OrderStatus.COMPLETED},
-                select: {id: true, status: true, isPaid: true, paidAmount: true},
-            });
-            // 9) ✅ 钱包对齐：以 settlement.finalEarnings 为准补建/修复冻结流水
-            // 注意：你现在 wallet.service 报 direction/accountId 字段问题，需要你先把 walletTransaction schema 对齐好；
-            // 但这一步是“确认结单必须做”的核心动作之一。
-            const settlements = await tx.orderSettlement.findMany({
-                where: {orderId},
-                select: {id: true, userId: true, dispatchId: true, finalEarnings: true, calculatedEarnings: true,},
-                orderBy: [{dispatchId: 'asc'}, {id: 'asc'}],
-            });
-            for (const s of settlements) {
-                const expected = Number(s.finalEarnings ?? s.calculatedEarnings ?? 0);
-                if (!Number.isFinite(expected) || expected <= 0) continue;
-                await this.wallet.repairSettlementEarning({
-                    userId: s.userId,
-                    expectedAmount: expected,
-                    sourceType: 'ORDER_SETTLEMENT',
-                    sourceId: s.id,
-                    orderId,
-                    dispatchId: s.dispatchId ?? null,
-                    settlementId: s.id,
-                } as any, tx,);
-            }
-            // 10) 日志
-            await this.writeUserLog(tx, {
-                userId: operatorId,
-                action: 'CONFIRM_COMPLETE_ORDER',
-                targetType: 'ORDER',
-                targetId: orderId,
-                oldData: {
-                    status: order.status,
-                    isPaid: (order as any).isPaid ?? false,
-                    paidAmount: Number((order as any).paidAmount ?? 0),
-                } as any,
-                newData: {
-                    status: updated.status,
-                    isPaid: updated.isPaid,
-                    paidAmount: Number(updated.paidAmount ?? 0),
-                } as any,
-                remark: remark || '客服确认最终结单（含补收/重算/钱包对齐）',
-            });
-            return updated;
-        });
-    }
 
     async confirmCompleteOrder(orderId: number, operatorId: number, dto?: {
         remark?: string; paidAmount?: number; // ✅ 可选：最终实付（若 > 原实付则视为补收）
@@ -2284,12 +2129,6 @@ export class OrdersService {
         );
 
         const dupKeys = keys.filter((k, i) => keys.indexOf(k) !== i);
-
-        console.error('DEBUG_SETTLEMENT_CREATE_KEYS', {
-            total: settlementCreateData.length,
-            keys,
-            dupKeys,
-        });
 
         await tx.orderSettlement.createMany({ data: settlementCreateData as any });
 
@@ -3409,16 +3248,6 @@ export class OrdersService {
             dispatchProgressWan = roundMix1(filledProgress.reduce((s, x) => s + x, 0));
         }
 
-        console.log(
-            '[EARN_DBG][PROGRESS_SUM]',
-            'orderId=', orderId,
-            'dispatchId=', dispatchId,
-            'mode=', mode,
-            'participantsLen=', participants.length,
-            'filledProgress=', filledProgress,
-            'dispatchProgressWan=', dispatchProgressWan,
-        );
-
         // ✅ COMPLETE 自动补齐剩余保底：小时单跳过（没有保底概念）
         if (mode === 'COMPLETE' && !hasAnyProgressInput && !isHourly) {
             const allDispatches = await tx.orderDispatch.findMany({
@@ -3545,20 +3374,6 @@ export class OrdersService {
                 let calculated: number;
 
                 if (grossRmb !== null) {
-                    console.log(
-                        '[EARN_DBG][GROSS_CTX]',
-                        'orderId=', orderId,
-                        'dispatchId=', dispatchId,
-                        'userId=', userId,
-                        'participantsLen=', participants.length,
-                        'grossRmb=', grossRmb,
-                        'normalGrossRmb=', normalGrossRmb,
-                        'repayRmb=', repayRmb,
-                        'paidAmount=', Number(order?.paidAmount ?? 0),
-                        'dispatchProgressWan=', dispatchProgressWan,
-                        'rateWanPerYuan=', rateWanPerYuan,
-                        'mode=', mode,
-                    );
                     const avg = roundMix1(normalGrossRmb / participants.length);
                     calculated = avg;
 
@@ -3566,41 +3381,14 @@ export class OrdersService {
                         const sumBeforeLast = roundMix1(avg * (participants.length - 1));
                         calculated = roundMix1(normalGrossRmb - sumBeforeLast);
                     }
-                    console.log(
-                        '[EARN_DBG][GROSS_RESULT]',
-                        'orderId=', orderId,
-                        'dispatchId=', dispatchId,
-                        'userId=', userId,
-                        'idx=', idx,
-                        'avg=', avg,
-                        'calculated=', calculated,
-                    );
                 } else {
                     const ratio = ratioMap.get(p.id) ?? 1;
-                    console.log(
-                        '[EARN_DBG][INPUT]',
-                        'orderId=', orderId,
-                        'dispatchId=', dispatchId,
-                        'userId=', userId,
-                        'participantsLen=', participants.length,
-                        'ratio=', ratio,
-                        'paidAmount=', Number(order?.paidAmount ?? 0),
-                        'grossRmb=', grossRmb,
-                        'mode=', mode,
-                    );
                     calculated = this.calcPlayerEarning({
                         order,
                         participantsCount: participants.length,
                         ratio,
                         _dbg: {orderId, dispatchId, userId},
                     });
-                    console.log(
-                        '[EARN_DBG][RESULT]',
-                        'orderId=', orderId,
-                        'dispatchId=', dispatchId,
-                        'userId=', userId,
-                        'calculated=', calculated,
-                    );
                 }
 
                 // ✅ 炸单（gross<0）：不抽成
@@ -4012,22 +3800,7 @@ export class OrdersService {
             baseShare = paid / count;
         }
 
-        const out = roundMix1(baseShare);
-
-        console.log(
-            '[EARN_DBG][calcPlayerEarning]',
-            'orderId=', _dbg?.orderId,
-            'dispatchId=', _dbg?.dispatchId,
-            'userId=', _dbg?.userId,
-            'paid=', paid,
-            'participantsCount=', participantsCount,
-            'countUsed=', count,
-            'ratio=', ratio,
-            'baseShare=', baseShare,
-            'out=roundMix1(baseShare)=', out,
-        );
-
-        return out;
+        return roundMix1(baseShare);
     }
 
     /**
@@ -4050,7 +3823,7 @@ export class OrdersService {
         order: any,
         participant: { userId: number },
         snapshot: {
-            // ✅ 结算瞬间快照（只在 createSettlementsForDispatch 开头准备一次）
+            // ✅ 结算瞬间快照
             orderCutRaw: any | null;     // order.customClubRate（可为 0）
             projectCutRaw: any | null;   // snapshot.clubRate 或 project.clubRate（可为 0）
             staffCutMap?: Map<number, number>; // staffRating.rate（抽成比例），仅当需要走员工评级时才会传
