@@ -25,6 +25,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         id: true,
         phone: true,
         roleId: true,
+        name: true,
         userType: true,
         Role: {
           select: {
@@ -42,6 +43,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       id: user.id,
       userId: user.id, // 兼容旧代码（你 controller 里在用 req.user.userId）:contentReference[oaicite:3]{index=3}
       phone: user.phone,
+      name: user.name,
       roleId: user.roleId,
       userType: user.userType,
       permissions,

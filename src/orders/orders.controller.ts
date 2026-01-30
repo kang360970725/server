@@ -16,6 +16,7 @@ import { MarkPaidDto } from './dto/mark-paid.dto';
 
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { Permissions } from '../auth/decorators/permissions.decorator';
+import {DispatchStatus} from "@prisma/client";
 
 /**
  * Orders Controller（v0.1）
@@ -40,6 +41,8 @@ export class OrdersController {
             serial: body.serial,
             status: body.status,
             customerGameId: body.customerGameId,
+            // ✅ 新增：全局搜索
+            keyword: body.keyword?.trim() || undefined,
             projectId: body.projectId != null ? Number(body.projectId) : undefined,
             dispatcherId: body.dispatcherId != null ? Number(body.dispatcherId) : undefined,
             playerId: body.playerId != null ? Number(body.playerId) : undefined,
@@ -99,23 +102,26 @@ export class OrdersController {
     }
 
     /** 存单（管理端） */
+    @UseGuards(JwtAuthGuard)
     @Post('dispatch/archive')
     @UseGuards(PermissionsGuard)
     @Permissions('orders:detail:page')
     async archive(@Body() body: any, @Request() req: any) {
         const dispatchId = Number(body.dispatchId);
         if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
-        return this.ordersService.archiveDispatch(dispatchId, req.user?.userId, body);
+        return this.ordersService.archiveDispatch(DispatchStatus.ARCHIVED,dispatchId, req.user, body);
     }
 
     /** 结单（管理端） */
+    @UseGuards(JwtAuthGuard)
     @Post('dispatch/complete')
     @UseGuards(PermissionsGuard)
     @Permissions('orders:detail:page')
     async complete(@Body() body: any, @Request() req: any) {
         const dispatchId = Number(body.dispatchId);
         if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
-        return this.ordersService.completeDispatch(dispatchId, req.user?.userId, body);
+        return this.ordersService.archiveDispatch(DispatchStatus.COMPLETED,dispatchId, req.user, body);
+        // return this.ordersService.completeDispatch('',dispatchId, req.user?.userId, body);
     }
 
     /** 修改实付金额（管理端） */
@@ -174,6 +180,7 @@ export class OrdersController {
                 remark: body?.remark,
                 paidAmount: body?.paidAmount,
                 confirmPaid: body?.confirmPaid, // 可选：默认 true
+                modePlayAllocList: body?.modePlayAllocList //趣味玩法单 客服设定的每轮收益
             },
         );
     }
@@ -206,38 +213,52 @@ export class OrdersController {
         return this.ordersService.markOrderPaid(dto, operatorId);
     }
 
-    /** 修改存单记录的保底进度（管理端） */
-    @Post('dispatch/participant/update-progress')
-    @UseGuards(PermissionsGuard)
-    @Permissions('orders:list:page')
-    async updateArchivedProgress(@Body() body: any, @Request() req: any) {
-        const dispatchId = Number(body.dispatchId);
-        const participantId = Number(body.participantId);
-        const progressBaseWan = body.progressBaseWan;
+    /** 修改存单记录的保底进度（管理端）todo 确认已废弃 */
+    // @Post('dispatch/participant/update-progress')
+    // @UseGuards(PermissionsGuard)
+    // @Permissions('orders:list:page')
+    // async updateArchivedProgress(@Body() body: any, @Request() req: any) {
+    //     const dispatchId = Number(body.dispatchId);
+    //     const participantId = Number(body.participantId);
+    //     const progressBaseWan = body.progressBaseWan;
+    //
+    //     if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
+    //     if (!participantId || Number.isNaN(participantId)) throw new BadRequestException('participantId 必须为数字');
+    //
+    //     const n = Number(progressBaseWan);
+    //     if (!Number.isFinite(n)) throw new BadRequestException('progressBaseWan 非法');
+    //
+    //     return this.ordersService.updateArchivedParticipantProgress(
+    //         dispatchId,
+    //         participantId,
+    //         n,
+    //         req.user?.userId,
+    //         body.remark,
+    //     );
+    // }
 
-        if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
-        if (!participantId || Number.isNaN(participantId)) throw new BadRequestException('participantId 必须为数字');
-
-        const n = Number(progressBaseWan);
-        if (!Number.isFinite(n)) throw new BadRequestException('progressBaseWan 非法');
-
-        return this.ordersService.updateArchivedParticipantProgress(
-            dispatchId,
-            participantId,
-            n,
-            req.user?.userId,
-            body.remark,
-        );
-    }
-
+    /** 新（存单）轮修复订单贡献(保底进度/小时单)；不重算结算、不动钱包 */
     @Post('update-archived-progress-total')
     @Permissions('orders:list:page')
     async updateArchivedProgressTotal(@Body() body: any, @Req() req: any) {
         const dispatchId = Number(body?.dispatchId);
         const totalProgressBaseWan = body?.totalProgressBaseWan;
         const remark = body?.remark;
-        return this.ordersService.updateArchivedDispatchProgressTotal(dispatchId, totalProgressBaseWan, req.user.id, remark);
+
+        // ✅ 新增：直接透传前端参数，让 service 内部区分
+        const fixType = body?.fixType; // 'GUARANTEED' | 'HOURLY'
+        const billableHours = body?.billableHours;
+
+        return this.ordersService.updateArchivedDispatchProgressTotal(
+            dispatchId,
+            totalProgressBaseWan,
+            req.user.id,
+            remark,
+            fixType,
+            billableHours,
+        );
     }
+
 
 
     /** ====================== 陪玩端（不应被管理端 orders 权限误伤） ====================== */
@@ -293,63 +314,90 @@ export class OrdersController {
 
     /**
      * ✅ 重新结算（修历史数据用）
+     * Todo  废弃
      * - 默认 allowWalletSync=false：只改 settlement，不动钱包（最安全）
      * - scope 默认 COMPLETED_AND_ARCHIVED：重算已结单 + 已存单轮次
      */
-    @Post('recalculate-settlements')
-    async recalculateSettlements(
-        @Body() body: { id: number; reason?: string; scope?: any; allowWalletSync?: boolean },
-        @Req() req: any,
-    ) {
-        const orderId = Number(body?.id);
-        if (!orderId) throw new BadRequestException('id 必填');
+    // @Post('recalculate-settlements')
+    // async recalculateSettlements(
+    //     @Body() body: { id: number; reason?: string; scope?: any; allowWalletSync?: boolean },
+    //     @Req() req: any,
+    // ) {
+    //     const orderId = Number(body?.id);
+    //     if (!orderId) throw new BadRequestException('id 必填');
+    //
+    //     try {
+    //         return await this.ordersService.recalculateOrderSettlements({
+    //             orderId,
+    //             operatorId: req.user.id,
+    //             reason: body?.reason,
+    //             scope: body?.scope ?? 'COMPLETED_AND_ARCHIVED',
+    //             allowWalletSync: body?.allowWalletSync ?? false, // ✅ 默认不动钱包
+    //         } as any);
+    //     } catch (e: any) {
+    //         // ✅ 你要求：不要抛 403，这里把 Forbidden 转成 400
+    //         if (e instanceof ForbiddenException) {
+    //             throw new BadRequestException(e.message);
+    //         }
+    //         // 409/400 等保持原样
+    //         throw e;
+    //     }
+    // }
 
-        try {
-            return await this.ordersService.recalculateOrderSettlements({
-                orderId,
-                operatorId: req.user.id,
-                reason: body?.reason,
-                scope: body?.scope ?? 'COMPLETED_AND_ARCHIVED',
-                allowWalletSync: body?.allowWalletSync ?? false, // ✅ 默认不动钱包
-            } as any);
-        } catch (e: any) {
-            // ✅ 你要求：不要抛 403，这里把 Forbidden 转成 400
-            if (e instanceof ForbiddenException) {
-                throw new BadRequestException(e.message);
-            }
-            // 409/400 等保持原样
-            throw e;
-        }
-    }
+    /**
+     * Todo  废弃
+     * ✅ 钱包对齐修复（以 settlement.finalEarnings 为准）
+     * - dryRun=true：只返回差异，不落库
+     * - scope 默认 COMPLETED_AND_ARCHIVED
+     */
+    // @Post('repair-wallet-by-settlements')
+    // async repairWalletBySettlements(
+    //     @Body() body: { id: number; reason?: string; scope?: any; dryRun?: boolean },
+    //     @Req() req: any,
+    // ) {
+    //     const orderId = Number(body?.id);
+    //     if (!orderId) throw new BadRequestException('id 必填');
+    //
+    //     try {
+    //         return await this.ordersService.repairWalletForOrderSettlements({
+    //             orderId,
+    //             operatorId: req.user.id,
+    //             reason: body?.reason,
+    //             scope: body?.scope ?? 'COMPLETED_AND_ARCHIVED',
+    //             dryRun: body?.dryRun ?? true, // ✅ 默认先 dryRun（防误操作）
+    //         } as any);
+    //     } catch (e: any) {
+    //         if (e instanceof ForbiddenException) {
+    //             throw new BadRequestException(e.message);
+    //         }
+    //         throw e;
+    //     }
+    // }
 
     /**
      * ✅ 钱包对齐修复（以 settlement.finalEarnings 为准）
      * - dryRun=true：只返回差异，不落库
      * - scope 默认 COMPLETED_AND_ARCHIVED
      */
-    @Post('repair-wallet-by-settlements')
-    async repairWalletBySettlements(
-        @Body() body: { id: number; reason?: string; scope?: any; dryRun?: boolean },
+    @Post('repair-wallet-by-settlementsV1')
+    async repairWalletBySettlementsV1(
+        @Body() body: { id: number; reason?: string; scope?: any; dryRun?: boolean; applyRepair?: boolean; modePlayAllocList?: any },
         @Req() req: any,
     ) {
         const orderId = Number(body?.id);
-        if (!orderId) throw new BadRequestException('id 必填');
-
-        try {
-            return await this.ordersService.repairWalletForOrderSettlements({
-                orderId,
-                operatorId: req.user.id,
-                reason: body?.reason,
-                scope: body?.scope ?? 'COMPLETED_AND_ARCHIVED',
-                dryRun: body?.dryRun ?? true, // ✅ 默认先 dryRun（防误操作）
-            } as any);
-        } catch (e: any) {
-            if (e instanceof ForbiddenException) {
-                throw new BadRequestException(e.message);
-            }
-            throw e;
+        if (!Number.isFinite(orderId) || orderId <= 0) {
+            throw new BadRequestException('id 必填且必须为正整数');
         }
-    }
 
+        return this.ordersService.repairWalletForOrderSettlementsV1({
+            orderId,
+            operatorId: req.user.id,
+            reason: body?.reason,
+            scope: body?.scope ?? 'COMPLETED_AND_ARCHIVED',
+            dryRun: body?.dryRun ?? true, // ✅ 默认 dryRun（防误操作）
+            applyRepair: body?.applyRepair ?? false, // ✅ 默认 applyRepair（防误操作）
+            modePlayAllocList: body?.modePlayAllocList
+        } as any);
+    }
 
 }

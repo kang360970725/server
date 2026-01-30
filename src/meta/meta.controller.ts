@@ -49,6 +49,7 @@ export class MetaController {
             BillingMode: {
                 HOURLY: '小时单',
                 GUARANTEED: '保底单',
+                MODE_PLAY: '玩法单',
             },
 
             // =========================

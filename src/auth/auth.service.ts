@@ -62,7 +62,7 @@ export class AuthService {
     });
 
     // 生成 token
-    const payload = { phone: user.phone, sub: user.id };
+    const payload = { phone: user.phone, sub: user.id, name };
     const access_token = this.jwtService.sign(payload);
 
     return {
@@ -96,7 +96,7 @@ export class AuthService {
     }
 
     // ✅ 登录成功
-    const payload = { phone: user.phone, sub: user.id };
+    const payload = { phone: user.phone, sub: user.id, name: user.name };
     const access_token = this.jwtService.sign(payload);
 
     // 返回用户信息（不包含密码）

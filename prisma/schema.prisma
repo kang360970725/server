@@ -15,7 +15,7 @@ model GameProject {
   price Float
   type  OrderType
 
-  /// 计费模式：小时单 / 保底单（你已落地）
+  /// 计费模式：小时单 / 保底单/ 玩法单（你已落地）
   billingMode BillingMode @default(GUARANTEED)
 
   baseAmount  Float?
@@ -33,6 +33,7 @@ model GameProject {
 enum BillingMode {
   HOURLY // 小时单
   GUARANTEED // 保底单
+  MODE_PLAY //玩法单
 }
 
 // 枚举类型
@@ -464,7 +465,7 @@ model OrderDispatch {
   /// assignedAt：派单时间（客服执行派单时写入）
   /// acceptedAllAt：全员接单完成时间（当本轮所有 participant.acceptedAt 非空时写入）
   /// archivedAt：存单时间（打手点击存单写入）
-  /// completedAt：结单时间（打手点击结单写入，并触发结算落库）
+  /// completedAt：结单时间（打手点击结单写入）
   assignedAt    DateTime?
   acceptedAllAt DateTime?
   archivedAt    DateTime?
@@ -573,9 +574,9 @@ model OrderSettlement {
   finalEarnings      Decimal? @db.Decimal(10, 1)
 
   /// 拆分记录（用于对账展示，可选）
-  clubEarnings       Decimal? @db.Decimal(10, 1)
-  csEarnings     Float?
-  inviteEarnings Float?
+  clubEarnings       Decimal? @db.Decimal(10, 1)  //俱乐部收益
+  csEarnings     Float?  // 客服收益
+  inviteEarnings Float?  // 邀请收益
 
   /// 打款状态：对账无误后由财务批量标记
   paymentStatus PaymentStatus @default(UNPAID)
