@@ -373,22 +373,18 @@ export class WalletWithdrawalsService {
             createdAtTo,
         } = params || ({} as any);
 
-        const take = Math.max(1, Math.min(Number(pageSize) || 20, 200)); // ✅ 单次最多 200，避免拖库
+        const take = Math.max(1, Math.min(Number(pageSize) || 20, 200));
         const skip = (Math.max(1, Number(page) || 1) - 1) * take;
 
-        // ✅ 组合 where 条件（全部可选）
         const where: any = {};
-
         if (status) where.status = status;
         if (channel) where.channel = channel;
         if (userId) where.userId = Number(userId);
 
-        // ✅ requestNo 支持模糊（包含）
         if (requestNo && String(requestNo).trim()) {
             where.requestNo = { contains: String(requestNo).trim() };
         }
 
-        // ✅ 时间范围过滤（createdAt）
         if (createdAtFrom || createdAtTo) {
             where.createdAt = {};
             if (createdAtFrom) where.createdAt.gte = new Date(createdAtFrom);
@@ -399,12 +395,22 @@ export class WalletWithdrawalsService {
             this.prisma.walletWithdrawalRequest.count({ where }),
             this.prisma.walletWithdrawalRequest.findMany({
                 where,
-                orderBy: { id: 'desc' }, // ✅ 最新在前
+                orderBy: { id: 'desc' },
                 skip,
                 take,
+                include: {
+                    user: {
+                        select: {
+                            id: true,
+                            name: true,
+                            realName: true,
+                        },
+                    },
+                },
             }),
         ]);
 
         return { total, list, page: Math.max(1, Number(page) || 1), pageSize: take };
     }
+
 }
