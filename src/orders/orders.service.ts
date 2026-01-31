@@ -2228,7 +2228,7 @@ export class OrdersService {
      * - 不重新 compute
      * - 事务内完成，避免半套账
      */
-    async applyRepair_ByCachedSettlementsTxV2(params: {
+    async applyRepair_ByCachedSettlementsTxV2Copy(params: {
         tx: any;
         orderId: number;
         operatorId: number;
@@ -2255,7 +2255,7 @@ export class OrdersService {
         const freezeInfo = computeSettlementFreezeTime({ order });
         const unlockAt = freezeInfo.freezeEndAt;
 
-        // ✅ 本次修复批次号：每次 applyRepair 生成 1 个
+        // ✅ 本次结算批次号：每次 applyRepair 生成 1 个
         const settlementBatchId = randomUUID();
 
         // 2) 组装目标结算（用于 upsert 覆盖）
@@ -2285,18 +2285,19 @@ export class OrdersService {
         }
 
         // 3) ✅ 判断是否“旧口径”（历史上是否写过 settlement 相关钱包流水）
-        const legacyWalletTxCount = await tx.walletTransaction.count({
-            where: {
-                orderId,
-                OR: [
-                    { settlementId: { not: null } },
-                    // 如你的旧数据还有别的特征，可在这里加 OR 条件
-                ],
-            },
-        });
-        const shouldApplyWallet = legacyWalletTxCount > 0;
+        // 不查历史流水，新数据不存在有历史流水。
+        // const legacyWalletTxCount = await tx.walletTransaction.count({
+        //     where: {
+        //         orderId,
+        //         OR: [
+        //             { settlementId: { not: null } },
+        //             // 如你的旧数据还有别的特征，可在这里加 OR 条件
+        //         ],
+        //     },
+        // });
+        // const shouldApplyWallet = legacyWalletTxCount > 0;
 
-        // 4) ✅ upsert 覆盖写入 settlement（避免唯一键冲突）
+        // 4) ✅ upsert 写入 settlement（避免唯一键冲突）
         const createdSettlementIds: number[] = [];
         const upsertedSettlements: Array<{ id: number; userId: number; dispatchId: number; finalEarnings: any }> = [];
 
@@ -2328,91 +2329,90 @@ export class OrdersService {
         // 5) ✅ 兼容新旧口径：决定是否写钱包 + 幂等防重复
         const walletResults: any[] = [];
 
-        if (shouldApplyWallet) {
-            // 防重复：若某 settlement 已经存在“结算收益入账流水”，则跳过
-            const existedEarningTxs = await tx.walletTransaction.findMany({
-                where: {
-                    settlementId: { in: createdSettlementIds },
-                    bizType: 'SETTLEMENT_EARNING_BASE',
-                    // 如果你希望排除冲正状态，可加：
-                    // status: { not: 'REVERSED' },
-                },
-                select: { id: true, settlementId: true },
+        // 防重复：若某 settlement 已经存在“结算收益入账流水”，则跳过
+        // const existedEarningTxs = await tx.walletTransaction.findMany({
+        //     where: {
+        //         settlementId: { in: createdSettlementIds },
+        //         bizType: 'SETTLEMENT_EARNING_BASE',
+        //         // 如果你希望排除冲正状态，可加：
+        //         // status: { not: 'REVERSED' },
+        //     },
+        //     select: { id: true, settlementId: true },
+        // });
+        // const existedSet = new Set(existedEarningTxs.map((x: any) => Number(x.settlementId)));
+
+        for (const s of upsertedSettlements) {
+            const sid = Number(s.id);
+
+            // if (existedSet.has(sid)) {
+            //     walletResults.push({
+            //         userId: s.userId,
+            //         settlementId: sid,
+            //         skipped: true,
+            //         reason: '已存在结算收益流水（旧口径数据），本次修复不重复入账',
+            //     });
+            //     continue;
+            // }
+
+            const w = await this.wallet.applySettlementEarningToWalletV1({
+                tx,
+                userId: s.userId,
+                settlementId: sid,
+                orderId,
+                dispatchId: s.dispatchId,
+                finalEarnings: Number(s.finalEarnings ?? 0),
+                unlockAt,
+                freezeWhenPositive: true,
             });
-            const existedSet = new Set(existedEarningTxs.map((x: any) => Number(x.settlementId)));
-
-            for (const s of upsertedSettlements) {
-                const sid = Number(s.id);
-
-                if (existedSet.has(sid)) {
-                    walletResults.push({
-                        userId: s.userId,
-                        settlementId: sid,
-                        skipped: true,
-                        reason: '已存在结算收益流水（旧口径数据），本次修复不重复入账',
-                    });
-                    continue;
-                }
-
-                const w = await this.wallet.applySettlementEarningToWalletV1({
-                    tx,
-                    userId: s.userId,
-                    settlementId: sid,
-                    orderId,
-                    dispatchId: s.dispatchId,
-                    finalEarnings: Number(s.finalEarnings ?? 0),
-                    unlockAt,
-                    freezeWhenPositive: true,
-                });
-                walletResults.push({ userId: s.userId, settlementId: sid, wallet: w });
-            }
-        } else {
-            walletResults.push({
-                skippedAll: true,
-                reason: '新口径订单（未发现历史 settlement 钱包流水），本次仅修复/覆盖结算记录，不生成钱包流水',
-            });
+            walletResults.push({ userId: s.userId, settlementId: sid, wallet: w });
         }
+        // if (shouldApplyWallet) {
+        // } else {
+        //     walletResults.push({
+        //         skippedAll: true,
+        //         reason: '新口径订单（未发现历史 settlement 钱包流水），本次仅修复/覆盖结算记录，不生成钱包流水',
+        //     });
+        // }
 
         // 6) 新流水快照（用于前端展示对账）
-        const newEarningTxs = await tx.walletTransaction.findMany({
-            where: { settlementId: { in: createdSettlementIds } },
-            select: { id: true },
-        });
-        const newEarningTxIds = newEarningTxs.map((x: any) => x.id);
+        // const newEarningTxs = await tx.walletTransaction.findMany({
+        //     where: { settlementId: { in: createdSettlementIds } },
+        //     select: { id: true },
+        // });
+        // const newEarningTxIds = newEarningTxs.map((x: any) => x.id);
 
-        const newWalletTxs = await tx.walletTransaction.findMany({
-            where: {
-                OR: [
-                    { settlementId: { in: createdSettlementIds } },
-                    ...(newEarningTxIds.length > 0
-                        ? [
-                            {
-                                sourceType: 'WALLET_HOLD_RELEASE',
-                                sourceId: { in: newEarningTxIds },
-                            },
-                        ]
-                        : []),
-                ],
-            },
-            select: {
-                id: true,
-                userId: true,
-                direction: true,
-                status: true,
-                amount: true,
-                availableAfter: true,
-                frozenAfter: true,
-                settlementId: true,
-                sourceType: true,
-                sourceId: true,
-                createdAt: true,
-            },
-        });
+        // const newWalletTxs = await tx.walletTransaction.findMany({
+        //     where: {
+        //         OR: [
+        //             { settlementId: { in: createdSettlementIds } },
+        //             ...(newEarningTxIds.length > 0
+        //                 ? [
+        //                     {
+        //                         sourceType: 'WALLET_HOLD_RELEASE',
+        //                         sourceId: { in: newEarningTxIds },
+        //                     },
+        //                 ]
+        //                 : []),
+        //         ],
+        //     },
+        //     select: {
+        //         id: true,
+        //         userId: true,
+        //         direction: true,
+        //         status: true,
+        //         amount: true,
+        //         availableAfter: true,
+        //         frozenAfter: true,
+        //         settlementId: true,
+        //         sourceType: true,
+        //         sourceId: true,
+        //         createdAt: true,
+        //     },
+        // });
 
-        const createdTxByUser = groupByUserId(newWalletTxs);
+        // const createdTxByUser = groupByUserId(newWalletTxs);
         return {
-            createdTxByUser,
-            mode: shouldApplyWallet ? 'APPLY_REPAIR_LEGACY_WITH_WALLET' : 'APPLY_REPAIR_RECORD_ONLY',
+            // createdTxByUser,
             orderId,
             settlementBatchId,
             rebuiltSettlementCount: createdSettlementIds.length,
@@ -2422,6 +2422,154 @@ export class OrdersService {
             walletResults,
         };
     }
+    async applyRepair_ByCachedSettlementsTxV2(params: {
+        tx: any;
+        orderId: number;
+        operatorId: number;
+        settlements: any[];
+    }) {
+        const { tx, orderId, operatorId, settlements } = params;
+
+        const settlementsToCreate = settlements;
+        if (!settlementsToCreate?.length) {
+            throw new BadRequestException('未找到可应用的修复结果，请先 dryRun');
+        }
+
+        // 1) 读取订单（用于冻结截止时间 unlockAt）
+        const order = await tx.order.findUnique({
+            where: { id: orderId },
+            select: {
+                id: true,
+                projectSnapshot: true,
+                dispatches: { select: { id: true, status: true, completedAt: true, acceptedAllAt: true } },
+            },
+        });
+        if (!order) throw new BadRequestException('订单不存在');
+
+        const freezeInfo = computeSettlementFreezeTime({ order });
+        const unlockAt = freezeInfo.freezeEndAt;
+
+        // ✅ 本次结算批次号
+        const settlementBatchId = randomUUID();
+
+        // 2) 组装目标结算（全新写入）
+        const inputs = settlementsToCreate
+            .filter((s: any) => {
+                if (!s?.userId) return false;
+                if (!s?.dispatchId) throw new BadRequestException(`settlements 缺 dispatchId：userId=${s.userId}`);
+                if (!s?.settlementType) throw new BadRequestException(`settlements 缺 settlementType：userId=${s.userId}`);
+                return true;
+            })
+            .map((s: any) => ({
+                orderId,
+                dispatchId: Number(s.dispatchId),
+                userId: Number(s.userId),
+                settlementType: String(s.settlementType),
+
+                calculatedEarnings: s.calculatedEarnings,
+                manualAdjustment: s.manualAdjustment,
+                finalEarnings: s.finalEarnings,
+
+                settlementBatchId,
+                paymentStatus: 'UNPAID',
+            }));
+
+        if (!inputs.length) {
+            throw new BadRequestException('settlements 为空或缺少 userId/dispatchId/settlementType，无法写入');
+        }
+
+        // 2.1) ✅ 全新口径：预检查是否已存在（存在就提示走重算）
+        //      用 dispatchId in 扫一把，再内存比对 userId/type，避免构造巨大 OR
+        const dispatchIds = Array.from(new Set(inputs.map((x) => x.dispatchId)));
+        const existed = await tx.orderSettlement.findMany({
+            where: {
+                dispatchId: { in: dispatchIds },
+            },
+            select: { id: true, dispatchId: true, userId: true, settlementType: true, orderId: true },
+        });
+
+        if (existed.length > 0) {
+            // 精准提示：哪些键已经存在
+            const keySet = new Set(inputs.map((x) => `${x.dispatchId}_${x.userId}_${x.settlementType}`));
+            const hit = existed
+                .filter((e) => keySet.has(`${e.dispatchId}_${e.userId}_${e.settlementType}`))
+                .slice(0, 10); // 防止日志过大
+
+            if (hit.length > 0) {
+                throw new BadRequestException(
+                    `检测到已存在的结算记录（本方法仅允许全新写入，请走重算/清理流程）：` +
+                    hit.map((h) => `id=${h.id},dispatchId=${h.dispatchId},userId=${h.userId},type=${h.settlementType},orderId=${h.orderId}`).join(' | '),
+                );
+            }
+        }
+
+        // 3) ✅ 批量写入 settlement（1 次 DB）
+        await tx.orderSettlement.createMany({ data: inputs as any });
+
+        // 3.1) 取回本批次写入的 settlements（用于写钱包）
+        const upsertedSettlements = await tx.orderSettlement.findMany({
+            where: { orderId, settlementBatchId },
+            select: { id: true, userId: true, dispatchId: true, finalEarnings: true },
+        });
+
+        if (upsertedSettlements.length !== inputs.length) {
+            throw new BadRequestException(
+                `写入结算条数不一致：期望=${inputs.length}, 实际=${upsertedSettlements.length}`,
+            );
+        }
+
+        // 4) 写钱包流水（逐条，保证顺序与幂等逻辑）
+        const walletResults: any[] = [];
+
+        for (const s of upsertedSettlements) {
+            const sid = Number(s.id);
+            const finalEarnings = Number(s.finalEarnings ?? 0);
+            if (!Number.isFinite(finalEarnings)) {
+                throw new BadRequestException(`finalEarnings 非法：settlementId=${sid}`);
+            }
+
+            const w = await this.wallet.applySettlementEarningToWalletV1({
+                tx,
+                userId: s.userId,
+                settlementId: sid,
+                orderId,
+                dispatchId: s.dispatchId,
+                finalEarnings,
+                unlockAt,
+                freezeWhenPositive: true,
+            });
+
+            walletResults.push({ userId: s.userId, settlementId: sid, wallet: w });
+        }
+
+        // 5) 写审计日志（可选但建议）
+        await this.writeUserLog(tx, {
+            userId: operatorId,
+            action: 'APPLY_REPAIR_BY_CACHED_SETTLEMENTS_V2',
+            targetType: 'ORDER',
+            targetId: orderId,
+            oldData: null,
+            newData: {
+                settlementBatchId,
+                settlementCount: upsertedSettlements.length,
+                freezeDays: freezeInfo.freezeDays,
+                freezeStartAt: freezeInfo.freezeStartAt,
+                freezeEndAt: freezeInfo.freezeEndAt,
+            } as any,
+            remark: `按结算结果写入结算+钱包流水（V2,batch=${settlementBatchId}）`,
+        });
+
+        return {
+            orderId,
+            settlementBatchId,
+            rebuiltSettlementCount: upsertedSettlements.length,
+            freezeDays: freezeInfo.freezeDays,
+            freezeStartAt: freezeInfo.freezeStartAt,
+            freezeEndAt: freezeInfo.freezeEndAt,
+            walletResults,
+        };
+    }
+
 
 
 

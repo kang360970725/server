@@ -1708,6 +1708,7 @@ export class WalletService {
             freezeWhenPositive = true,
         } = params;
 
+        // 保持你原逻辑：先确保账户存在（即使 finalEarnings=0 也会创建账户）
         await this.ensureWalletAccount(userId, tx as any);
 
         const amountAbs = round2(Math.abs(Number(finalEarnings ?? 0)));
@@ -1729,13 +1730,17 @@ export class WalletService {
             new Date(unlockAt).getTime() > now.getTime();
 
         // ======================================================
-        // ✅ 幂等（第一层）：按“来源”查重（不要加 userId/bizType，避免漏掉）
-        // 目标：只要 uniq_wallet_tx_source 会冲突的那条存在，我们就能提前发现
+        // ✅ 幂等（第一层）：按“来源唯一键”查重
+        // DB 优化：findFirst -> findUnique（命中 uniq_wallet_tx_source）
+        // 同时缩小 select 字段，减少 IO
         // ======================================================
-        const existedBySource = await tx.walletTransaction.findFirst({
+        const existedBySource = await tx.walletTransaction.findUnique({
+            // ⚠️ 这里的 where 输入名以 Prisma 生成的为准
             where: {
-                sourceType: 'ORDER_SETTLEMENT',
-                sourceId: settlementId,
+                sourceType_sourceId: {
+                    sourceType: 'ORDER_SETTLEMENT',
+                    sourceId: settlementId,
+                },
             } as any,
             select: {
                 id: true,
@@ -1744,16 +1749,10 @@ export class WalletService {
                 direction: true,
                 amount: true,
                 status: true,
-                settlementId: true,
-                orderId: true,
-                dispatchId: true,
-                availableAfter: true,
-                frozenAfter: true,
             },
         });
 
         if (existedBySource) {
-            // ✅ 如果这条来源流水不是同一个 userId，直接报错：说明历史数据写错/串单
             if (Number(existedBySource.userId) !== Number(userId)) {
                 throw new BadRequestException(
                     `发现同来源钱包流水但 userId 不一致，需人工处理：` +
@@ -1761,7 +1760,6 @@ export class WalletService {
                 );
             }
 
-            // ✅ 若金额/方向/bizType 都一致：直接复用（幂等）
             const existedAmount = round2(Number(existedBySource.amount ?? 0));
             const sameAmount = Number(existedAmount) === Number(amountAbs);
             const sameDirection = String(existedBySource.direction) === String(direction);
@@ -1778,8 +1776,6 @@ export class WalletService {
                 };
             }
 
-            // ❗ 同来源但金额/方向/bizType 不一致：说明你改了结算但旧流水还在
-            // 不可静默复用，否则账会错；应走冲正/重建链路
             throw new BadRequestException(
                 `同来源钱包流水已存在但内容不一致，需人工冲正/重建：` +
                 `settlementId=${settlementId}, userId=${userId}, existedTxId=${existedBySource.id}, ` +
@@ -1790,7 +1786,8 @@ export class WalletService {
         }
 
         // ======================================================
-        // ✅ 创建收益流水（第二层）：即便第一层漏网/并发，也用 try/catch 吃掉 P2002 并复用
+        // ✅ 创建收益流水（第二层）：并发兜底 P2002
+        // DB 优化：catch P2002 后回读也用 findUnique（走唯一键）
         // ======================================================
         let earningTx: { id: number };
         try {
@@ -1800,7 +1797,6 @@ export class WalletService {
                     direction,
                     bizType,
                     amount: amountAbs,
-
                     status: shouldFreeze ? 'FROZEN' : 'AVAILABLE',
 
                     sourceType: 'ORDER_SETTLEMENT',
@@ -1813,10 +1809,14 @@ export class WalletService {
                 select: { id: true },
             });
         } catch (e: any) {
-            // Prisma P2002：来源唯一键冲突，说明已经有人/此前写入过同来源流水
             if (e?.code === 'P2002') {
-                const existed = await tx.walletTransaction.findFirst({
-                    where: { sourceType: 'ORDER_SETTLEMENT', sourceId: settlementId } as any,
+                const existed = await tx.walletTransaction.findUnique({
+                    where: {
+                        sourceType_sourceId: {
+                            sourceType: 'ORDER_SETTLEMENT',
+                            sourceId: settlementId,
+                        },
+                    } as any,
                     select: {
                         id: true,
                         userId: true,
@@ -1863,7 +1863,7 @@ export class WalletService {
             throw e;
         }
 
-        // 2) 更新账户余额（按 shouldFreeze 决定加到哪个桶）
+        // 2) 更新账户余额（逻辑不动）
         let accountAfter: any;
 
         if (direction === 'OUT') {
@@ -1888,7 +1888,7 @@ export class WalletService {
             }
         }
 
-        // 3) 回写余额快照到 earningTx
+        // 3) 回写余额快照到 earningTx（逻辑不动）
         await tx.walletTransaction.update({
             where: { id: earningTx.id },
             data: {
@@ -1897,7 +1897,7 @@ export class WalletService {
             } as any,
         });
 
-        // 4) 若需要冻结：创建 hold（earningTxId 唯一），用于后续自动解冻
+        // 4) 若需要冻结：创建 hold（逻辑不动）
         let hold: any = null;
         if (shouldFreeze) {
             hold = await tx.walletHold.create({
@@ -1920,6 +1920,7 @@ export class WalletService {
             direction,
         };
     }
+
 
 
 
