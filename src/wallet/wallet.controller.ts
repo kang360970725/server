@@ -1,8 +1,9 @@
-import { Controller, Get, Query, Request, UseGuards } from '@nestjs/common';
+import { Controller,Req, Get, Query,Post, Request, UseGuards, UseInterceptors, UploadedFile } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { WalletService } from './wallet.service';
 import { QueryWalletTransactionsDto } from './dto/query-wallet-transactions.dto';
 import { QueryWalletHoldsDto } from './dto/query-wallet-holds.dto';
+import { FileInterceptor } from '@nestjs/platform-express';
 
 /**
  * Wallet Controller（V0.2）
@@ -43,4 +44,19 @@ export class WalletController {
         const userId = Number(req?.user?.userId ?? req?.user?.id ?? req?.user?.sub);
         return this.walletService.listMyHolds(userId, query);
     }
+
+
+    @Post('withdraw/qr-code')
+    @UseInterceptors(FileInterceptor('file'))
+    async uploadWithdrawQrCode(@UploadedFile() file: any, @Req() req: any) {
+        const userId = req.user.userId;
+        return this.walletService.uploadWithdrawQrCodeOnce({ userId, file });
+    }
+
+    @Get('withdraw/qr-code-url')
+    async getWithdrawQrCodeUrl(@Req() req: any) {
+        const userId = req.user.userId;
+        return this.walletService.getWithdrawQrCodeUrl({ userId });
+    }
+
 }

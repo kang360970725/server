@@ -13,8 +13,7 @@ import {
 import {QueryWalletHoldsDto} from "./dto/query-wallet-holds.dto";
 import {QueryWalletTransactionsDto} from "./dto/query-wallet-transactions.dto";
 import {roundMix1, toNum} from "../utils/money/format";
-import {computeBillingGuaranteed, computeBillingHours} from "../utils/orderDispatches/revenueInit";
-import {compareSettlementsToPlan} from "../utils/finance/generateRepairPlan";
+import { tcbGetTempFileURL, tcbUploadFile } from '../common/cloudbase.storage';
 
 /**
  * WalletService（V0.1）
@@ -2081,5 +2080,75 @@ export class WalletService {
             releaseTxIds: releaseTxs.map((t: any) => t.id),
         };
     }
+
+    async uploadWithdrawQrCodeOnce(params: { userId: number; file: any }) {
+        const { userId, file } = params;
+        if (!userId) throw new BadRequestException('userId 非法');
+        if (!file) throw new BadRequestException('请上传收款二维码');
+
+        if (!file.mimetype?.startsWith('image/')) {
+            throw new BadRequestException('仅支持图片格式');
+        }
+
+        // 1) 查询是否已上传（已上传则拒绝）
+        const user = await this.prisma.user.findUnique({
+            where: { id: userId },
+            select: { withdrawQrCodeKey: true },
+        });
+
+        if (user?.withdrawQrCodeKey) {
+            throw new BadRequestException('收款二维码已上传，不支持修改');
+        }
+
+        // 2) 固定 key（对象路径）
+        const cloudPath = `withdraw/qr-codes/u_${userId}.webp`;
+
+        // 3) 上传到 CloudBase（返回 cloudObjectId / downloadUrl）
+        const uploadRes = await tcbUploadFile({
+            cloudPath,
+            fileContent: file.buffer,
+        });
+
+        // ✅ 关键：落库存 cloudObjectId（用于 get-objects-download-info）
+        const cloudObjectId = (uploadRes as any)?.cloudObjectId;
+        if (!cloudObjectId) {
+            throw new BadRequestException('上传成功但缺少 cloudObjectId（无法生成临时访问链接）');
+        }
+
+        await this.prisma.user.update({
+            where: { id: userId },
+            data: {
+                withdrawQrCodeKey: cloudObjectId,
+                withdrawQrCodeUploadedAt: new Date(),
+            },
+        });
+
+        return { success: true };
+    }
+
+
+    async getWithdrawQrCodeUrl(params: { userId: number }) {
+        const { userId } = params;
+        if (!userId) throw new BadRequestException('userId 非法');
+
+        const user = await this.prisma.user.findUnique({
+            where: { id: userId },
+            select: { withdrawQrCodeKey: true },
+        });
+
+        const cloudObjectId = user?.withdrawQrCodeKey;
+        if (!cloudObjectId) {
+            return { url: null };
+        }
+
+        // ✅ 关键：这里传 cloudObjectId，而不是路径
+        const url = await tcbGetTempFileURL({
+            cloudPath: cloudObjectId, // 注意：虽然参数名叫 cloudPath，但实际传 cloudObjectId
+            maxAgeSeconds: 600,
+        });
+
+        return { url: url || null };
+    }
+
 
 }

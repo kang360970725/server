@@ -111,6 +111,12 @@ model User {
   roleId       Int?
   recharges    Recharge[]
   userLogs     UserLog[]
+
+    /// 提现收款二维码（对象存储 key）
+  withdrawQrCodeKey String? @db.VarChar(255)
+
+  /// 上传时间（用于审计 / 防重复）
+  withdrawQrCodeUploadedAt DateTime?
   staffRating  StaffRating? @relation(fields: [rating], references: [id])
   Role         Role?        @relation(fields: [roleId], references: [id])
 
@@ -587,7 +593,6 @@ model OrderSettlement {
   adjustedBy   Int?
   adjustedAt   DateTime?
   adjustRemark String?
-
   /// ✅ 数据库兜底：同一 dispatch + 同一用户 + 同一 settlementType 只能有一条
   /// - 这是防止并发重复结算的“最后一道门”
   /// - 结单/存单都走结算，所以这个 uniq 至关重要

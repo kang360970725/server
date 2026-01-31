@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
+import {tcbGetTempFileURL} from "../common/cloudbase.storage";
 
 /** ✅ 截断到 2 位小数（不四舍五入） */
 const round2 = (v: any): number => {
@@ -60,7 +61,15 @@ export class WalletWithdrawalsService {
             throw new Error('提现金额必须大于 0');
         }
 
+
         return this.prisma.$transaction(async (tx) => {
+            const u = await tx.user.findUnique({
+                where: { id: userId },
+                select: { withdrawQrCodeKey: true },
+            });
+            if (!u?.withdrawQrCodeKey) {
+                throw new Error('请先上传收款二维码（上传后不可修改）');
+            }
             // 1️⃣ 校验钱包
             const account = await tx.walletAccount.findUnique({ where: { userId } });
             if (!account) throw new Error('钱包账户不存在');
@@ -292,13 +301,52 @@ export class WalletWithdrawalsService {
         });
     }
 
-    /** 管理端：待审核列表 */
+    /** 管理端：待审核列表（带用户昵称 + 钱包余额 + 收款码临时URL） */
     async listPending() {
-        return this.prisma.walletWithdrawalRequest.findMany({
+        const list = await this.prisma.walletWithdrawalRequest.findMany({
             where: { status: 'PENDING_REVIEW' },
             orderBy: { id: 'asc' },
+            include: {
+                user: {
+                    select: {
+                        id: true,
+                        name: true,
+                        realName: true,
+                        withdrawQrCodeKey: true, // ✅ 这里存的是 cloudObjectId
+                    },
+                },
+                // ✅ 钱包余额：按项目实际关系调整
+            },
         });
+
+        // ✅ 补齐钱包余额 + 收款码临时URL
+        const enriched = await Promise.all(
+            list.map(async (r: any) => {
+                const wallet = await this.prisma.walletAccount.findUnique({
+                    where: { userId: r.userId },
+                    select: { availableBalance: true, frozenBalance: true },
+                });
+
+                let withdrawQrCodeUrl: string | null = null;
+                const cloudObjectId = r?.user?.withdrawQrCodeKey;
+                if (cloudObjectId) {
+                    withdrawQrCodeUrl = await tcbGetTempFileURL({
+                        cloudPath: cloudObjectId, // ✅ 传 cloudObjectId
+                        maxAgeSeconds: 600,
+                    });
+                }
+
+                return {
+                    ...r,
+                    wallet: wallet || { availableBalance: 0, frozenBalance: 0 },
+                    withdrawQrCodeUrl: withdrawQrCodeUrl || null,
+                };
+            }),
+        );
+
+        return enriched;
     }
+
 
     /**
      * ✅ 管理端：全量记录（分页 + 筛选）
