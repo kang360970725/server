@@ -2,12 +2,14 @@ import {
   Injectable,
   UnauthorizedException,
   ConflictException,
-  BadRequestException  // 添加这个导入
+  BadRequestException,
+  ForbiddenException
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { UserStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 
 @Injectable()
@@ -94,7 +96,10 @@ export class AuthService {
         message: '手机号或密码错误',
       };
     }
-
+// 查到 user 之后，校验密码之前或之后都可以
+    if (user.status === UserStatus.DISABLED) {
+      throw new ForbiddenException('账号已禁用，禁止登录');
+    }
     // ✅ 登录成功
     const payload = { phone: user.phone, sub: user.id, name: user.name };
     const access_token = this.jwtService.sign(payload);

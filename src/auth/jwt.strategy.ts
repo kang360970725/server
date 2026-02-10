@@ -20,13 +20,14 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
     // ✅ 这里挂 permissions（Permission.key）
     const user = await this.prisma.user.findUnique({
-      where: { id: userId },
+      where: { id: payload.sub },
       select: {
         id: true,
         phone: true,
+        status: true,
         roleId: true,
-        name: true,
         userType: true,
+        name: true,
         Role: {
           select: {
             permissions: { select: { key: true } },
@@ -44,6 +45,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       userId: user.id, // 兼容旧代码（你 controller 里在用 req.user.userId）:contentReference[oaicite:3]{index=3}
       phone: user.phone,
       name: user.name,
+      status: user.status,
       roleId: user.roleId,
       userType: user.userType,
       permissions,
