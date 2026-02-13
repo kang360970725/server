@@ -303,23 +303,30 @@ export class WalletWithdrawalsService {
 
     /** 管理端：待审核列表（带用户昵称 + 钱包余额 + 收款码临时URL） */
     async listPending() {
-        const list = await this.prisma.walletWithdrawalRequest.findMany({
-            where: { status: 'PENDING_REVIEW' },
-            orderBy: { id: 'asc' },
-            include: {
-                user: {
-                    select: {
-                        id: true,
-                        name: true,
-                        realName: true,
-                        withdrawQrCodeKey: true, // ✅ 这里存的是 cloudObjectId
+        const where = { status: 'PENDING_REVIEW' as any };
+
+        const [count, aggregate, list] = await this.prisma.$transaction([
+            this.prisma.walletWithdrawalRequest.count({ where }),
+            this.prisma.walletWithdrawalRequest.aggregate({
+                where,
+                _sum: { amount: true },
+            }),
+            this.prisma.walletWithdrawalRequest.findMany({
+                where,
+                orderBy: { id: 'asc' },
+                include: {
+                    user: {
+                        select: {
+                            id: true,
+                            name: true,
+                            realName: true,
+                            withdrawQrCodeKey: true,
+                        },
                     },
                 },
-                // ✅ 钱包余额：按项目实际关系调整
-            },
-        });
+            }),
+        ]);
 
-        // ✅ 补齐钱包余额 + 收款码临时URL
         const enriched = await Promise.all(
             list.map(async (r: any) => {
                 const wallet = await this.prisma.walletAccount.findUnique({
@@ -331,7 +338,7 @@ export class WalletWithdrawalsService {
                 const cloudObjectId = r?.user?.withdrawQrCodeKey;
                 if (cloudObjectId) {
                     withdrawQrCodeUrl = await tcbGetTempFileURL({
-                        cloudPath: cloudObjectId, // ✅ 传 cloudObjectId
+                        cloudPath: cloudObjectId,
                         maxAgeSeconds: 600,
                     });
                 }
@@ -344,8 +351,13 @@ export class WalletWithdrawalsService {
             }),
         );
 
-        return enriched;
+        return {
+            count,
+            totalAmount: aggregate._sum.amount || 0,
+            list: enriched,
+        };
     }
+
 
 
     /**
@@ -377,6 +389,7 @@ export class WalletWithdrawalsService {
         const skip = (Math.max(1, Number(page) || 1) - 1) * take;
 
         const where: any = {};
+
         if (status) where.status = status;
         if (channel) where.channel = channel;
         if (userId) where.userId = Number(userId);
@@ -385,13 +398,39 @@ export class WalletWithdrawalsService {
             where.requestNo = { contains: String(requestNo).trim() };
         }
 
+        // ===============================
+        // 时间维度：使用 reviewedAt
+        // 默认本月（北京时间）
+        // ===============================
+
+        const now = new Date();
+
+        let fromDate: Date | null = null;
+        let toDate: Date | null = null;
+
         if (createdAtFrom || createdAtTo) {
-            where.createdAt = {};
-            if (createdAtFrom) where.createdAt.gte = new Date(createdAtFrom);
-            if (createdAtTo) where.createdAt.lte = new Date(createdAtTo);
+            if (createdAtFrom) fromDate = new Date(createdAtFrom);
+            if (createdAtTo) toDate = new Date(createdAtTo);
+        } else {
+            // 默认本月（北京时间）
+            const year = now.getFullYear();
+            const month = now.getMonth();
+
+            fromDate = new Date(year, month, 1, 0, 0, 0);
+            toDate = new Date(year, month + 1, 0, 23, 59, 59);
         }
 
-        const [total, list] = await this.prisma.$transaction([
+        if (fromDate || toDate) {
+            where.reviewedAt = {};
+            if (fromDate) where.reviewedAt.gte = fromDate;
+            if (toDate) where.reviewedAt.lte = toDate;
+        }
+
+        // ===============================
+        // 主查询
+        // ===============================
+
+        const [total, list, approvedAgg, paidAgg] = await this.prisma.$transaction([
             this.prisma.walletWithdrawalRequest.count({ where }),
             this.prisma.walletWithdrawalRequest.findMany({
                 where,
@@ -408,9 +447,39 @@ export class WalletWithdrawalsService {
                     },
                 },
             }),
+            // 已审核统计
+            this.prisma.walletWithdrawalRequest.aggregate({
+                where: {
+                    ...where,
+                    status: { in: ['APPROVED', 'PAYING', 'PAID', 'FAILED'] },
+                },
+                _sum: { amount: true },
+                _count: true,
+            }),
+            // 已打款统计
+            this.prisma.walletWithdrawalRequest.aggregate({
+                where: {
+                    ...where,
+                    status: 'PAID',
+                },
+                _sum: { amount: true },
+                _count: true,
+            }),
         ]);
 
-        return { total, list, page: Math.max(1, Number(page) || 1), pageSize: take };
+        return {
+            total,
+            list,
+            page: Math.max(1, Number(page) || 1),
+            pageSize: take,
+            summary: {
+                approvedAmount: approvedAgg._sum.amount || 0,
+                approvedCount: approvedAgg._count || 0,
+                paidAmount: paidAgg._sum.amount || 0,
+                paidCount: paidAgg._count || 0,
+            },
+        };
     }
+
 
 }

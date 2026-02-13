@@ -790,5 +790,6 @@ model WalletWithdrawalRequest {
   @@unique([userId, idempotencyKey], map: "uniq_withdraw_user_idempotency")
   @@index([userId, status, createdAt])
   @@index([status, createdAt])
+  @@index([status, reviewedAt])
   @@map("wallet_withdrawal_requests")
 }
