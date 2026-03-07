@@ -167,6 +167,7 @@ export class OrdersController {
         if (!operatorId) throw new BadRequestException('未登录或登录已失效');
         return this.ordersService.adjustSettlementFinalEarnings(dto, operatorId);
     }
+
     /** 确认结算 */
     @Post('confirm-complete')
     async confirmComplete(@Body() body: any, @Req() req: any) {
@@ -287,68 +288,6 @@ export class OrdersController {
         const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
         return this.ordersService.getMyWorkbenchStats(userId);
     }
-
-    /**
-     * ✅ 重新结算（修历史数据用）
-     * Todo  废弃
-     * - 默认 allowWalletSync=false：只改 settlement，不动钱包（最安全）
-     * - scope 默认 COMPLETED_AND_ARCHIVED：重算已结单 + 已存单轮次
-     */
-    // @Post('recalculate-settlements')
-    // async recalculateSettlements(
-    //     @Body() body: { id: number; reason?: string; scope?: any; allowWalletSync?: boolean },
-    //     @Req() req: any,
-    // ) {
-    //     const orderId = Number(body?.id);
-    //     if (!orderId) throw new BadRequestException('id 必填');
-    //
-    //     try {
-    //         return await this.ordersService.recalculateOrderSettlements({
-    //             orderId,
-    //             operatorId: req.user.id,
-    //             reason: body?.reason,
-    //             scope: body?.scope ?? 'COMPLETED_AND_ARCHIVED',
-    //             allowWalletSync: body?.allowWalletSync ?? false, // ✅ 默认不动钱包
-    //         } as any);
-    //     } catch (e: any) {
-    //         // ✅ 你要求：不要抛 403，这里把 Forbidden 转成 400
-    //         if (e instanceof ForbiddenException) {
-    //             throw new BadRequestException(e.message);
-    //         }
-    //         // 409/400 等保持原样
-    //         throw e;
-    //     }
-    // }
-
-    /**
-     * Todo  废弃
-     * ✅ 钱包对齐修复（以 settlement.finalEarnings 为准）
-     * - dryRun=true：只返回差异，不落库
-     * - scope 默认 COMPLETED_AND_ARCHIVED
-     */
-    // @Post('repair-wallet-by-settlements')
-    // async repairWalletBySettlements(
-    //     @Body() body: { id: number; reason?: string; scope?: any; dryRun?: boolean },
-    //     @Req() req: any,
-    // ) {
-    //     const orderId = Number(body?.id);
-    //     if (!orderId) throw new BadRequestException('id 必填');
-    //
-    //     try {
-    //         return await this.ordersService.repairWalletForOrderSettlements({
-    //             orderId,
-    //             operatorId: req.user.id,
-    //             reason: body?.reason,
-    //             scope: body?.scope ?? 'COMPLETED_AND_ARCHIVED',
-    //             dryRun: body?.dryRun ?? true, // ✅ 默认先 dryRun（防误操作）
-    //         } as any);
-    //     } catch (e: any) {
-    //         if (e instanceof ForbiddenException) {
-    //             throw new BadRequestException(e.message);
-    //         }
-    //         throw e;
-    //     }
-    // }
 
     /**
      * ✅ 钱包对齐修复（以 settlement.finalEarnings 为准）

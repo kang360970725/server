@@ -79,26 +79,102 @@ export class UsersService {
     search?: string;
     userType?: UserType;
     status?: string;
-  }) {
-    const { page = 1, limit = 10, search, userType, status } = params;
+
+    loginInactiveDays?: number;   // 新增：超过多少天未登录
+    acceptInactiveDays?: number;  // 新增：超过多少天未接单
+  })
+  {
+    const {
+      search,
+      userType,
+      status,
+      loginInactiveDays,
+      acceptInactiveDays
+    } = params;
+    const page = Number(params.page ?? 1);
+    const limit = Number(params.limit ?? 10);
     const skip = (page - 1) * limit;
 
     const where: any = {};
+    const AND: any[] = [];
 
+    /**
+     * 1️⃣ 搜索：支持 ID / 手机号 / name / realName
+     */
     if (search) {
-      where.OR = [
-        { phone: { contains: search } },
-        { name: { contains: search } },
-        { realName: { contains: search } },
+      const keyword = String(search).trim();
+
+      const OR: any[] = [
+        { phone: { contains: keyword } },
+        { name: { contains: keyword } },
+        { realName: { contains: keyword } }
       ];
+
+      if (/^\d+$/.test(keyword)) {
+        OR.push({ id: Number(keyword) });
+      }
+
+      AND.push({ OR });
     }
 
+    /**
+     * 2️⃣ 用户类型
+     */
     if (userType) {
-      where.userType = userType;
+      AND.push({ userType });
     }
 
+    /**
+     * 3️⃣ 状态
+     */
     if (status) {
-      where.status = status;
+      AND.push({ status });
+    }
+
+    /**
+     * 4️⃣ 超过 X 天未登录
+     */
+    if (loginInactiveDays) {
+      const date = new Date();
+      date.setDate(date.getDate() - Number(loginInactiveDays));
+
+      AND.push({
+        OR: [
+          { lastLoginAt: null },
+          { lastLoginAt: { lte: date } }
+        ]
+      });
+    }
+
+    /**
+     * 5️⃣ 超过 X 天未接单
+     */
+    if (acceptInactiveDays) {
+      const date = new Date();
+      date.setDate(date.getDate() - Number(acceptInactiveDays));
+
+      AND.push({
+        OR: [
+          {
+            orderParticipants: {
+              none: {}
+            }
+          },
+          {
+            orderParticipants: {
+              some: {
+                acceptedAt: {
+                  lte: date
+                }
+              }
+            }
+          }
+        ]
+      });
+    }
+
+    if (AND.length) {
+      where.AND = AND;
     }
 
     const [users, total] = await Promise.all([
@@ -106,14 +182,66 @@ export class UsersService {
         where,
         skip,
         take: limit,
-        include: this.getUserIncludeFields(), // 改为使用 include
+        include: {
+          ...this.getUserIncludeFields(),
+
+          /**
+           * 钱包
+           */
+          walletAccount: {
+            select: {
+              walletUid: true,
+              availableBalance: true,
+              frozenBalance: true
+            }
+          },
+
+          /**
+           * 最后接单时间
+           */
+          orderParticipants: {
+            select: {
+              acceptedAt: true
+            },
+            orderBy: {
+              acceptedAt: 'desc'
+            },
+            take: 1
+          }
+        },
         orderBy: { createdAt: 'desc' },
       }),
+
       this.prisma.user.count({ where }),
     ]);
 
+    /**
+     * 6️⃣ 数据加工
+     */
+    const data = users.map((u: any) => {
+
+      const available = Number(u?.walletAccount?.availableBalance ?? 0);
+      const frozen = Number(u?.walletAccount?.frozenBalance ?? 0);
+
+      const lastAcceptOrderAt =
+          u?.orderParticipants?.[0]?.acceptedAt ?? null;
+
+      return {
+        ...u,
+
+        wallet: {
+          walletUid: u?.walletAccount?.walletUid ?? null,
+          availableBalance: available,
+          frozenBalance: frozen,
+          totalBalance: Number((available + frozen).toFixed(2))
+        },
+
+        lastAcceptOrderAt
+      };
+    });
+
     return {
-      data: users,
+      data,
       total,
       page,
       limit,

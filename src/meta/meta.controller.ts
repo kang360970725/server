@@ -127,6 +127,8 @@ export class MetaController {
                 SETTLEMENT_EARNING_CARRY: '补单收益（炸单补偿）',
                 SETTLEMENT_BOMB_LOSS: '炸单损耗（成本扣减）',
                 SETTLEMENT_EARNING_CS: '客服分红',
+                SETTLEMENT_REVERSAL: '(重复结算)旧结算收益冲正',
+                SETTLEMENT_RECALC: '重算后新结算收益',
 
                 RELEASE_FROZEN: '解冻入账',
                 REFUND_REVERSAL: '退款冲正',

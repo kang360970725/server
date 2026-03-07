@@ -51,5 +51,9 @@ export class QueryWalletTransactionsDto {
     endAt?: string;
 
     // ✅ 新增：订单编号（Order.autoSerial）模糊查询
-    orderSerial?: string;
+    orderAutoSerial?: string;
+
+    @IsOptional()
+    @IsInt()
+    userId?: number;
 }

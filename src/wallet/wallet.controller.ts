@@ -31,10 +31,14 @@ export class WalletController {
      */
     @Get('transactions')
     async listMyTransactions(@Query() query: QueryWalletTransactionsDto, @Request() req: any) {
-        const userId = Number(req?.user?.userId ?? req?.user?.id ?? req?.user?.sub);
+
+        const loginUserId = Number(req?.user?.userId ?? req?.user?.id ?? req?.user?.sub);
+
+        // 如果传了 userId 就查指定用户
+        const userId = query.userId ? Number(query.userId) : loginUserId;
+
         return this.walletService.listMyTransactions(userId, query);
     }
-
     /**
      * 查询当前用户冻结单
      * GET /wallet/holds?page&limit&status
@@ -45,6 +49,14 @@ export class WalletController {
         return this.walletService.listMyHolds(userId, query);
     }
 
+    /**
+     * 钱包统计
+     * GET /wallet/statistics
+     */
+    @Get('statistics')
+    async getWalletStatistics() {
+        return this.walletService.getWalletStatistics();
+    }
 
     @Post('withdraw/qr-code')
     @UseInterceptors(FileInterceptor('file'))

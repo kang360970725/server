@@ -331,6 +331,9 @@ enum WalletBizType {
 
   /// ✅ 提现：实际出款成功（冻结资金真正扣除）
   WITHDRAW_PAYOUT
+
+  SETTLEMENT_REVERSAL   // 旧结算收益冲正
+  SETTLEMENT_RECALC     // 重算后新结算收益
 }
 
 enum WithdrawalStatus {

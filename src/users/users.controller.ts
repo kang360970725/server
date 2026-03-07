@@ -44,13 +44,17 @@ export class UsersController {
       @Query('search') search?: string,
       @Query('userType') userType?: UserType,
       @Query('status') status?: string,
+      @Query('loginInactiveDays') loginInactiveDays?: number,
+      @Query('acceptInactiveDays') acceptInactiveDays?: number
   ) {
     return this.usersService.findAll({
-      page: page ? Number(page) : undefined,
-      limit: limit ? Number(limit) : undefined,
+      page,
+      limit,
       search,
       userType,
       status,
+      loginInactiveDays,
+      acceptInactiveDays
     });
   }
 

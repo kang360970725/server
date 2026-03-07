@@ -9,15 +9,30 @@
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
-    "start:dev": "nest start --watch",
-    "start:debug": "nest start --debug --watch",
+
+    "start:dev": "dotenv -e .env.dev -- nest start --watch",
+    "start:prodclone": "dotenv -e .env.prodclone -- nest start --watch",
+    "start:debug:dev": "dotenv -e .env.dev -- nest start --debug --watch",
+    "start:debug:prodclone": "dotenv -e .env.prodclone -- nest start --debug --watch",
     "start:prod": "node dist/main.js || node dist/src/main.js",
+
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json"
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+
+    "prisma:generate": "prisma generate",
+    "prisma:studio:dev": "dotenv -e .env.dev -- prisma studio",
+    "prisma:studio:prodclone": "dotenv -e .env.prodclone -- prisma studio",
+    "prisma:migrate:dev": "dotenv -e .env.dev -- prisma migrate dev",
+    "prisma:seed:dev": "dotenv -e .env.dev -- prisma db seed",
+    "prisma:seed:prodclone": "dotenv -e .env.prodclone -- prisma db seed",
+    "prisma:push:dev": "dotenv -e .env.dev -- prisma db push",
+    "prisma:push:prodclone": "dotenv -e .env.prodclone -- prisma db push",
+    "prisma:generate:dev": "dotenv -e .env.dev -- prisma generate",
+    "prisma:generate:prodclone": "dotenv -e .env.prodclone -- prisma generate"
   },
   "prisma": {
     "seed": "ts-node --project prisma/tsconfig.seed.json --transpile-only prisma/seed.ts"
@@ -57,6 +72,7 @@
     "@types/passport-local": "^1.0.38",
     "@types/supertest": "^6.0.2",
     "class-transformer": "^0.5.1",
+    "dotenv-cli": "^11.0.0",
     "eslint": "^9.18.0",
     "eslint-config-prettier": "^10.0.1",
     "eslint-plugin-prettier": "^5.2.2",
