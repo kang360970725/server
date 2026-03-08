@@ -143,7 +143,10 @@ model User {
 
   /// ✅ 提现申请记录（反向关系）
   walletWithdrawalRequests WalletWithdrawalRequest[]
+  /// ✅ 押金记录（反向关系）
+  depositTransactions WalletDepositTransaction[]
 
+  canWithdraw Boolean @default(true) //是否可以提现
   // 索引：用于客服派单快速筛选空闲打手
   @@index([workStatus])
   @@index([rating], map: "users_rating_fkey")
@@ -650,13 +653,13 @@ model WalletAccount {
 
   /// 可用余额（可提现/可抵扣）
   availableBalance Decimal @db.Decimal(10, 1) @default(0)
+    depositBalance Decimal @db.Decimal(10,2) @default(0) //当前押金余额
 
   /// 冻结余额（未到解冻时间）
   frozenBalance    Decimal @db.Decimal(10, 1) @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-
   @@map("wallet_accounts")
 }
 
@@ -795,4 +798,41 @@ model WalletWithdrawalRequest {
   @@index([status, createdAt])
   @@index([status, reviewedAt])
   @@map("wallet_withdrawal_requests")
+}
+
+enum DepositBizType {
+  /// 提现按比例缴纳押金（例如10%）
+  WITHDRAW_PERCENT
+
+  /// 奖励直接转押金
+  REWARD_TRANSFER
+
+  /// 主动缴纳押金
+  MANUAL_DEPOSIT
+
+  /// 处罚扣押金
+  PENALTY_DEDUCT
+
+  /// 退还押金
+  DEPOSIT_REFUND
+}
+
+//押金流水表
+model WalletDepositTransaction {
+  id Int @id @default(autoincrement())
+
+  userId Int
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  amount Decimal @db.Decimal(10,2)
+
+  bizType DepositBizType   //押金类型
+
+  remark String? @db.VarChar(255) //备注
+
+  operatorId Int?  //操作人
+
+  createdAt DateTime @default(now())  //时间
+
+  @@index([userId])
 }

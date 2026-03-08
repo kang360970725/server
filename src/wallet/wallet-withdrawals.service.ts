@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import {BadRequestException, ForbiddenException, Injectable} from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import {tcbGetTempFileURL} from "../common/cloudbase.storage";
+import { WalletDepositService } from './wallet.deposit.service';
 
 /** ✅ 截断到 2 位小数（不四舍五入） */
 const round2 = (v: any): number => {
@@ -20,7 +21,10 @@ const round2 = (v: any): number => {
  */
 @Injectable()
 export class WalletWithdrawalsService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly walletDepositService: WalletDepositService,
+    ) {}
 
     /**
      * 生成展示/对账用提现单号
@@ -58,58 +62,199 @@ export class WalletWithdrawalsService {
         const { userId, amount, idempotencyKey, remark, channel = 'MANUAL' } = params;
 
         if (!amount || amount <= 0) {
-            throw new Error('提现金额必须大于 0');
+            throw new BadRequestException('提现金额必须大于 0');
         }
 
-
         return this.prisma.$transaction(async (tx) => {
+
+            // =========================
+            // Step 0：读取用户信息
+            // =========================
             const u = await tx.user.findUnique({
                 where: { id: userId },
-                select: { withdrawQrCodeKey: true },
+                select: {
+                    withdrawQrCodeKey: true,
+                    canWithdraw: true,
+                    userType: true,
+                },
             });
-            if (!u?.withdrawQrCodeKey) {
-                throw new Error('请先上传收款二维码（上传后不可修改）');
-            }
-            // 1️⃣ 校验钱包
-            const account = await tx.walletAccount.findUnique({ where: { userId } });
-            if (!account) throw new Error('钱包账户不存在');
-            if (Number((account as any).availableBalance ?? 0) < Number(amount ?? 0)) {
-                throw new Error('可用余额不足（仅可提现已解冻余额）');
+
+            if (!u) throw new BadRequestException('用户不存在');
+
+            if (!u.canWithdraw) {
+                throw new BadRequestException('当前账户暂不允许提现');
             }
 
-            // 2️⃣ 预扣资金（防并发）
-            const accountAfterReserve = await tx.walletAccount.update({
+            if (!u.withdrawQrCodeKey) {
+                throw new BadRequestException('请先上传收款二维码');
+            }
+
+            const isStaff = u.userType === 'STAFF';
+
+            // =========================
+            // Step 1：提现次数限制
+            // =========================
+            const now = new Date();
+
+            const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+            const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+
+            const dayCount = await tx.walletWithdrawalRequest.count({
+                where: {
+                    userId,
+                    createdAt: {
+                        gte: startOfDay,
+                        lte: endOfDay,
+                    },
+                },
+            });
+
+            if (dayCount >= 1) {
+                throw new BadRequestException('每天只能申请提现 1 次');
+            }
+
+            const day = now.getDay() || 7;
+            const startOfWeek = new Date(now);
+            startOfWeek.setDate(now.getDate() - day + 1);
+            startOfWeek.setHours(0, 0, 0, 0);
+
+            const endOfWeek = new Date(startOfWeek);
+            endOfWeek.setDate(startOfWeek.getDate() + 6);
+            endOfWeek.setHours(23, 59, 59, 999);
+
+            const weekCount = await tx.walletWithdrawalRequest.count({
+                where: {
+                    userId,
+                    createdAt: {
+                        gte: startOfWeek,
+                        lte: endOfWeek,
+                    },
+                },
+            });
+
+            if (weekCount >= 3) {
+                throw new BadRequestException('每周最多提现 3 次');
+            }
+
+            // =========================
+            // Step 1.5：首次提现限制
+            // =========================
+            const historyCount = await tx.walletWithdrawalRequest.count({
+                where: { userId },
+            });
+
+            if (historyCount === 0) {
+
+                const firstDispatch = await tx.orderParticipant.findFirst({
+                    where: { userId },
+                    orderBy: { acceptedAt: 'asc' },
+                    select: { acceptedAt: true },
+                });
+
+                if (!firstDispatch) {
+                    throw new BadRequestException('未接单用户暂不能提现');
+                }
+
+                const days = Math.floor(
+                    (Date.now() - new Date(firstDispatch.acceptedAt).getTime()) /
+                    (1000 * 60 * 60 * 24)
+                );
+
+                if (days < 15) {
+                    throw new BadRequestException('首次提现需接单满15天');
+                }
+
+                const accountCheck = await tx.walletAccount.findUnique({
+                    where: { userId },
+                    select: { availableBalance: true },
+                });
+
+                if (Number(accountCheck?.availableBalance || 0) < 2000) {
+                    throw new BadRequestException('首次提现余额需达到2000');
+                }
+            }
+
+            // =========================
+            // Step 2：钱包校验
+            // =========================
+            const account = await tx.walletAccount.findUnique({
+                where: { userId },
+            });
+
+            if (!account) throw new BadRequestException('钱包账户不存在');
+
+            const available = Number(account.availableBalance || 0);
+
+            if (available < amount) {
+                throw new BadRequestException('可用余额不足');
+            }
+
+            if (available < 0) {
+                throw new BadRequestException('账户存在欠款，请先补齐');
+            }
+
+            // =========================
+            // Step 3：计算押金
+            // =========================
+            const depositAdd = isStaff ? Math.floor(amount * 0.1) : 0;
+            const withdrawAmount = amount - depositAdd;
+
+            // =========================
+            // Step 4：更新钱包
+            // =========================
+            const accountAfterUpdate = await tx.walletAccount.update({
                 where: { userId },
                 data: {
                     availableBalance: { decrement: amount },
-                    frozenBalance: { increment: amount },
+                    depositBalance: { increment: depositAdd },
+                    frozenBalance: { increment: withdrawAmount },
                 },
-                select: { availableBalance: true, frozenBalance: true },
+                select: {
+                    availableBalance: true,
+                    frozenBalance: true,
+                },
             });
 
-            // 3️⃣ 冻结流水（此时不是出款，只是“锁钱”）
+            // =========================
+            // Step 5：押金流水
+            // =========================
+            if (depositAdd) {
+                await tx.walletDepositTransaction.create({
+                    data: {
+                        userId,
+                        amount: depositAdd,
+                        bizType: 'WITHDRAW_PERCENT',
+                        remark: '提现自动缴纳押金',
+                    },
+                });
+            }
+
+            // =========================
+            // Step 6：提现冻结流水
+            // =========================
             const reserveTx = await tx.walletTransaction.create({
                 data: {
                     userId,
                     direction: 'OUT',
                     bizType: 'WITHDRAW_RESERVE',
-                    amount,
+                    amount: withdrawAmount,
                     status: 'FROZEN',
                     sourceType: 'WITHDRAWAL_REQUEST',
-                    sourceId: 0, // 创建申请单后再回填
-                    // ✅ 余额快照（本笔预扣后的余额）
-                    availableAfter: round2(Number((accountAfterReserve as any).availableBalance ?? 0)),
-                    frozenAfter: round2(Number((accountAfterReserve as any).frozenBalance ?? 0)),
+                    sourceId: 0,
+                    availableAfter: round2(Number(accountAfterUpdate.availableBalance || 0)),
+                    frozenAfter: round2(Number(accountAfterUpdate.frozenBalance || 0)),
                 },
             });
 
-            // 4️⃣ 创建提现申请单
+            // =========================
+            // Step 7：创建提现申请
+            // =========================
             const requestNo = this.genRequestNo();
 
             const request = await tx.walletWithdrawalRequest.create({
                 data: {
                     userId,
-                    amount,
+                    amount: withdrawAmount,
                     status: 'PENDING_REVIEW',
                     channel,
                     idempotencyKey,
@@ -119,7 +264,6 @@ export class WalletWithdrawalsService {
                 },
             });
 
-            // 5️⃣ 回填 sourceId，形成稳定业务锚点
             await tx.walletTransaction.update({
                 where: { id: reserveTx.id },
                 data: { sourceId: request.id },
@@ -152,13 +296,13 @@ export class WalletWithdrawalsService {
             const req = await tx.walletWithdrawalRequest.findUnique({
                 where: { id: requestId },
             });
-            if (!req) throw new Error('提现申请不存在');
+            if (!req) throw new BadRequestException('提现申请不存在');
 
             // ✅ 幂等：终态直接返回，避免重复扣减/重复流水
             if (req.status === 'PAID' || req.status === 'REJECTED') return req;
 
             if (req.status !== 'PENDING_REVIEW') {
-                throw new Error('该提现申请不在待审核状态');
+                throw new BadRequestException('该提现申请不在待审核状态');
             }
 
             const now = new Date();

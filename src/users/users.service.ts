@@ -154,22 +154,13 @@ export class UsersService {
       date.setDate(date.getDate() - Number(acceptInactiveDays));
 
       AND.push({
-        OR: [
-          {
-            orderParticipants: {
-              none: {}
-            }
+        orderParticipants: {
+          none: {
+            acceptedAt: {
+              gt: date,
+            },
           },
-          {
-            orderParticipants: {
-              some: {
-                acceptedAt: {
-                  lte: date
-                }
-              }
-            }
-          }
-        ]
+        },
       });
     }
 
@@ -192,7 +183,8 @@ export class UsersService {
             select: {
               walletUid: true,
               availableBalance: true,
-              frozenBalance: true
+              frozenBalance: true,
+              depositBalance: true
             }
           },
 
@@ -200,13 +192,18 @@ export class UsersService {
            * 最后接单时间
            */
           orderParticipants: {
+            where: {
+              acceptedAt: {
+                not: null,
+              },
+            },
             select: {
-              acceptedAt: true
+              acceptedAt: true,
             },
             orderBy: {
-              acceptedAt: 'desc'
+              acceptedAt: 'desc',
             },
-            take: 1
+            take: 1,
           }
         },
         orderBy: { createdAt: 'desc' },
@@ -233,7 +230,8 @@ export class UsersService {
           walletUid: u?.walletAccount?.walletUid ?? null,
           availableBalance: available,
           frozenBalance: frozen,
-          totalBalance: Number((available + frozen).toFixed(2))
+          totalBalance: Number((available + frozen).toFixed(2)),
+          depositBalance: u?.walletAccount?.depositBalance
         },
 
         lastAcceptOrderAt

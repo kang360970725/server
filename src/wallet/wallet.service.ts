@@ -1115,6 +1115,7 @@ export class WalletService {
                 walletUid: true,
                 availableBalance: true,
                 frozenBalance: true,
+                depositBalance: true,
                 createdAt: true,
                 updatedAt: true,
             },

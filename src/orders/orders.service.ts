@@ -89,7 +89,8 @@ export class OrdersService {
                 paymentTime: isGifted || isPaid ? null : (dto.paymentTime ? new Date(dto.paymentTime) : null),
                 isPaid,
 
-                orderTime: dto.orderTime ? new Date(dto.orderTime) : null,
+                // orderTime: dto.orderTime ? new Date(dto.orderTime) : null,
+                orderTime: new Date(),
                 openedAt: new Date(),
                 baseAmountWan: dto.baseAmountWan ?? null,
 

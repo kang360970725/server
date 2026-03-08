@@ -101,6 +101,12 @@ export class AuthService {
       throw new ForbiddenException('账号已禁用，禁止登录');
     }
     // ✅ 登录成功
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        lastLoginAt: new Date(),
+      },
+    });
     const payload = { phone: user.phone, sub: user.id, name: user.name };
     const access_token = this.jwtService.sign(payload);
 
@@ -110,7 +116,10 @@ export class AuthService {
     return {
       success: true,
       access_token,
-      user: userWithoutPassword,
+      user: {
+        ...userWithoutPassword,
+        lastLoginAt: new Date(),
+      },
     };
   }
 

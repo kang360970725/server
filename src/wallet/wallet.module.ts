@@ -5,6 +5,7 @@ import { WalletScheduler } from './wallet.scheduler';
 import {WalletController} from "./wallet.controller";
 import {WalletWithdrawalsController} from "./wallet-withdrawals.controller";
 import {WalletWithdrawalsService} from "./wallet-withdrawals.service";
+import { WalletDepositService } from './wallet.deposit.service';
 
 /**
  * WalletModule（V0.1）
@@ -19,7 +20,7 @@ import {WalletWithdrawalsService} from "./wallet-withdrawals.service";
         WalletController,
         WalletWithdrawalsController, // ✅ 新增
     ],
-    providers: [WalletService,WalletWithdrawalsService, WalletScheduler,PrismaService],
+    providers: [WalletService,WalletWithdrawalsService, WalletScheduler,PrismaService, WalletDepositService],
     exports: [WalletService, WalletWithdrawalsService],
 })
 export class WalletModule {}

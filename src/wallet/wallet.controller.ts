@@ -1,9 +1,10 @@
-import { Controller,Req, Get, Query,Post, Request, UseGuards, UseInterceptors, UploadedFile } from '@nestjs/common';
+import { Controller,Body, Req, Get, Query,Post, Request, UseGuards, UseInterceptors, UploadedFile } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { WalletService } from './wallet.service';
 import { QueryWalletTransactionsDto } from './dto/query-wallet-transactions.dto';
 import { QueryWalletHoldsDto } from './dto/query-wallet-holds.dto';
 import { FileInterceptor } from '@nestjs/platform-express';
+import {WalletDepositService} from "./wallet.deposit.service";
 
 /**
  * Wallet Controller（V0.2）
@@ -13,7 +14,8 @@ import { FileInterceptor } from '@nestjs/platform-express';
 @Controller('wallet')
 @UseGuards(JwtAuthGuard)
 export class WalletController {
-    constructor(private readonly walletService: WalletService) {}
+    constructor(private readonly walletService: WalletService,
+                private readonly walletDepositService: WalletDepositService,) {}
 
     /**
      * 获取当前用户钱包账户
@@ -69,6 +71,35 @@ export class WalletController {
     async getWithdrawQrCodeUrl(@Req() req: any) {
         const userId = req.user.userId;
         return this.walletService.getWithdrawQrCodeUrl({ userId });
+    }
+
+    @Post('deposit/manual')
+    async manualDeposit(@Body() body: any, @Req() req: any) {
+
+        const operatorId = req.user?.userId;
+
+        const { userId, amount, remark } = body;
+
+        return this.walletDepositService.manualDeposit({
+            userId: Number(userId),
+            amount: Number(amount),
+            remark,
+            operatorId,
+        });
+    }
+
+
+    @Get('deposit-transactions')
+    async depositTransactions(@Query() query: any) {
+
+        const page = Math.max(1, Number(query.page ?? 1));
+        const limit = Math.min(100, Math.max(1, Number(query.limit ?? 20)));
+
+        return this.walletDepositService.listDepositTransactions({
+            userId: Number(query.userId),
+            page,
+            limit,
+        });
     }
 
 }
