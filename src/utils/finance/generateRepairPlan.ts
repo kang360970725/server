@@ -1,5 +1,7 @@
 // src/utils/finance/generateRepairPlan.ts
 
+import {BadRequestException} from "@nestjs/common";
+
 type ExistingSettlement = {
     id: number;
     dispatchId: number;
@@ -354,12 +356,12 @@ function computeSettlementFreezeTime(params: {
     const { order } = params;
 
     if (!order) {
-        throw new Error('order 不能为空');
+        throw new BadRequestException('order 不能为空');
     }
 
     const projectSnap = order.projectSnapshot;
     if (!projectSnap || !projectSnap.type) {
-        throw new Error('订单缺少 projectSnapshot.type，无法计算冻结时间');
+        throw new BadRequestException('订单缺少 projectSnapshot.type，无法计算冻结时间');
     }
 
     // 1️⃣ 找到 COMPLETED 的 dispatch（历史修复只认这个）
@@ -368,7 +370,7 @@ function computeSettlementFreezeTime(params: {
     );
 
     if (!completedDispatch) {
-        throw new Error('未找到 status=COMPLETED 的派单轮次，无法计算冻结时间');
+        throw new BadRequestException('未找到 status=COMPLETED 的派单轮次，无法计算冻结时间');
     }
 
     const freezeStartAt = new Date(completedDispatch.completedAt);

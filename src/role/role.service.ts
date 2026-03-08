@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {BadRequestException, Injectable, NotFoundException} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -64,7 +64,7 @@ export class RoleService {
 
         if (!role) throw new NotFoundException('角色不存在');
         if (role.users.length > 0) {
-            throw new Error('该角色下还有用户，无法删除');
+            throw new BadRequestException('该角色下还有用户，无法删除');
         }
 
         return this.prisma.role.delete({ where: { id } });
