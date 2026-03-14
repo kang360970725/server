@@ -285,102 +285,124 @@ export class UsersService {
   }
 
   async update(id: number, updateUserDto: UpdateUserDto, operatorId?: number) {
+
     const oldUser = await this.prisma.user.findUnique({
       where: { id },
-      include: this.getUserIncludeFields(), // 改为使用 include
+      include: this.getUserIncludeFields(),
     });
-
-    if (updateUserDto.password) {
-      // ✅ 避免明文入库
-      updateUserDto.password = await bcrypt.hash(updateUserDto.password, 10);
-    }
 
     if (!oldUser) {
       throw new NotFoundException('用户不存在');
     }
 
-    const user = await this.prisma.user.update({
-      where: { id },
-      data: updateUserDto,
-      include: this.getUserIncludeFields(), // 改为使用 include
-    });
+    if (updateUserDto.password) {
+      updateUserDto.password = await bcrypt.hash(updateUserDto.password, 10);
+    }
 
-    // ==========================
-    // 押金阈值降低 → 自动退还押金
-    // ==========================
-    if (
-        updateUserDto.depositLimit !== undefined &&
-        Number(updateUserDto.depositLimit) < Number(oldUser.depositLimit || 2000)
-    ) {
+    return this.prisma.$transaction(async (tx) => {
 
-      const wallet = await this.prisma.walletAccount.findUnique({
-        where: { userId: id },
-        select: {
-          depositBalance: true,
-          availableBalance: true,
-          frozenBalance: true,
-        },
+      const user = await tx.user.update({
+        where: { id },
+        data: updateUserDto,
+        include: this.getUserIncludeFields(),
       });
 
-      if (wallet) {
-        const currentDeposit = Number(wallet.depositBalance || 0);
-        const newLimit = Number(updateUserDto.depositLimit);
+      // ==========================
+      // 押金阈值降低 → 自动退还押金
+      // ==========================
+      if (
+          updateUserDto.depositLimit !== undefined &&
+          Number(updateUserDto.depositLimit) < Number(oldUser.depositLimit || 2000)
+      ) {
 
-        if (currentDeposit > newLimit) {
+        const wallet = await tx.walletAccount.findUnique({
+          where: { userId: id },
+          select: {
+            depositBalance: true,
+            availableBalance: true,
+            frozenBalance: true,
+          },
+        });
 
-          const refundAmount = currentDeposit - newLimit;
+        if (wallet) {
 
-          // 更新钱包余额
-          const walletAfter = await this.prisma.walletAccount.update({
-            where: { userId: id },
-            data: {
-              depositBalance: { decrement: refundAmount },
-              availableBalance: { increment: refundAmount },
-            },
-            select: {
-              availableBalance: true,
-              frozenBalance: true,
-            },
-          });
+          const currentDeposit = Number(wallet.depositBalance || 0);
+          const newLimit = Number(updateUserDto.depositLimit);
 
-          // 写钱包流水
-          await this.prisma.walletTransaction.create({
-            data: {
-              userId: id,
-              direction: 'IN',
-              bizType: 'WITHDRAW_RELEASE',
-              amount: refundAmount,
-              status: 'AVAILABLE',
-              sourceType: 'DEPOSIT_LIMIT_ADJUST',
-              sourceId: id,
-              availableAfter: walletAfter.availableBalance,
-              frozenAfter: walletAfter.frozenBalance,
-            },
-          });
+          if (currentDeposit > newLimit) {
+
+            const refundAmount = currentDeposit - newLimit;
+
+            // 更新钱包余额
+            const walletAfter = await tx.walletAccount.update({
+              where: { userId: id },
+              data: {
+                depositBalance: { decrement: refundAmount },
+                availableBalance: { increment: refundAmount },
+              },
+              select: {
+                availableBalance: true,
+                frozenBalance: true,
+              },
+            });
+
+            // ==========================
+            // 写押金流水
+            // ==========================
+            const depositTx = await tx.walletDepositTransaction.create({
+              data: {
+                userId: id,
+                amount: -refundAmount,
+                bizType: 'DEPOSIT_REFUND',
+                remark: '押金阈值降低退还',
+              },
+            });
+            // ==========================
+            // 写钱包流水
+            // ==========================
+            await tx.walletTransaction.create({
+              data: {
+                userId: id,
+                direction: 'IN',
+                bizType: 'DEPOSIT_REFUND',
+                amount: refundAmount,
+                status: 'AVAILABLE',
+                sourceType: 'DEPOSIT_LIMIT_ADJUST',
+                sourceId: depositTx.id,
+                availableAfter: walletAfter.availableBalance,
+                frozenAfter: walletAfter.frozenBalance,
+              },
+            });
+
+          }
+        }
+      }
+
+      // 记录操作日志
+      if (operatorId) {
+
+        const changedFields = this.getChangedFields(oldUser, user, updateUserDto);
+
+        if (Object.keys(changedFields).length > 0) {
+
+          await this.createUserLog(
+              operatorId,
+              id,
+              'UPDATE_USER',
+              'USER',
+              this.getOldValues(oldUser, changedFields),
+              changedFields,
+              null,
+              this.generateUpdateRemark(changedFields, oldUser, user)
+          );
 
         }
       }
-    }
 
-    // 记录操作日志 - 只记录修改的字段
-    if (operatorId) {
-      const changedFields = this.getChangedFields(oldUser, user, updateUserDto);
+      return user;
 
-      if (Object.keys(changedFields).length > 0) {
-        await this.createUserLog(
-            operatorId,
-            id,
-            'UPDATE_USER',
-            'USER',
-            this.getOldValues(oldUser, changedFields),
-            changedFields,
-            null,
-            this.generateUpdateRemark(changedFields, oldUser, user)
-        );
-      }
-    }
+    });
 
-    return user;
   }
 
   async updateMyPassword(userId: number, newPassword: string) {

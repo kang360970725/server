@@ -130,6 +130,7 @@ export class MetaController {
                 SETTLEMENT_REVERSAL: '(重复结算)旧结算收益冲正',
                 SETTLEMENT_RECALC: '重算后新结算收益',
 
+                DEPOSIT_REFUND: '押金退还',
                 RELEASE_FROZEN: '解冻入账',
                 REFUND_REVERSAL: '退款冲正',
 
@@ -190,6 +191,7 @@ export class MetaController {
                 WITHDRAW_APPROVE: '审核通过提现',
                 WITHDRAW_REJECT: '驳回提现申请',
                 WITHDRAW_PAYOUT: '提现打款',
+                DEPOSIT_REFUND: '押金退还',
                 WITHDRAW_FAIL: '提现打款失败',
 
                 // =========================

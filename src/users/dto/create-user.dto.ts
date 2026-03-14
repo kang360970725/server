@@ -63,6 +63,6 @@ export class CreateUserDto {
      */
     @IsOptional()
     @IsNumber()
-    @Min(2000)
+    @Min(500)
     depositLimit?: number;
 }
