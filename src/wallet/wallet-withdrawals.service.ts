@@ -40,6 +40,36 @@ export class WalletWithdrawalsService {
     }
 
     /**
+     * ✅ 获取提现相关信息
+     * 用于前端提现弹窗计算押金
+     */
+    async getWithdrawInfo(userId: number) {
+
+        const user = await this.prisma.user.findUnique({
+            where: { id: userId },
+            select: {
+                depositLimit: true,
+                walletAccount: {
+                    select: {
+                        availableBalance: true,
+                        depositBalance: true,
+                    },
+                },
+            },
+        });
+
+        if (!user) {
+            throw new BadRequestException('用户不存在');
+        }
+
+        return {
+            availableBalance: Number(user.walletAccount?.availableBalance || 0),
+            depositBalance: Number(user.walletAccount?.depositBalance || 0),
+            depositLimit: Number(user.depositLimit || 500),
+        };
+    }
+
+    /**
      * ✅ 提现申请
      *
      * 流程：
@@ -76,6 +106,7 @@ export class WalletWithdrawalsService {
                     withdrawQrCodeKey: true,
                     canWithdraw: true,
                     userType: true,
+                    depositLimit: true,
                 },
             });
 
@@ -143,7 +174,7 @@ export class WalletWithdrawalsService {
                 where: { userId },
             });
 
-            if (historyCount === 0) {
+            if (historyCount === 0 && isStaff) {
 
                 const firstDispatch = await tx.orderParticipant.findFirst({
                     where: { userId },
@@ -169,8 +200,8 @@ export class WalletWithdrawalsService {
                     select: { availableBalance: true },
                 });
 
-                if (Number(accountCheck?.availableBalance || 0) < 2000) {
-                    throw new BadRequestException('首次提现余额需达到2000');
+                if (Number(accountCheck?.availableBalance || 0) < 1000 && isStaff) {
+                    throw new BadRequestException('首次提现余额需达到 1000');
                 }
             }
 
@@ -196,7 +227,22 @@ export class WalletWithdrawalsService {
             // =========================
             // Step 3：计算押金
             // =========================
-            const depositAdd = isStaff ? Math.floor(amount * 0.1) : 0;
+            let depositAdd = 0;
+
+            if (isStaff) {
+                const depositLimit = Number(u.depositLimit || 2000);
+                const currentDeposit = Number(account.depositBalance || 0);
+
+                const depositNeed = depositLimit - currentDeposit;
+
+                if (depositNeed > 0) {
+
+                    const depositByRate = Math.floor(amount * 0.1);
+
+                    depositAdd = Math.min(depositByRate, depositNeed);
+                }
+            }
+
             const withdrawAmount = amount - depositAdd;
 
             // =========================

@@ -147,6 +147,8 @@ model User {
   depositTransactions WalletDepositTransaction[]
 
   canWithdraw Boolean @default(true) //是否可以提现
+  depositLimit Decimal @db.Decimal(10,2) @default(2000) //押金阈值
+
   // 索引：用于客服派单快速筛选空闲打手
   @@index([workStatus])
   @@index([rating], map: "users_rating_fkey")
@@ -790,7 +792,7 @@ model WalletWithdrawalRequest {
   /// 最近一次打款错误原因
   failReason     String? @db.Text
 
-  createdAt DateTime @default(now())
+  createdAt DateTime @default(dbgenerated("CURRENT_TIMESTAMP(3)"))
   updatedAt DateTime @updatedAt
 
   @@unique([userId, idempotencyKey], map: "uniq_withdraw_user_idempotency")

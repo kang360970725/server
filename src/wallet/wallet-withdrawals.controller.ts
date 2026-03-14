@@ -29,6 +29,18 @@ export class WalletWithdrawalsController {
         return this.service.applyWithdrawal({ ...body, userId });
     }
 
+    /**
+     * ✅ 获取提现基础信息（押金余额 + 押金阈值）
+     */
+    @Get('withdraw-info')
+    async getWithdrawInfo(@Req() req: any) {
+
+        const userId = req.user.userId;
+
+        return this.service.getWithdrawInfo(userId);
+
+    }
+
     // ✅ 打手：我的提现记录（仅登录）
     @Get('mine')
     async mine(@Req() req: any) {

@@ -184,7 +184,7 @@ export class UsersService {
               walletUid: true,
               availableBalance: true,
               frozenBalance: true,
-              depositBalance: true
+              depositBalance: true,
             }
           },
 
@@ -304,6 +304,63 @@ export class UsersService {
       data: updateUserDto,
       include: this.getUserIncludeFields(), // 改为使用 include
     });
+
+    // ==========================
+    // 押金阈值降低 → 自动退还押金
+    // ==========================
+    if (
+        updateUserDto.depositLimit !== undefined &&
+        Number(updateUserDto.depositLimit) < Number(oldUser.depositLimit || 2000)
+    ) {
+
+      const wallet = await this.prisma.walletAccount.findUnique({
+        where: { userId: id },
+        select: {
+          depositBalance: true,
+          availableBalance: true,
+          frozenBalance: true,
+        },
+      });
+
+      if (wallet) {
+        const currentDeposit = Number(wallet.depositBalance || 0);
+        const newLimit = Number(updateUserDto.depositLimit);
+
+        if (currentDeposit > newLimit) {
+
+          const refundAmount = currentDeposit - newLimit;
+
+          // 更新钱包余额
+          const walletAfter = await this.prisma.walletAccount.update({
+            where: { userId: id },
+            data: {
+              depositBalance: { decrement: refundAmount },
+              availableBalance: { increment: refundAmount },
+            },
+            select: {
+              availableBalance: true,
+              frozenBalance: true,
+            },
+          });
+
+          // 写钱包流水
+          await this.prisma.walletTransaction.create({
+            data: {
+              userId: id,
+              direction: 'IN',
+              bizType: 'WITHDRAW_RELEASE',
+              amount: refundAmount,
+              status: 'AVAILABLE',
+              sourceType: 'DEPOSIT_LIMIT_ADJUST',
+              sourceId: id,
+              availableAfter: walletAfter.availableBalance,
+              frozenAfter: walletAfter.frozenBalance,
+            },
+          });
+
+        }
+      }
+    }
 
     // 记录操作日志 - 只记录修改的字段
     if (operatorId) {

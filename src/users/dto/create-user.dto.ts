@@ -4,7 +4,7 @@ import {
     IsEnum,
     IsOptional,
     IsNumber,
-    IsBoolean,
+    IsBoolean, Min,
 } from 'class-validator';
 import { UserType, UserStatus } from '@prisma/client';
 
@@ -57,4 +57,12 @@ export class CreateUserDto {
     @IsBoolean()
     @IsOptional()
     needResetPwd?: boolean;
+
+    /**
+     * 押金阈值
+     */
+    @IsOptional()
+    @IsNumber()
+    @Min(2000)
+    depositLimit?: number;
 }
