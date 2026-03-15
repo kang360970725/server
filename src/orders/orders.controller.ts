@@ -7,6 +7,7 @@ import {
     ParseIntPipe,
     BadRequestException,
     Req,
+    Param,
     ForbiddenException,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -313,6 +314,21 @@ export class OrdersController {
             applyRepair: body?.applyRepair ?? false, // ✅ 默认 applyRepair（防误操作）
             modePlayAllocList: body?.modePlayAllocList
         } as any);
+    }
+
+    /**
+     * 反修复当前订单下“错误产生的 SETTLEMENT_REVERSAL 流水”
+     * ⚠️ 临时止血接口：仅用于本次错误数据清理
+     */
+    @Post(':id/rollback-wrong-settlement-reversals')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:list:page')
+    async rollbackWrongSettlementReversals(
+        @Param('id') id: string,
+        @Req() req: any,
+    ) {
+        const orderId = Number(id);
+        return this.ordersService.rollbackWrongSettlementReversals(orderId);
     }
 
 }

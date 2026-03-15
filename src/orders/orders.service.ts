@@ -220,252 +220,6 @@ export class OrdersService {
     /*** -----------------------------
      * 订单详情（含钱包真实收益 & 对账提示）
      * -----------------------------*/
-    // async getOrderDetail(id: number) {
-    //     // ===========================
-    //     // 1️⃣ 查询订单 + 结算（参考）
-    //     // ===========================
-    //     const order = await this.prisma.order.findUnique({
-    //         where: {id},
-    //         include: {
-    //             project: true,
-    //             dispatcher: {
-    //                 select: {id: true, name: true, phone: true},
-    //             },
-    //
-    //             // ✅ 当前派单批次
-    //             currentDispatch: {
-    //                 include: {
-    //                     participants: {
-    //                         where: {isActive: true},
-    //                         include: {
-    //                             user: {
-    //                                 select: {
-    //                                     id: true,
-    //                                     name: true,
-    //                                     phone: true,
-    //                                     workStatus: true,
-    //                                 },
-    //                             },
-    //                         },
-    //                         orderBy: {id: 'asc'},
-    //                     },
-    //                 },
-    //             },
-    //
-    //             // ✅ 历史派单批次
-    //             dispatches: {
-    //                 orderBy: {round: 'desc'},
-    //                 include: {
-    //                     participants: {
-    //                         include: {
-    //                             user: {select: {id: true, name: true, phone: true}},
-    //                         },
-    //                         orderBy: {id: 'asc'},
-    //                     },
-    //                 },
-    //             },
-    //
-    //             // ✅ 结算明细（参考口径）
-    //             settlements: {
-    //                 include: {
-    //                     user: {select: {id: true, name: true, phone: true}},
-    //                 },
-    //                 orderBy: {id: 'desc'},
-    //             },
-    //         },
-    //     });
-    //
-    //     if (!order) {
-    //         throw new NotFoundException('订单不存在');
-    //     }
-    //
-    //     // ===========================
-    //     // 2️⃣ 查询钱包真实流水（唯一资金事实）
-    //     // ===========================
-    //     const walletTxs = await this.prisma.walletTransaction.findMany({
-    //         where: {
-    //             orderId: id,
-    //             status: {not: 'REVERSED'}, // ❗ 冲正不参与统计
-    //         },
-    //         select: {
-    //             id: true,
-    //             userId: true,
-    //             amount: true,
-    //             direction: true, // ✅ 必须
-    //             status: true, // FROZEN / AVAILABLE
-    //             bizType: true,
-    //             settlementId: true,
-    //             dispatchId: true,
-    //             // ✅ 直接把用户基础信息带出来
-    //             user: {
-    //                 select: {
-    //                     id: true,
-    //                     name: true,
-    //                     phone: true, // 可选，Detail 里很多地方会用到
-    //                 },
-    //             },
-    //         },
-    //     });
-    //
-    //     // ===========================
-    //     // 3️⃣ 钱包收益汇总（真实）- ✅区分 IN / OUT
-    //     // ===========================
-    //     let inTotal = 0;     // IN 合计（正数展示）
-    //     let outTotal = 0;    // OUT 合计（正数展示）
-    //     let netTotal = 0;    // 净额（IN - OUT）
-    //
-    //     let frozenNet = 0;   // 冻结净额
-    //     let availableNet = 0; // 可用净额
-    //
-    //     for (const tx of walletTxs) {
-    //         const amt = Number(tx.amount || 0);
-    //         const isOut = tx.direction === 'OUT';
-    //         const signed = isOut ? -amt : amt;
-    //
-    //         if (isOut) outTotal += amt;
-    //         else inTotal += amt;
-    //
-    //         netTotal += signed;
-    //
-    //         if (tx.status === 'FROZEN') frozenNet += signed;
-    //         if (tx.status === 'AVAILABLE') availableNet += signed;
-    //     }
-    //
-    //     // 兼容旧变量名：walletTotal = 净额
-    //     const walletTotal = Number(netTotal.toFixed(2));
-    //     const frozen = Number(frozenNet.toFixed(2));
-    //     const available = Number(availableNet.toFixed(2));
-    //
-    //     // ===========================
-    //     // 4️⃣ 结算参考汇总
-    //     // ===========================
-    //     const settlementTotal = order.settlements.reduce(
-    //         (sum, s) => sum + Number(s.finalEarnings || 0),
-    //         0,
-    //     );
-    //
-    //     // ===========================
-    //     // 5️⃣ 对账提示（只读）- ✅用净额对账
-    //     // ===========================
-    //     const diff = Number((walletTotal - settlementTotal).toFixed(2));
-    //
-    //     let reconcileStatus: 'MATCHED' | 'MISMATCHED' | 'EMPTY';
-    //
-    //     if (!order.settlements.length && walletTotal === 0 && inTotal === 0 && outTotal === 0) {
-    //         reconcileStatus = 'EMPTY';
-    //     } else if (diff === 0) {
-    //         reconcileStatus = 'MATCHED';
-    //     } else {
-    //         reconcileStatus = 'MISMATCHED';
-    //     }
-    //
-    //     // ===========================
-    //     // ✅ 4.1 结算按人汇总（参考）
-    //     // ===========================
-    //     const settlementByUser = new Map<number, number>();
-    //     for (const s of order.settlements || []) {
-    //         const uid = Number(s?.userId || 0);
-    //         if (!uid) continue;
-    //         const v = Number(s?.finalEarnings || 0);
-    //         settlementByUser.set(uid, (settlementByUser.get(uid) || 0) + v);
-    //     }
-    //     const userMap = new Map<number, { id: number; name: string; phone?: string }>();
-    //     for (const tx of walletTxs) {
-    //         if (tx.user) {
-    //             userMap.set(tx.user.id, tx.user);
-    //         }
-    //     }
-    //
-    //     // ===========================
-    //     // ✅ 4.2 钱包按人汇总（真实）- ✅区分 IN/OUT/净额
-    //     // ===========================
-    //     const walletNetByUser = new Map<number, number>();
-    //     const walletInByUser = new Map<number, number>();
-    //     const walletOutByUser = new Map<number, number>();
-    //
-    //     for (const tx of walletTxs) {
-    //         const uid = Number(tx?.userId || 0);
-    //         if (!uid) continue;
-    //
-    //         const amt = Number(tx?.amount || 0);
-    //         const isOut = tx.direction === 'OUT';
-    //         const signed = isOut ? -amt : amt;
-    //
-    //         walletNetByUser.set(uid, (walletNetByUser.get(uid) || 0) + signed);
-    //
-    //         if (isOut) walletOutByUser.set(uid, (walletOutByUser.get(uid) || 0) + amt);
-    //         else walletInByUser.set(uid, (walletInByUser.get(uid) || 0) + amt);
-    //     }
-    //
-    //     // ===========================
-    //     // ✅ 4.3 合并成“按人对账结果”
-    //     // - 规则：diff = walletNet - settlement
-    //     // ===========================
-    //     const userIds = new Set<number>([
-    //         ...Array.from(settlementByUser.keys()),
-    //         ...Array.from(walletNetByUser.keys()),
-    //     ]);
-    //
-    //     const reconcileHintByUser = Array.from(userIds)
-    //         .map((userId) => {
-    //             const settlementTotal = Number((settlementByUser.get(userId) || 0).toFixed(2));
-    //
-    //             const walletNet = Number((walletNetByUser.get(userId) || 0).toFixed(2));
-    //             const walletIn = Number((walletInByUser.get(userId) || 0).toFixed(2));
-    //             const walletOut = Number((walletOutByUser.get(userId) || 0).toFixed(2));
-    //
-    //             const diff = Number((walletNet - settlementTotal).toFixed(2));
-    //
-    //             let status: 'MATCHED' | 'MISMATCHED' | 'EMPTY' = 'MISMATCHED';
-    //             if (settlementTotal === 0 && walletNet === 0 && walletIn === 0 && walletOut === 0) status = 'EMPTY';
-    //             else if (diff === 0) status = 'MATCHED';
-    //             const user = userMap.get(userId);
-    //             // 兼容旧字段 walletTotal（净额），并额外返回 IN/OUT/净额
-    //             return {
-    //                 userId,
-    //                 settlementTotal,
-    //                 userName: user?.name || `#${userId}`,
-    //                 walletTotal: walletNet, // ✅ 兼容旧字段名（语义：净额）
-    //                 walletNet,
-    //                 walletIn,
-    //                 walletOut,
-    //                 diff,
-    //                 status,
-    //             };
-    //         })
-    //         .sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
-    //
-    //     // ===========================
-    //     // 6️⃣ 返回
-    //     // ===========================
-    //     return {
-    //         ...order,
-    //
-    //         // ✅ 钱包真实收益概览（增强：IN/OUT/净额）
-    //         walletEarningsSummary: {
-    //             // 兼容旧字段：total/frozen/available（现在表示净额口径）
-    //             total: walletTotal,
-    //             frozen,
-    //             available,
-    //
-    //             // 新增：客服友好展示
-    //             inTotal: Number(inTotal.toFixed(2)),
-    //             outTotal: Number(outTotal.toFixed(2)),
-    //             netTotal: walletTotal,
-    //         },
-    //
-    //         // ✅ 对账提示（用于 UI / 后续修复入口）
-    //         reconcileHint: {
-    //             status: reconcileStatus,
-    //             settlementTotal,
-    //             walletTotal, // ✅ 净额
-    //             diff,        // ✅ 净额 - 结算
-    //         },
-    //
-    //         reconcileHintByUser,
-    //     };
-    //
-    // }
 
     async getOrderDetail(id: number) {
         // ===========================
@@ -2154,346 +1908,6 @@ export class OrdersService {
     }
 
     /**
-     * applyRepair：使用缓存的 settlementsToCreate 执行“清理旧数据 + 重建 settlement + 写钱包”
-     * - 不重新 compute
-     * - 事务内完成，避免半套账
-     */
-    // async applyRepair_ByCachedSettlementsTxV1(params: {
-    //     tx: any;
-    //     orderId: number;
-    //     operatorId: number;
-    //     reason?: string;
-    // })
-    // {
-    //     const { tx, orderId, operatorId, reason } = params;
-    //
-    //     // =========================
-    //     // Step 0：读取 repair cache
-    //     // =========================
-    //     const settlementsToCreate = this.settlementRepairCache.get(orderId);
-    //     if (!settlementsToCreate?.length) {
-    //         throw new BadRequestException('未找到可应用的修复结果，请先 dryRun');
-    //     }
-    //
-    //     // =========================
-    //     // Step 0.1：读取订单（用于冻结时间）
-    //     // =========================
-    //     const order = await tx.order.findUnique({
-    //         where: { id: orderId },
-    //         select: {
-    //             id: true,
-    //             createdAt: true, // ✅ 用作兜底窗口（不再作为硬过滤）
-    //             projectSnapshot: true,
-    //             dispatches: {
-    //                 select: {
-    //                     id: true,
-    //                     status: true,
-    //                     completedAt: true,
-    //                     acceptedAllAt: true,
-    //                 },
-    //             },
-    //         },
-    //     });
-    //     if (!order) throw new BadRequestException('订单不存在');
-    //
-    //     const freezeInfo = computeSettlementFreezeTime({ order });
-    //     const unlockAt = freezeInfo.freezeEndAt;
-    //
-    //     // ✅ 本次修复批次号：每次 applyRepair 生成 1 个
-    //     const settlementBatchId = randomUUID();
-    //
-    //     // =========================
-    //     // Step 0.3：查旧 settlement
-    //     // =========================
-    //     const oldSettlements = await tx.orderSettlement.findMany({
-    //         where: { orderId },
-    //         select: { id: true, settledAt: true },
-    //     });
-    //
-    //     if (!oldSettlements.length) {
-    //         throw new BadRequestException('该订单不存在旧结算记录，无法 applyRepair');
-    //     }
-    //
-    //     const oldSettlementIds = oldSettlements.map((s: any) => s.id);
-    //
-    //     // =========================
-    //     // Step 0.4：旧 earningTxIds（基于 settlementId）
-    //     // =========================
-    //     const oldEarningTxs = await tx.walletTransaction.findMany({
-    //         where: { settlementId: { in: oldSettlementIds } },
-    //         select: { id: true },
-    //     });
-    //     const oldEarningTxIds = oldEarningTxs.map((t: any) => t.id);
-    //
-    //     // =========================
-    //     // Step 1：标准 settlement 回滚（只回滚“还能被 settlementId 定位到”的那批）
-    //     // =========================
-    //     const rollbackSettlementResult = await this.wallet.rollbackOrderWalletImpactInTxV2({
-    //         tx,
-    //         settlementIds: oldSettlementIds,
-    //     });
-    //
-    //     // =========================
-    //     // Step 2：识别 & 回滚「历史残留结算流水（sourceType/bizType 精确兜底）」
-    //     // =========================
-    //     // 说明：
-    //     // - 你已确认残留样本：sourceType=ORDER_SETTLEMENT, bizType=SETTLEMENT_EARNING_BASE
-    //     // - 因为有 settledAt 可能晚于流水 createdAt，所以不再依赖 windowStartAt 去过滤“起点”
-    //     // - 仍保留 windowEndAt（防止误扫未来）
-    //     const windowEndAt = new Date();
-    //
-    //     // ✅ 精确兜底：按 orderId + sourceType=ORDER_SETTLEMENT + bizType(结算收益类) 命中
-    //     // ⚠️ bizType 必须是你 Prisma enum WalletBizType 的合法值；这里至少包含你已确认的 SETTLEMENT_EARNING_BASE
-    //     const orphanTxs = await tx.walletTransaction.findMany({
-    //         where: {
-    //             orderId,
-    //             sourceType: 'ORDER_SETTLEMENT',
-    //             bizType: { in: ['SETTLEMENT_EARNING_BASE'] as any }, // ✅ 若你已 import WalletBizType，可改为 WalletBizType.SETTLEMENT_EARNING_BASE
-    //             status: { in: ['FROZEN', 'AVAILABLE'] as any },
-    //             createdAt: { lte: windowEndAt },
-    //
-    //             // ✅ 避免 double rollback：排除“还能被 Step1 回滚的旧 settlementId 那批”
-    //             OR: [{ settlementId: null }, { settlementId: { notIn: oldSettlementIds } }],
-    //         },
-    //         select: {
-    //             id: true,
-    //             userId: true,
-    //             direction: true,
-    //             status: true,
-    //             amount: true,
-    //             settlementId: true,
-    //             bizType: true,
-    //             sourceType: true,
-    //             sourceId: true,
-    //             createdAt: true,
-    //         },
-    //     });
-    //
-    //     // 2.3 回滚残留流水对 WalletAccount 的影响
-    //     const orphanAgg = new Map<number, { availableDelta: number; frozenDelta: number }>();
-    //
-    //     const addDelta = (userId: number, a: number, f: number) => {
-    //         const cur = orphanAgg.get(userId) ?? { availableDelta: 0, frozenDelta: 0 };
-    //         cur.availableDelta = round2(cur.availableDelta + a);
-    //         cur.frozenDelta = round2(cur.frozenDelta + f);
-    //         orphanAgg.set(userId, cur);
-    //     };
-    //
-    //     for (const t of orphanTxs) {
-    //         const amount = Number((t as any).amount ?? 0);
-    //         if (!t.userId || !amount) continue;
-    //
-    //         const status = (t as any).status;
-    //         if (status !== 'FROZEN' && status !== 'AVAILABLE') continue;
-    //
-    //         const sign = (t as any).direction === 'OUT' ? -1 : 1;
-    //         const impact = round2(sign * amount);
-    //
-    //         if (status === 'AVAILABLE') addDelta(t.userId, -impact, 0);
-    //         if (status === 'FROZEN') addDelta(t.userId, 0, -impact);
-    //     }
-    //
-    //     const orphanRollbackResult: any[] = [];
-    //
-    //     for (const [userId, delta] of orphanAgg.entries()) {
-    //         await this.wallet.ensureWalletAccount(userId, tx);
-    //
-    //         const before = await tx.walletAccount.findUnique({
-    //             where: { userId },
-    //             select: { availableBalance: true, frozenBalance: true },
-    //         });
-    //
-    //         const data: any = {};
-    //         if (delta.availableDelta !== 0) {
-    //             data.availableBalance =
-    //                 delta.availableDelta > 0
-    //                     ? { increment: Math.abs(delta.availableDelta) }
-    //                     : { decrement: Math.abs(delta.availableDelta) };
-    //         }
-    //         if (delta.frozenDelta !== 0) {
-    //             data.frozenBalance =
-    //                 delta.frozenDelta > 0
-    //                     ? { increment: Math.abs(delta.frozenDelta) }
-    //                     : { decrement: Math.abs(delta.frozenDelta) };
-    //         }
-    //
-    //         if (Object.keys(data).length === 0) continue;
-    //
-    //         const after = await tx.walletAccount.update({
-    //             where: { userId },
-    //             data,
-    //             select: { availableBalance: true, frozenBalance: true },
-    //         });
-    //
-    //         orphanRollbackResult.push({
-    //             userId,
-    //             rollbackAvailableDelta: delta.availableDelta,
-    //             rollbackFrozenDelta: delta.frozenDelta,
-    //             before,
-    //             after,
-    //         });
-    //     }
-    //
-    //     // =========================
-    //     // Step 3：cleanup（删 settlementId 挂钩数据）
-    //     // =========================
-    //     const cleanupResult = await this.cleanupOrderSettlementSideEffects({ tx, orderId });
-    //
-    //     // =========================
-    //     // Step 4：补删旧 releaseTx
-    //     // - 包含：旧 earningTxIds + 残留兜底 earningTxIds
-    //     // =========================
-    //     const orphanEarningTxIds = orphanTxs.map((t: any) => t.id);
-    //     const earningIdsForReleaseCleanup = Array.from(
-    //         new Set([...(oldEarningTxIds ?? []), ...(orphanEarningTxIds ?? [])]),
-    //     );
-    //
-    //     let deletedOldReleaseTxCount = 0;
-    //     if (earningIdsForReleaseCleanup.length > 0) {
-    //         const r = await tx.walletTransaction.deleteMany({
-    //             where: {
-    //                 sourceType: 'WALLET_HOLD_RELEASE',
-    //                 sourceId: { in: earningIdsForReleaseCleanup },
-    //                 NOT: { status: 'REVERSED' as any },
-    //             },
-    //         });
-    //         deletedOldReleaseTxCount = r?.count ?? 0;
-    //     }
-    //
-    //     // =========================
-    //     // Step 5：删残留兜底流水（sourceType/bizType 命中的那批）
-    //     // =========================
-    //     const orphanTxIds = orphanTxs.map((t: any) => t.id);
-    //
-    //     let deletedOrphanTxCount = 0;
-    //     if (orphanTxIds.length > 0) {
-    //         const r = await tx.walletTransaction.deleteMany({
-    //             where: { id: { in: orphanTxIds } },
-    //         });
-    //         deletedOrphanTxCount = r?.count ?? 0;
-    //     }
-    //
-    //     // =========================
-    //     // Step 6：重建 settlement + 新流水
-    //     // =========================
-    //     const settlementCreateData = settlementsToCreate
-    //         .filter((s: any) => {
-    //             if (!s?.userId) return false;
-    //             if (!s?.dispatchId) throw new BadRequestException(`settlementsToCreate 缺 dispatchId：userId=${s.userId}`);
-    //             return true;
-    //         })
-    //         .map((s: any) => ({
-    //             orderId,
-    //             dispatchId: Number(s.dispatchId),
-    //             userId: Number(s.userId),
-    //             settlementType: s.settlementType,
-    //             calculatedEarnings: s.calculatedEarnings,
-    //             manualAdjustment: s.manualAdjustment,
-    //             finalEarnings: s.finalEarnings,
-    //             settlementBatchId,
-    //             paymentStatus: 'UNPAID',
-    //         }));
-    //
-    //     if (!settlementCreateData.length) {
-    //         throw new BadRequestException('settlementsToCreate 为空或缺少 userId/dispatchId，无法重建');
-    //     }
-    //     const keys = settlementCreateData.map(s =>
-    //         `${s.dispatchId}_${s.userId}_${s.settlementType}`
-    //     );
-    //
-    //     const dupKeys = keys.filter((k, i) => keys.indexOf(k) !== i);
-    //
-    //     await tx.orderSettlement.createMany({ data: settlementCreateData as any });
-    //
-    //     const createdSettlements = await tx.orderSettlement.findMany({
-    //         where: { orderId, settlementBatchId },
-    //         select: { id: true, userId: true, dispatchId: true, finalEarnings: true },
-    //     });
-    //
-    //     if (createdSettlements.length !== settlementCreateData.length) {
-    //         throw new BadRequestException(
-    //             `重建结算条数不一致：期望=${settlementCreateData.length}, 实际=${createdSettlements.length}`,
-    //         );
-    //     }
-    //
-    //     for (const s of createdSettlements) {
-    //         await this.wallet.applySettlementEarningToWalletV2({
-    //             tx,
-    //             userId: s.userId,
-    //             settlementId: s.id,
-    //             orderId,
-    //             dispatchId: s.dispatchId,
-    //             finalEarnings: Number(s.finalEarnings ?? 0),
-    //             unlockAt,
-    //             freezeWhenPositive: true,
-    //         });
-    //     }
-    //
-    //     // =========================
-    //     // 最终断言：不应再存在“旧的 ORDER_SETTLEMENT + SETTLEMENT_EARNING_BASE”残留
-    //     // - 注意：新流水也会产生同类 bizType/sourceType，所以必须限定 settlementId 属于“本次新建”
-    //     // =========================
-    //     const createdSettlementIds = createdSettlements.map((s: any) => s.id);
-    //
-    //     const remainSuspect = await tx.walletTransaction.count({
-    //         where: {
-    //             orderId,
-    //             sourceType: 'ORDER_SETTLEMENT',
-    //             bizType: { in: ['SETTLEMENT_EARNING_BASE'] as any },
-    //             status: { in: ['FROZEN', 'AVAILABLE'] as any },
-    //             createdAt: { lte: new Date() },
-    //             OR: [{ settlementId: null }, { settlementId: { notIn: createdSettlementIds } }],
-    //         },
-    //     });
-    //
-    //     if (remainSuspect > 0) {
-    //         throw new BadRequestException(`修复后仍存在旧结算残留流水 remain=${remainSuspect}`);
-    //     }
-    //
-    //     // =========================
-    //     // 写审计日志
-    //     // =========================
-    //     await this.writeUserLog(tx, {
-    //         userId: operatorId,
-    //         action: 'REPAIR_WALLET_BY_SETTLEMENTS_V2',
-    //         targetType: 'ORDER',
-    //         targetId: orderId,
-    //         oldData: {
-    //             oldSettlementIds,
-    //             rollbackSettlementResult,
-    //             cleanupResult,
-    //             orphanRollbackResult,
-    //             deletedOldReleaseTxCount,
-    //             deletedOrphanTxCount,
-    //             reason: reason ?? null,
-    //         } as any,
-    //         newData: {
-    //             settlementBatchId,
-    //             rebuiltSettlementCount: createdSettlements.length,
-    //             freezeDays: freezeInfo.freezeDays,
-    //             freezeStartAt: freezeInfo.freezeStartAt,
-    //             freezeEndAt: freezeInfo.freezeEndAt,
-    //         } as any,
-    //         remark: `历史结算修复+结算收益残留治理（V2,batch=${settlementBatchId}）`,
-    //     });
-    //
-    //     return {
-    //         mode: 'APPLY_REPAIR_V2',
-    //         orderId,
-    //         settlementBatchId,
-    //         cleanupResult,
-    //         rebuiltSettlementCount: createdSettlements.length,
-    //         freezeDays: freezeInfo.freezeDays,
-    //         freezeStartAt: freezeInfo.freezeStartAt,
-    //         freezeEndAt: freezeInfo.freezeEndAt,
-    //         rollbackSettlementResult,
-    //         orphanRollbackResult,
-    //         deletedOldReleaseTxCount,
-    //         deletedOrphanTxCount,
-    //     };
-    // }
-
-    /**
      * applyRepair V2：
      * 使用缓存的 settlementsToCreate 执行“保留旧数据 + 冲正旧钱包影响 + 重建 settlement + 写新钱包流水”
      * - 不重新 compute
@@ -2577,7 +1991,7 @@ export class OrdersService {
         // =========================
         // Step 2：执行冲正流水（旧主收益 / 旧解冻流水）
         // - 修复类流水统一不冻结
-        // =========================
+        // =========================Î
         const reversalApplyResults: any[] = [];
 
         for (const plan of rollbackSettlementResult.reversalPlans ?? []) {
@@ -4329,6 +3743,218 @@ export class OrdersService {
                 order: {select: {id: true, autoSerial: true, status: true}},
             },
         });
+    }
+
+
+    async rollbackWrongSettlementReversals(orderId: number) {
+        const oid = Number(orderId);
+        if (!oid) {
+            throw new BadRequestException('orderId 非法');
+        }
+
+        return await this.prisma.$transaction(async (tx) => {
+            return await this.rollbackWrongSettlementReversalsByOrderId({
+                tx,
+                orderId: oid,
+            });
+        });
+    }
+
+
+    //反修复流水冲正方法(一次性 3-16)
+    async rollbackWrongSettlementReversalsByOrderId(params: {
+        tx: any;
+        orderId: number;
+    }) {
+        const { tx, orderId } = params;
+
+        const oid = Number(orderId);
+        if (!oid) {
+            throw new BadRequestException('orderId 非法');
+        }
+
+        /**
+         * 一次性找出当前订单下两类“错误修复流水”
+         * 1) SETTLEMENT_REVERSAL
+         * 2) SETTLEMENT_RECALC
+         *
+         * 当前是临时止血逻辑：
+         * 默认认为该订单下现存的这两类流水，都是本次错误修复产生的脏数据
+         */
+        const wrongTxs = await tx.walletTransaction.findMany({
+            where: {
+                orderId: oid,
+                OR: [
+                    {
+                        bizType: 'SETTLEMENT_REVERSAL',
+                        sourceType: {
+                            in: [
+                                'ORDER_SETTLEMENT_REVERSAL',
+                                'WALLET_HOLD_RELEASE_REVERSAL',
+                            ],
+                        },
+                    },
+                    {
+                        bizType: 'SETTLEMENT_RECALC',
+                    },
+                ],
+            },
+            select: {
+                id: true,
+                userId: true,
+                amount: true,
+                direction: true,
+                status: true,
+                orderId: true,
+                dispatchId: true,
+                settlementId: true,
+                sourceType: true,
+                sourceId: true,
+                bizType: true,
+            },
+            orderBy: { id: 'asc' },
+        });
+
+        if (!wrongTxs.length) {
+            return {
+                success: true,
+                orderId: oid,
+                count: 0,
+                createdIds: [],
+                reversalRollbackCount: 0,
+                recalcRollbackCount: 0,
+                message: '未找到可反修复的错误流水',
+            };
+        }
+
+        const createdIds: number[] = [];
+        let reversalRollbackCount = 0;
+        let recalcRollbackCount = 0;
+
+        for (const t of wrongTxs) {
+            const txId = Number(t.id);
+            const userId = Number(t.userId ?? 0);
+            const amount = round2(Number(t.amount ?? 0));
+
+            if (!txId || !userId || !amount) continue;
+
+            // ✅ 按不同 bizType 决定回滚流水的 sourceType / bizType
+            let rollbackSourceType = '';
+            let rollbackBizType = '';
+
+            if (String(t.bizType) === 'SETTLEMENT_REVERSAL') {
+                rollbackSourceType = 'SETTLEMENT_REVERSAL_ROLLBACK';
+                rollbackBizType = 'SETTLEMENT_REVERSAL';
+            } else if (String(t.bizType) === 'SETTLEMENT_RECALC') {
+                rollbackSourceType = 'SETTLEMENT_RECALC_ROLLBACK';
+                rollbackBizType = 'SETTLEMENT_RECALC';
+            } else {
+                continue;
+            }
+
+            // ✅ 幂等防重：同一条错误流水只允许反修复一次
+            const existedRollbackTx = await tx.walletTransaction.findUnique({
+                where: {
+                    sourceType_sourceId: {
+                        sourceType: rollbackSourceType,
+                        sourceId: txId,
+                    },
+                },
+                select: { id: true },
+            });
+            if (existedRollbackTx?.id) {
+                continue;
+            }
+
+            const account = await tx.walletAccount.findUnique({
+                where: { userId },
+                select: {
+                    id: true,
+                    availableBalance: true,
+                    frozenBalance: true,
+                },
+            });
+
+            if (!account) {
+                throw new BadRequestException(`钱包账户不存在，userId=${userId}`);
+            }
+
+            // 原流水是 OUT，就补 IN；原流水是 IN，就补 OUT
+            const reverseDirection = String(t.direction) === 'OUT' ? 'IN' : 'OUT';
+
+            let newAvailable = round2(Number(account.availableBalance ?? 0));
+            let newFrozen = round2(Number(account.frozenBalance ?? 0));
+
+            // ✅ 跟着原错误流水所影响的余额侧反向抵消
+            if (String(t.status) === 'FROZEN') {
+                newFrozen =
+                    reverseDirection === 'IN'
+                        ? round2(newFrozen + amount)
+                        : round2(newFrozen - amount);
+            } else {
+                newAvailable =
+                    reverseDirection === 'IN'
+                        ? round2(newAvailable + amount)
+                        : round2(newAvailable - amount);
+            }
+
+            if (newAvailable < 0 || newFrozen < 0) {
+                throw new BadRequestException(
+                    `反修复后余额将变为负数，已阻断。txId=${txId}, bizType=${t.bizType}, userId=${userId}, available=${newAvailable}, frozen=${newFrozen}`,
+                );
+            }
+
+            // 1) 更新账户余额
+            await tx.walletAccount.update({
+                where: { userId },
+                data: {
+                    availableBalance: newAvailable,
+                    frozenBalance: newFrozen,
+                },
+            });
+
+            // 2) 写入反修复流水
+            const created = await tx.walletTransaction.create({
+                data: {
+                    userId,
+                    direction: reverseDirection,
+                    bizType: rollbackBizType,
+                    amount,
+                    status: t.status,
+
+                    availableAfter: newAvailable,
+                    frozenAfter: newFrozen,
+
+                    sourceType: rollbackSourceType,
+                    sourceId: txId,
+
+                    orderId: t.orderId ?? oid,
+                    dispatchId: t.dispatchId ?? null,
+                    settlementId: t.settlementId ?? null,
+
+                    reversalOfTxId: txId,
+                },
+                select: { id: true },
+            });
+
+            createdIds.push(Number(created.id));
+
+            if (String(t.bizType) === 'SETTLEMENT_REVERSAL') {
+                reversalRollbackCount += 1;
+            } else if (String(t.bizType) === 'SETTLEMENT_RECALC') {
+                recalcRollbackCount += 1;
+            }
+        }
+
+        return {
+            success: true,
+            orderId: oid,
+            count: createdIds.length,
+            createdIds,
+            reversalRollbackCount,
+            recalcRollbackCount,
+            rollbackSourceTxIds: wrongTxs.map((t: any) => Number(t.id)),
+        };
     }
 
     /**

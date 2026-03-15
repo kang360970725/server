@@ -2246,178 +2246,180 @@ export class WalletService {
     }
 
 
-
-    /**
-     * 修复专用：回滚“某订单历史结算相关流水”对 WalletAccount 的余额影响（事务内）
-     * 用途：全局余额场景下，必须先回滚旧影响，再删除旧流水，再重建新流水
-     */
-    async rollbackOrderWalletImpactInTxV1(params: {
-        tx: any;
-        settlementIds: number[]; // 该订单下所有 OrderSettlement.id
-    })
-    {
-        const { tx, settlementIds } = params;
-
-        const ids = Array.from(new Set((settlementIds || []).filter(Boolean)));
-        if (ids.length === 0) {
-            return { affectedUsers: 0, rolledBack: [] as any[], txCount: 0, releaseTxCount: 0 };
-        }
-
-        // 1) settlementId 关联流水（earningTx 等）
-        const baseTxs = await tx.walletTransaction.findMany({
-            where: {
-                settlementId: { in: ids },
-                NOT: { status: 'REVERSED' },
-            },
-            select: {
-                id: true,
-                userId: true,
-                direction: true, // IN/OUT
-                status: true,    // FROZEN/AVAILABLE（earningTx 可能被改）
-                amount: true,
-            },
-        });
-
-        const earningTxIds = baseTxs.map((t: any) => t.id).filter(Boolean);
-
-        // 2) 对应 releaseTx（sourceId = earningTxId）
-        let releaseTxs: any[] = [];
-        if (earningTxIds.length > 0) {
-            releaseTxs = await tx.walletTransaction.findMany({
-                where: {
-                    sourceType: 'WALLET_HOLD_RELEASE',
-                    sourceId: { in: earningTxIds },
-                    NOT: { status: 'REVERSED' },
-                },
-                select: {
-                    id: true,
-                    userId: true,
-                    direction: true, // 通常 IN
-                    status: true,    // AVAILABLE
-                    amount: true,
-                    sourceId: true,  // earningTxId
-                },
-            });
-        }
-
-        const releasedEarningTxIdSet = new Set<number>(
-            releaseTxs.map((t: any) => Number(t.sourceId)).filter(Boolean),
-        );
-
-        // 3) 汇总每个 user 的回滚 delta（回滚=把当初影响取反）
-        const agg = new Map<number, { availableDelta: number; frozenDelta: number }>();
-
-        const add = (userId: number, aDelta: number, fDelta: number) => {
-            const cur = agg.get(userId) ?? { availableDelta: 0, frozenDelta: 0 };
-            cur.availableDelta = round2(cur.availableDelta + aDelta);
-            cur.frozenDelta = round2(cur.frozenDelta + fDelta);
-            agg.set(userId, cur);
-        };
-
-        // 3.1 earningTx：如果有 releaseTx，视为“当初进 frozen”
-        for (const t of baseTxs) {
-            const userId = t.userId;
-            const amount = round2(Number(t.amount ?? 0));
-            if (!userId || !amount) continue;
-
-            const sign = t.direction === 'OUT' ? -1 : 1;
-            const impact = sign * amount; // 当初的余额影响量
-
-            const wasFrozenAtCreate = releasedEarningTxIdSet.has(Number(t.id));
-
-            if (wasFrozenAtCreate) {
-                // 当初：frozen += impact  => 回滚：frozen -= impact
-                add(userId, 0, -impact);
-            } else {
-                // 没有 release 记录：按当前 status 回滚（保守）
-                if (t.status === 'FROZEN') add(userId, 0, -impact);
-                else if (t.status === 'AVAILABLE') add(userId, -impact, 0);
-            }
-        }
-
-        // 3.2 releaseTx：当初是 available += impact 且 frozen -= impact
-        for (const t of releaseTxs) {
-            const userId = t.userId;
-            const amount = round2(Number(t.amount ?? 0));
-            if (!userId || !amount) continue;
-
-            const sign = t.direction === 'OUT' ? -1 : 1;
-            const impact = sign * amount;
-
-            // 回滚：available -= impact，frozen += impact
-            add(userId, -impact, +impact);
-        }
-
-        // 4) 应用到 WalletAccount，并记录 before/after
-        const rolledBack: any[] = [];
-
-        for (const [userId, delta] of agg.entries()) {
-            await this.ensureWalletAccount(userId, tx as any);
-
-            const before = await tx.walletAccount.findUnique({
-                where: { userId },
-                select: { availableBalance: true, frozenBalance: true },
-            });
-
-            const data: any = {};
-            if (delta.availableDelta !== 0) {
-                data.availableBalance =
-                    delta.availableDelta > 0
-                        ? { increment: Math.abs(delta.availableDelta) }
-                        : { decrement: Math.abs(delta.availableDelta) };
-            }
-            if (delta.frozenDelta !== 0) {
-                data.frozenBalance =
-                    delta.frozenDelta > 0
-                        ? { increment: Math.abs(delta.frozenDelta) }
-                        : { decrement: Math.abs(delta.frozenDelta) };
-            }
-            if (Object.keys(data).length === 0) continue;
-
-            const after = await tx.walletAccount.update({
-                where: { userId },
-                data,
-                select: { availableBalance: true, frozenBalance: true },
-            });
-
-            rolledBack.push({
-                userId,
-                rollbackAvailableDelta: delta.availableDelta,
-                rollbackFrozenDelta: delta.frozenDelta,
-                before: {
-                    availableBalance: Number(before?.availableBalance ?? 0),
-                    frozenBalance: Number(before?.frozenBalance ?? 0),
-                },
-                after: {
-                    availableBalance: Number(after.availableBalance ?? 0),
-                    frozenBalance: Number(after.frozenBalance ?? 0),
-                },
-            });
-        }
-
-        return {
-            affectedUsers: rolledBack.length,
-            txCount: baseTxs.length,
-            releaseTxCount: releaseTxs.length,
-            rolledBack,
-            earningTxIds, // 方便你后续删旧 releaseTx
-            releaseTxIds: releaseTxs.map((t: any) => t.id),
-        };
-    }
-
     /**
      * 修复专用 V2：不直接回滚 WalletAccount
      * - 只识别“结算主流水” + “对应 releaseTx”
      * - 生成 reversalPlans（冲正计划），由外层统一写入 SETTLEMENT_REVERSAL 流水
      * - 旧流水保留，不删除
      */
+    // async rollbackOrderWalletImpactInTxV2(params: {
+    //     tx: any;
+    //     settlementIds: number[]; // 该订单下所有 OrderSettlement.id
+    // })
+    // {
+    //     const { tx, settlementIds } = params;
+    //
+    //     const ids = Array.from(new Set((settlementIds || []).filter(Boolean)));
+    //     if (ids.length === 0) {
+    //         return {
+    //             affectedUsers: 0,
+    //             txCount: 0,
+    //             releaseTxCount: 0,
+    //             earningTxIds: [] as number[],
+    //             releaseTxIds: [] as number[],
+    //             reversalPlans: [] as any[],
+    //         };
+    //     }
+    //
+    //     // 1) 只取“结算主流水”
+    //     //    ⚠️ 不再按 settlementId 扫全部流水，避免把 releaseTx / 其他衍生流水重复算进去
+    //     const baseTxs = await tx.walletTransaction.findMany({
+    //         where: {
+    //             sourceType: 'ORDER_SETTLEMENT',
+    //             sourceId: { in: ids },
+    //             NOT: { status: 'REVERSED' },
+    //         },
+    //         select: {
+    //             id: true,
+    //             userId: true,
+    //             direction: true, // IN/OUT
+    //             status: true,    // FROZEN/AVAILABLE
+    //             amount: true,
+    //             sourceId: true,  // settlementId
+    //             settlementId: true,
+    //             orderId: true,
+    //             dispatchId: true,
+    //             bizType: true,
+    //         },
+    //     });
+    //
+    //     const earningTxIds = baseTxs.map((t: any) => Number(t.id)).filter(Boolean);
+    //
+    //     // 2) 对应 releaseTx（sourceId = earningTxId）
+    //     let releaseTxs: any[] = [];
+    //     if (earningTxIds.length > 0) {
+    //         releaseTxs = await tx.walletTransaction.findMany({
+    //             where: {
+    //                 sourceType: 'WALLET_HOLD_RELEASE',
+    //                 sourceId: { in: earningTxIds },
+    //                 NOT: { status: 'REVERSED' },
+    //             },
+    //             select: {
+    //                 id: true,
+    //                 userId: true,
+    //                 direction: true,
+    //                 status: true,
+    //                 amount: true,
+    //                 sourceId: true, // earningTxId
+    //                 bizType: true,
+    //             },
+    //         });
+    //     }
+    //
+    //     const releaseTxMap = new Map<number, any[]>();
+    //     for (const r of releaseTxs) {
+    //         const earningTxId = Number(r.sourceId ?? 0);
+    //         if (!earningTxId) continue;
+    //         const arr = releaseTxMap.get(earningTxId) ?? [];
+    //         arr.push(r);
+    //         releaseTxMap.set(earningTxId, arr);
+    //     }
+    //
+    //     const reversalPlans: any[] = [];
+    //
+    //     // 3.1 主收益流水 reversal plan
+    //     for (const t of baseTxs) {
+    //         const userId = Number(t.userId ?? 0);
+    //         const amount = round2(Number(t.amount ?? 0));
+    //         if (!userId || !amount) continue;
+    //
+    //         const originalDirection = String(t.direction);
+    //         const reversalDirection = originalDirection === 'OUT' ? 'IN' : 'OUT';
+    //
+    //         reversalPlans.push({
+    //             kind: 'EARNING_TX_REVERSAL',
+    //
+    //             userId,
+    //             orderId: t.orderId ?? null,
+    //             dispatchId: t.dispatchId ?? null,
+    //             settlementId: t.settlementId ?? null,
+    //
+    //             sourceTxId: t.id,
+    //             sourceSettlementId: Number(t.sourceId ?? t.settlementId ?? 0),
+    //
+    //             finalEarnings: reversalDirection === 'IN' ? amount : -amount,
+    //             amount,
+    //
+    //             direction: reversalDirection,
+    //             statusHint: t.status, // 原流水是 FROZEN / AVAILABLE
+    //             bizType: 'SETTLEMENT_REVERSAL',
+    //
+    //             sourceTypeOverride: 'ORDER_SETTLEMENT_REVERSAL',
+    //             sourceIdOverride: Number(t.id),
+    //
+    //             note: `冲正旧结算主流水 txId=${t.id}`,
+    //         });
+    //     }
+    //
+    //     // 3.2 releaseTx reversal plan
+    //     // release 本质是 frozen -> available 的内部迁移
+    //     // 修复时需要反向做一笔 AVAILABLE 反向流水，抵消 release 对 available 的影响
+    //     for (const r of releaseTxs) {
+    //         const userId = Number(r.userId ?? 0);
+    //         const amount = round2(Number(r.amount ?? 0));
+    //         if (!userId || !amount) continue;
+    //
+    //         const originalDirection = String(r.direction);
+    //         const reversalDirection = originalDirection === 'OUT' ? 'IN' : 'OUT';
+    //
+    //         reversalPlans.push({
+    //             kind: 'RELEASE_TX_REVERSAL',
+    //
+    //             userId,
+    //             orderId: null,
+    //             dispatchId: null,
+    //             settlementId: null,
+    //
+    //             sourceTxId: r.id,
+    //             sourceSettlementId: null,
+    //
+    //             finalEarnings: reversalDirection === 'IN' ? amount : -amount,
+    //             amount,
+    //
+    //             direction: reversalDirection,
+    //             statusHint: 'AVAILABLE', // release 影响的是 available
+    //             bizType: 'SETTLEMENT_REVERSAL',
+    //
+    //             sourceTypeOverride: 'WALLET_HOLD_RELEASE_REVERSAL',
+    //             sourceIdOverride: Number(r.id),
+    //
+    //             note: `冲正旧解冻流水 txId=${r.id}, earningTxId=${r.sourceId}`,
+    //         });
+    //     }
+    //
+    //     // 4) 统计信息（仅返回计划，不直接改余额）
+    //     const affectedUserIdSet = new Set<number>(
+    //         reversalPlans.map((p: any) => Number(p.userId)).filter(Boolean),
+    //     );
+    //
+    //     return {
+    //         affectedUsers: affectedUserIdSet.size,
+    //         txCount: baseTxs.length,
+    //         releaseTxCount: releaseTxs.length,
+    //         earningTxIds,
+    //         releaseTxIds: releaseTxs.map((t: any) => t.id),
+    //         reversalPlans,
+    //     };
+    // }
+
     async rollbackOrderWalletImpactInTxV2(params: {
         tx: any;
-        settlementIds: number[]; // 该订单下所有 OrderSettlement.id
+        settlementIds: number[];
     }) {
         const { tx, settlementIds } = params;
 
-        const ids = Array.from(new Set((settlementIds || []).filter(Boolean)));
+        const ids = Array.from(new Set((settlementIds || []).map(Number).filter(Boolean)));
+
         if (ids.length === 0) {
             return {
                 affectedUsers: 0,
@@ -2429,21 +2431,38 @@ export class WalletService {
             };
         }
 
-        // 1) 只取“结算主流水”
-        //    ⚠️ 不再按 settlementId 扫全部流水，避免把 releaseTx / 其他衍生流水重复算进去
+        // ✅ 只认真正“结算主流水”的 bizType
+        const MAIN_SETTLEMENT_BIZ_TYPES = [
+            'SETTLEMENT_EARNING',
+            'SETTLEMENT_EARNING_BASE',
+            'SETTLEMENT_EARNING_CARRY',
+            'SETTLEMENT_BOMB_LOSS',
+            'SETTLEMENT_EARNING_CS',
+        ];
+
+        /**
+         * Step 1：只取“结算主流水”
+         * - sourceType 必须是 ORDER_SETTLEMENT
+         * - bizType 必须是主收益白名单
+         * - 排除已经 REVERSED 的流水
+         *
+         * 目的：
+         * - 不把 release / reversal / recalc / rollback 之类混进主流水集合
+         */
         const baseTxs = await tx.walletTransaction.findMany({
             where: {
                 sourceType: 'ORDER_SETTLEMENT',
                 sourceId: { in: ids },
+                bizType: { in: MAIN_SETTLEMENT_BIZ_TYPES },
                 NOT: { status: 'REVERSED' },
             },
             select: {
                 id: true,
                 userId: true,
-                direction: true, // IN/OUT
-                status: true,    // FROZEN/AVAILABLE
+                direction: true,
+                status: true, // FROZEN / AVAILABLE
                 amount: true,
-                sourceId: true,  // settlementId
+                sourceId: true, // settlementId
                 settlementId: true,
                 orderId: true,
                 dispatchId: true,
@@ -2453,13 +2472,19 @@ export class WalletService {
 
         const earningTxIds = baseTxs.map((t: any) => Number(t.id)).filter(Boolean);
 
-        // 2) 对应 releaseTx（sourceId = earningTxId）
+        /**
+         * Step 2：查这些主流水对应的 releaseTx
+         * - sourceType = WALLET_HOLD_RELEASE
+         * - sourceId   = earningTxId
+         * - bizType    = RELEASE_FROZEN
+         */
         let releaseTxs: any[] = [];
         if (earningTxIds.length > 0) {
             releaseTxs = await tx.walletTransaction.findMany({
                 where: {
                     sourceType: 'WALLET_HOLD_RELEASE',
                     sourceId: { in: earningTxIds },
+                    bizType: 'RELEASE_FROZEN',
                     NOT: { status: 'REVERSED' },
                 },
                 select: {
@@ -2474,6 +2499,11 @@ export class WalletService {
             });
         }
 
+        /**
+         * releaseTxMap:
+         * key   = earningTxId
+         * value = 对应的 releaseTx 列表
+         */
         const releaseTxMap = new Map<number, any[]>();
         for (const r of releaseTxs) {
             const earningTxId = Number(r.sourceId ?? 0);
@@ -2485,7 +2515,17 @@ export class WalletService {
 
         const reversalPlans: any[] = [];
 
-        // 3.1 主收益流水 reversal plan
+        /**
+         * Step 3.1：主收益流水 reversal plan
+         *
+         * 关键修复：
+         * - 如果该主收益已经存在 releaseTx，说明它的 available 侧影响应由 release reversal 抵消
+         * - 此时主收益 reversal 必须固定回 frozen 侧，不能再按 t.status=AVAILABLE 去冲 available
+         *
+         * 规则：
+         * - hasRelease = true  -> statusHint = FROZEN
+         * - hasRelease = false -> statusHint = t.status
+         */
         for (const t of baseTxs) {
             const userId = Number(t.userId ?? 0);
             const amount = round2(Number(t.amount ?? 0));
@@ -2493,6 +2533,13 @@ export class WalletService {
 
             const originalDirection = String(t.direction);
             const reversalDirection = originalDirection === 'OUT' ? 'IN' : 'OUT';
+
+            const relatedReleaseTxs = releaseTxMap.get(Number(t.id)) ?? [];
+            const hasRelease = relatedReleaseTxs.length > 0;
+
+            // ✅ 已解冻主收益：主流水 reversal 固定回 frozen
+            // ✅ 未解冻主收益：按原主流水当前状态处理
+            const mainTxStatusHint = hasRelease ? 'FROZEN' : t.status;
 
             reversalPlans.push({
                 kind: 'EARNING_TX_REVERSAL',
@@ -2502,26 +2549,29 @@ export class WalletService {
                 dispatchId: t.dispatchId ?? null,
                 settlementId: t.settlementId ?? null,
 
-                sourceTxId: t.id,
+                sourceTxId: Number(t.id),
                 sourceSettlementId: Number(t.sourceId ?? t.settlementId ?? 0),
 
                 finalEarnings: reversalDirection === 'IN' ? amount : -amount,
                 amount,
-
                 direction: reversalDirection,
-                statusHint: t.status, // 原流水是 FROZEN / AVAILABLE
+
+                statusHint: mainTxStatusHint,
                 bizType: 'SETTLEMENT_REVERSAL',
 
                 sourceTypeOverride: 'ORDER_SETTLEMENT_REVERSAL',
                 sourceIdOverride: Number(t.id),
 
-                note: `冲正旧结算主流水 txId=${t.id}`,
+                note: `冲正旧结算主流水 txId=${t.id}, bizType=${t.bizType}, hasRelease=${hasRelease}`,
             });
         }
 
-        // 3.2 releaseTx reversal plan
-        // release 本质是 frozen -> available 的内部迁移
-        // 修复时需要反向做一笔 AVAILABLE 反向流水，抵消 release 对 available 的影响
+        /**
+         * Step 3.2：releaseTx reversal plan
+         *
+         * release 的本质是 frozen -> available 的内部迁移
+         * 所以反向时，只抵消 available 侧影响
+         */
         for (const r of releaseTxs) {
             const userId = Number(r.userId ?? 0);
             const amount = round2(Number(r.amount ?? 0));
@@ -2538,14 +2588,15 @@ export class WalletService {
                 dispatchId: null,
                 settlementId: null,
 
-                sourceTxId: r.id,
+                sourceTxId: Number(r.id),
                 sourceSettlementId: null,
 
                 finalEarnings: reversalDirection === 'IN' ? amount : -amount,
                 amount,
-
                 direction: reversalDirection,
-                statusHint: 'AVAILABLE', // release 影响的是 available
+
+                // ✅ release 只影响 available
+                statusHint: 'AVAILABLE',
                 bizType: 'SETTLEMENT_REVERSAL',
 
                 sourceTypeOverride: 'WALLET_HOLD_RELEASE_REVERSAL',
@@ -2555,7 +2606,6 @@ export class WalletService {
             });
         }
 
-        // 4) 统计信息（仅返回计划，不直接改余额）
         const affectedUserIdSet = new Set<number>(
             reversalPlans.map((p: any) => Number(p.userId)).filter(Boolean),
         );
@@ -2565,10 +2615,12 @@ export class WalletService {
             txCount: baseTxs.length,
             releaseTxCount: releaseTxs.length,
             earningTxIds,
-            releaseTxIds: releaseTxs.map((t: any) => t.id),
+            releaseTxIds: releaseTxs.map((t: any) => Number(t.id)),
             reversalPlans,
         };
     }
+
+
 
     async uploadWithdrawQrCodeOnce(params: { userId: number; file: any }) {
         const { userId, file } = params;
