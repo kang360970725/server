@@ -3898,11 +3898,11 @@ export class OrdersService {
                         : round2(newAvailable - amount);
             }
 
-            if (newAvailable < 0 || newFrozen < 0) {
-                throw new BadRequestException(
-                    `反修复后余额将变为负数，已阻断。txId=${txId}, bizType=${t.bizType}, userId=${userId}, available=${newAvailable}, frozen=${newFrozen}`,
-                );
-            }
+            // if (newAvailable < 0 || newFrozen < 0) {
+            //     throw new BadRequestException(
+            //         `反修复后余额将变为负数，已阻断。txId=${txId}, bizType=${t.bizType}, userId=${userId}, available=${newAvailable}, frozen=${newFrozen}`,
+            //     );
+            // }
 
             // 1) 更新账户余额
             await tx.walletAccount.update({
