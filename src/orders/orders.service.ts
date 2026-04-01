@@ -4140,4 +4140,267 @@ export class OrdersService {
         }
         return ratioMap;
     }
+
+
+    /**
+     * 业绩板块方法
+     * */
+    private toYmd(date?: Date | string | null) {
+        const d = date ? new Date(date) : new Date();
+        const y = d.getFullYear();
+        const m = `${d.getMonth() + 1}`.padStart(2, '0');
+        const day = `${d.getDate()}`.padStart(2, '0');
+        return `${y}-${m}-${day}`;
+    }
+
+    private toYm(date?: Date | string | null) {
+        const d = date ? new Date(date) : new Date();
+        const y = d.getFullYear();
+        const m = `${d.getMonth() + 1}`.padStart(2, '0');
+        return `${y}-${m}`;
+    }
+
+    private toDecimal2(v: any) {
+        const n = Number(v ?? 0);
+        if (!Number.isFinite(n)) return 0;
+        return Math.round(n * 100) / 100;
+    }
+
+    private getOrderTypeFromOrder(order: any): any {
+        const snapshot: any = order?.projectSnapshot || {};
+        return snapshot?.type ?? order?.project?.type ?? null;
+    }
+
+    private getProjectIdFromOrder(order: any): number | null {
+        return Number(order?.projectId ?? 0) || null;
+    }
+
+    private getCustomerUserIdFromOrder(order: any): number | null {
+        return Number(order?.customerUserId ?? 0) || null;
+    }
+
+    private getBizLineFromOrder(order: any): string | null {
+        const snapshot: any = order?.projectSnapshot || {};
+        return snapshot?.bizLine ?? snapshot?.businessType ?? null;
+    }
+
+    private isRefundedOrder(order: any) {
+        return order?.status === OrderStatus.REFUNDED;
+    }
+
+    private isBombBySettlement(s: any) {
+        return Number(s?.finalEarnings ?? 0) < 0;
+    }
+
+    /**
+     * 生成业绩记录（先删后插，保证同一订单幂等重建）
+     */
+    private async rebuildPerformanceRecordsForOrder(params: {
+        tx: any;
+        order: any;
+        settlements: any[];
+    }) {
+        const { tx, order, settlements } = params;
+
+        const statsBaseDate =
+            order?.paymentTime ||
+            order?.updatedAt ||
+            order?.createdAt ||
+            new Date();
+
+        const statsDate = new Date(this.toYmd(statsBaseDate));
+        const statsMonth = this.toYm(statsBaseDate);
+        const billingMode = this.getBillingModeFromOrder(order) ?? null;
+        const orderType = this.getOrderTypeFromOrder(order) ?? null;
+        const projectId = this.getProjectIdFromOrder(order);
+        const bizLine = this.getBizLineFromOrder(order);
+
+        const completedDispatchIds = new Set(
+            (order?.dispatches ?? [])
+                .filter((d: any) => d?.status === DispatchStatus.COMPLETED)
+                .map((d: any) => Number(d.id)),
+        );
+
+        const archivedDispatchIds = new Set(
+            (order?.dispatches ?? [])
+                .filter((d: any) => d?.status === DispatchStatus.ARCHIVED)
+                .map((d: any) => Number(d.id)),
+        );
+
+        const rows = (settlements || []).map((s: any) => {
+            const settlementType = String(s?.settlementType || '');
+            const isCs = settlementType === 'CUSTOMER_SERVICE';
+
+            const gross = this.toDecimal2(
+                isCs ? Number(s?.calculatedEarnings ?? 0) : Number(s?.calculatedEarnings ?? 0),
+            );
+            const net = this.toDecimal2(Number(s?.finalEarnings ?? 0));
+            const negative = net < 0 ? Math.abs(net) : 0;
+
+            let ownerRoleType: any = 'PLAYER';
+            if (isCs) ownerRoleType = 'CS';
+
+            return {
+                orderId: Number(order.id),
+                dispatchId: s?.dispatchId ? Number(s.dispatchId) : null,
+                settlementId: s?.id ? Number(s.id) : null,
+
+                ownerUserId: Number(s.userId),
+                ownerRoleType,
+
+                statsDate,
+                statsMonth,
+
+                billingMode,
+                orderType,
+                projectId,
+                bizLine,
+
+                grossPerformanceAmount: gross,
+                netIncomeAmount: net,
+                negativeIncomeAmount: negative,
+
+                contributionBaseAmount: gross,
+                commissionRate: null,
+
+                isAccepted: true,
+                isArchived: archivedDispatchIds.has(Number(s?.dispatchId)),
+                isCompleted: completedDispatchIds.has(Number(s?.dispatchId)),
+                isBombed: this.isBombBySettlement(s),
+                isComplained: false,
+                isAfterSale: false,
+                isCancelled: this.isRefundedOrder(order),
+
+                complaintOrderAmount: 0,
+                complaintPenaltyAmount: 0,
+
+                remark: null,
+                status: 'EFFECTIVE' as const,
+            };
+        });
+
+        await tx.performanceRecord.deleteMany({
+            where: { orderId: Number(order.id) },
+        });
+
+        if (rows.length) {
+            await tx.performanceRecord.createMany({
+                data: rows,
+            });
+        }
+
+        return { count: rows.length };
+    }
+
+    /**
+     * 整单财务记录（按订单 1 条，upsert）
+     */
+    private async upsertOrderFinanceRecordForOrder(params: {
+        tx: any;
+        order: any;
+        settlements: any[];
+    }) {
+        const { tx, order, settlements } = params;
+
+        const statsBaseDate =
+            order?.paymentTime ||
+            order?.updatedAt ||
+            order?.createdAt ||
+            new Date();
+
+        const statsDate = new Date(this.toYmd(statsBaseDate));
+        const statsMonth = this.toYm(statsBaseDate);
+        const billingMode = this.getBillingModeFromOrder(order) ?? null;
+        const orderType = this.getOrderTypeFromOrder(order) ?? null;
+        const projectId = this.getProjectIdFromOrder(order);
+        const bizLine = this.getBizLineFromOrder(order);
+        const customerUserId = this.getCustomerUserIdFromOrder(order);
+
+        let playerCostAmount = 0;
+        let csCostAmount = 0;
+        let operationCostAmount = 0;
+        let channelCostAmount = 0;
+
+        for (const s of settlements || []) {
+            const settlementType = String(s?.settlementType || '');
+            const val = this.toDecimal2(Number(s?.finalEarnings ?? 0));
+
+            if (settlementType === 'CUSTOMER_SERVICE') {
+                csCostAmount += val;
+            } else {
+                playerCostAmount += val;
+            }
+        }
+
+        playerCostAmount = this.toDecimal2(playerCostAmount);
+        csCostAmount = this.toDecimal2(csCostAmount);
+        operationCostAmount = this.toDecimal2(operationCostAmount);
+        channelCostAmount = this.toDecimal2(channelCostAmount);
+
+        const receivableAmount = this.toDecimal2(Number(order?.receivableAmount ?? 0));
+        const paidAmount = this.toDecimal2(
+            Number(order?.isGifted ? order?.receivableAmount ?? 0 : order?.paidAmount ?? 0),
+        );
+
+        const discountAmount = this.toDecimal2(
+            Math.max(0, receivableAmount - paidAmount),
+        );
+
+        const complaintPenaltyAmount = 0;
+        const afterSaleCostAmount = 0;
+
+        const grossProfitAmount = this.toDecimal2(
+            paidAmount
+            - playerCostAmount
+            - csCostAmount
+            - operationCostAmount
+            - channelCostAmount
+            - complaintPenaltyAmount
+            - afterSaleCostAmount,
+        );
+
+        const data = {
+            customerUserId,
+            statsDate,
+            statsMonth,
+
+            billingMode,
+            orderType,
+            projectId,
+            bizLine,
+
+            receivableAmount,
+            paidAmount,
+            discountAmount,
+            couponDiscountAmount: 0,
+            otherDiscountAmount: 0,
+
+            playerCostAmount,
+            csCostAmount,
+            operationCostAmount,
+            channelCostAmount,
+            complaintPenaltyAmount,
+            afterSaleCostAmount,
+
+            grossProfitAmount,
+
+            isComplained: false,
+            isAfterSale: false,
+            isCancelled: this.isRefundedOrder(order),
+
+            remark: null,
+            status: 'EFFECTIVE' as const,
+        };
+
+        await tx.orderFinanceRecord.upsert({
+            where: { orderId: Number(order.id) },
+            create: {
+                orderId: Number(order.id),
+                ...data,
+            },
+            update: data,
+        });
+
+        return { orderId: Number(order.id) };
+    }
 }

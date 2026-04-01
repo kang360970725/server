@@ -7,17 +7,13 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-//pwd:Up9DXX6TKqu8sRw
-// 菜单项目表
 model GameProject {
-  id    Int       @id @default(autoincrement())
-  name  String
-  price Float
-  type  OrderType
-
+  id          Int           @id @default(autoincrement())
+  name        String
+  price       Float
+  type        OrderType
   /// 计费模式：小时单 / 保底单/ 玩法单（你已落地）
-  billingMode BillingMode @default(GUARANTEED)
-
+  billingMode BillingMode   @default(GUARANTEED)
   baseAmount  Float?
   clubRate    Float?
   coverImage  String?
@@ -25,49 +21,17 @@ model GameProject {
   status      ProjectStatus @default(ACTIVE)
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
-
-  /// 反向：该项目产生的订单（用于统计/筛选/项目详情）
-  orders Order[]
-}
-
-enum BillingMode {
-  HOURLY // 小时单
-  GUARANTEED // 保底单
-  MODE_PLAY //玩法单
-}
-
-// 枚举类型
-enum OrderType {
-  EXPERIENCE // 体验单
-  FUN // 趣味玩法单
-  ESCORT // 护航单
-  LUCKY_BAG // 福袋单
-  BLIND_BOX // 盲盒单
-  CUSTOM // 定制单
-  CUSTOMIZED // 自定义单
-}
-
-enum ProjectStatus {
-  ACTIVE
-  INACTIVE
-}
-
-enum RevisitStatus {
-  NOT_REVISITED // 未回访
-  GOOD // 好评
-  NEUTRAL // 中评
-  BAD // 差评
-  COMPLAINT // 客户投诉
+  orders      Order[]
 }
 
 model Role {
   id          Int          @id @default(autoincrement())
   name        String       @unique
   description String?
-  permissions Permission[]
-  users       User[]
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
+  users       User[]
+  permissions Permission[] @relation("PermissionToRole")
 }
 
 model Permission {
@@ -77,91 +41,64 @@ model Permission {
   module    String
   type      PermissionType
   parentId  Int?
-  children  Permission[]   @relation("PermissionTree")
-  parent    Permission?    @relation("PermissionTree", fields: [parentId], references: [id])
-  roles     Role[]
   createdAt DateTime       @default(now())
   updatedAt DateTime       @updatedAt
-}
+  parent    Permission?    @relation("PermissionTree", fields: [parentId], references: [id])
+  children  Permission[]   @relation("PermissionTree")
+  roles     Role[]         @relation("PermissionToRole")
 
-enum PermissionType {
-  PAGE
-  BUTTON
+  @@index([parentId], map: "Permission_parentId_fkey")
 }
 
 model User {
-  id           Int          @id @default(autoincrement())
-  phone        String       @unique
-  password     String
-  name         String?
-  email        String?
-  userType     UserType     @default(REGISTERED_USER)
-  status       UserStatus   @default(ACTIVE)
-  realName     String?
-  idCard       String?
-  avatar       String?
-  album        Json?
-  rating       Int?
-  level        Int          @default(1)
-  balance      Float        @default(0)
-  needResetPwd Boolean      @default(false)
-  lastLoginAt  DateTime?
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
-  roleId       Int?
-  recharges    Recharge[]
-  userLogs     UserLog[]
-
-    /// 提现收款二维码（对象存储 key）
-  withdrawQrCodeKey String? @db.VarChar(255)
-
+  id                       Int                        @id @default(autoincrement())
+  phone                    String                     @unique
+  password                 String
+  name                     String?
+  email                    String?
+  userType                 UserType                   @default(REGISTERED_USER)
+  status                   UserStatus                 @default(ACTIVE)
+  realName                 String?
+  idCard                   String?
+  avatar                   String?
+  album                    Json?
+  rating                   Int?
+  level                    Int                        @default(1)
+  balance                  Float                      @default(0)
+  needResetPwd             Boolean                    @default(false)
+  lastLoginAt              DateTime?
+  createdAt                DateTime                   @default(now())
+  updatedAt                DateTime                   @updatedAt
+  roleId                   Int?
+  /// 陪玩接单状态（仅对 userType=STAFF/PLAYER 生效，v0.1.1 先不强约束）
+  workStatus               PlayerWorkStatus           @default(IDLE)
+  /// 提现收款二维码（对象存储 key）
+  withdrawQrCodeKey        String?                    @db.VarChar(255)
   /// 上传时间（用于审计 / 防重复）
   withdrawQrCodeUploadedAt DateTime?
-  staffRating  StaffRating? @relation(fields: [rating], references: [id])
-  Role         Role?        @relation(fields: [roleId], references: [id])
-
-  //dispatchedOrders OrderDispatch[] @ignore // Prisma 不建议这样写；所以这条我不强推
-
-  /// 陪玩接单记录：参与过哪些派单批次
-  orderParticipants OrderParticipant[]
-
-  /// 陪玩结算记录：结单后生成的收益明细
-  orderSettlements OrderSettlement[]
-
-  /// 作为派单客服创建的订单
-  dispatchedOrders Order[] @relation("OrderDispatcher")
-
-  /// 作为财务创建的批次结算记录
-  createdBatches SettlementBatch[] @relation("BatchCreator")
-
-  /// 陪玩接单状态（仅对 userType=STAFF/PLAYER 生效，v0.1.1 先不强约束）
-  workStatus PlayerWorkStatus @default(IDLE)
-
-  walletAccount      WalletAccount?
-  walletTransactions WalletTransaction[]
-  walletHolds        WalletHold[]
-
-  /// ✅ 提现申请记录（反向关系）
+  canWithdraw              Boolean                    @default(true)
+  depositLimit             Decimal                    @default(2000.00) @db.Decimal(10, 2)
+  dispatchedOrders         Order[]                    @relation("OrderDispatcher")
+  orderParticipants        OrderParticipant[]
+  orderSettlements         OrderSettlement[]
+  recharges                Recharge[]
+  createdBatches           SettlementBatch[]          @relation("BatchCreator")
+  depositTransactions      WalletDepositTransaction[]
+  userLogs                 UserLog[]
+  staffRating              StaffRating?               @relation(fields: [rating], references: [id])
+  Role                     Role?                      @relation(fields: [roleId], references: [id])
+  walletAccount            WalletAccount?
+  walletHolds              WalletHold[]
+  walletTransactions       WalletTransaction[]
   walletWithdrawalRequests WalletWithdrawalRequest[]
-  /// ✅ 押金记录（反向关系）
-  depositTransactions WalletDepositTransaction[]
 
-  canWithdraw Boolean @default(true) //是否可以提现
-  depositLimit Decimal @db.Decimal(10,2) @default(2000) //押金阈值
-
-  // 索引：用于客服派单快速筛选空闲打手
   @@index([workStatus])
   @@index([rating], map: "users_rating_fkey")
   @@index([roleId], map: "users_roleId_fkey")
   @@map("users")
 }
 
-enum PlayerWorkStatus {
-  IDLE /// 空闲（可派单）
-  WORKING /// 接单中（不可派单）
-  RESTING /// 休息（不可派单）
-}
-///员工评级表
+/// 员工评级表
 model StaffRating {
   id          Int          @id @default(autoincrement())
   name        String       @unique
@@ -207,8 +144,391 @@ model UserLog {
   @@index([targetType, targetId], map: "user_logs_target")
   @@index([action], map: "user_logs_action")
   @@index([createdAt], map: "user_logs_createdAt")
-
   @@map("user_logs")
+}
+
+model Order {
+  id                  Int               @id @default(autoincrement())
+  /// 自动单号：建议 YYYYMMDD-0001（由代码生成，不靠 DB 自增）
+  autoSerial          String            @unique
+  /// 金额：手工录入（已确认 Q1=A）
+  receivableAmount    Float
+  paidAmount          Float
+  /// 时间字段：
+  orderTime           DateTime?
+  paymentTime         DateTime?
+  openedAt            DateTime          @default(now())
+  /// 保底数额（单位：万）
+  /// 仅保底/护航类项目使用；小时单可为空
+  baseAmountWan       Float?
+  /// 小时单“总小时”不再需要手填：
+  /// 因为你要求用 接单时间 -> 存/结单时间 自动计算 billableHours
+  /// 所以小时单的小时数最终落在 OrderDispatch.billableHours 上
+  orderQuantity       Int               @default(1)
+  /// 关联项目：仍用 GameProject（必选）
+  projectId           Int
+  /// 项目快照：记录当时项目配置（项目可能随时调整）
+  /// 建议存：name/type/billingMode/baseAmount/clubRate/price 等
+  projectSnapshot     Json
+  /// 客户游戏 ID / 昵称：用于查询消费记录
+  customerGameId      String?
+  /// 派单客服：默认录单人
+  dispatcherId        Int
+  /// 回访登记：文本 + 状态
+  revisitDetail       String?
+  revisitStatus       RevisitStatus     @default(NOT_REVISITED)
+  /// 分佣比例（可调）
+  csRate              Float?
+  inviteRate          Float?
+  inviter             String?
+  /// 俱乐部抽成比例（订单级固定抽成）
+  customClubRate      Float?
+  clubRate            Float?
+  /// 结算汇总（可选，结单自动结算后写入，用于对账与校验）
+  clubEarnings        Float?
+  totalPlayerEarnings Float?
+  /// 订单状态（用于筛选）
+  status              OrderStatus       @default(WAIT_ASSIGN)
+  /// 当前派单批次（为了快速查“这一轮派单/状态”）
+  currentDispatchId   Int?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+  /// 是否赠送单：赠送单不收款，但仍正常结算/分红；
+  /// ⚠️ 日账单/营收统计需排除 isGifted=true 的订单
+  isGifted            Boolean           @default(false)
+  /// 赠送金额（用于统计活动成本/赠送成本）
+  /// - 前端不传
+  /// - 后端创建订单时：isGifted=true => giftedAmount = paidAmount（或订单价值口径）
+  giftedAmount        Decimal?          @db.Decimal(10, 2)
+  /// 是否已确认收款（人工确认）
+  /// - 先打后付场景：结单后可能仍未收款
+  /// - 确认收款接�����会同时写入 paymentTime=now() 与 paidAmount（允许修正）
+  isPaid              Boolean           @default(false)
+  currentDispatch     OrderDispatch?    @relation("OrderCurrentDispatch", fields: [currentDispatchId], references: [id])
+  dispatcher          User              @relation("OrderDispatcher", fields: [dispatcherId], references: [id])
+  project             GameProject       @relation(fields: [projectId], references: [id])
+  dispatches          OrderDispatch[]   @relation("OrderDispatches")
+  settlements         OrderSettlement[]
+
+  @@index([projectId])
+  @@index([dispatcherId])
+  @@index([status])
+  @@index([customerGameId])
+  @@index([currentDispatchId], map: "Order_currentDispatchId_fkey")
+}
+
+model OrderDispatch {
+  id                 Int                  @id @default(autoincrement())
+  /// 属于哪个订单
+  orderId            Int
+  /// 第几轮派单（从 1 开始递增）
+  /// 规则：只有上一轮 ARCHIVED 才允许创建下一轮
+  round              Int
+  /// 本轮状态：待派 -> 待接 -> 已接 -> 存单/结单
+  status             DispatchStatus       @default(WAIT_ASSIGN)
+  /// 时间：
+  /// assignedAt：派单时间（客服执行派单时写入）
+  /// acceptedAllAt：全员接单完成时间（当本轮所有 participant.acceptedAt 非空时写入）
+  /// archivedAt：存单时间（打手点击存单写入）
+  /// completedAt：结单时间（打手点击结单写入）
+  assignedAt         DateTime?
+  acceptedAllAt      DateTime?
+  archivedAt         DateTime?
+  completedAt        DateTime?
+  /// 小时单：中途扣除时间（整单统一扣除）
+  /// deductMinutes：枚举选项，用于 UI 固定下拉
+  /// deductMinutesValue：冗余数值，方便后端计算/前端展示（10/20/.../60）
+  deductMinutes      DeductMinutesOption?
+  deductMinutesValue Int?
+  /// 小时单：计费结果（由系统计算并落库）
+  /// billableMinutes：扣除后有效分钟
+  /// billableHours：计费小时（整数小时 + 分钟折算 0/0.5/1）
+  billableMinutes    Int?
+  billableHours      Float?
+  /// 本轮备注：可存 “换号/异常/说明”
+  remark             String?
+  currentForOrders   Order[]              @relation("OrderCurrentDispatch")
+  order              Order                @relation("OrderDispatches", fields: [orderId], references: [id], onDelete: Cascade)
+  participants       OrderParticipant[]
+  settlements        OrderSettlement[]
+
+  @@unique([orderId, round])
+  @@index([orderId])
+  @@index([status])
+}
+
+model OrderParticipant {
+  id                 Int           @id @default(autoincrement())
+  /// 属于哪一轮派单
+  dispatchId         Int
+  /// 陪玩/打手（User）
+  userId             Int
+  /// 接单时间：陪玩确认接单后写入
+  /// 规则：本轮“已接单”必须所有参与者 acceptedAt 都有值
+  acceptedAt         DateTime?
+  rejectedAt         DateTime?
+  rejectReason       String?
+  /// 贡献金额（可选）
+  /// v0.1：结单默认均分；存单按进度比例算（保底/小时），贡献字段先留作未来扩展
+  contributionAmount Float?        @default(0)
+  /// 保底单：已打保底（单位：万）
+  /// 允许负数：炸单（前端用“炸单额外加保底”选择转成负数）
+  progressBaseWan    Float?
+  /// 是否有效：存单再派可能替换陪玩（历史记录保留，但不参与后续）
+  isActive           Boolean       @default(true)
+  dispatch           OrderDispatch @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
+  user               User          @relation(fields: [userId], references: [id])
+
+  @@unique([dispatchId, userId])
+  @@index([dispatchId])
+  @@index([userId])
+}
+
+model OrderSettlement {
+  id                 Int           @id @default(autoincrement())
+  /// 属于哪个订单
+  orderId            Int
+  /// 哪一轮派单产生的结算（结单时落库）
+  dispatchId         Int
+  /// 哪个陪玩/打手
+  userId             Int
+  /// 结算类型：
+  /// - EXPERIENCE：体验/福袋（每 3 天批次结算）
+  /// - REGULAR：正价（按月批次结算）
+  /// v0.1 先用 String，后期可改 enum（避免迁移频繁）
+  settlementType     String
+  /// 计算结果（结单时自动生成）
+  calculatedEarnings Decimal?      @db.Decimal(10, 1)
+  /// 人工调整：客服主管/财务可对“单个陪玩-单个订单”调整收益（你明确要求）
+  /// finalEarnings = calculatedEarnings + manualAdjustment
+  manualAdjustment   Decimal?      @db.Decimal(10, 1)
+  finalEarnings      Decimal?      @db.Decimal(10, 1)
+  /// 拆分记录（用于对账展示，可选）
+  clubEarnings       Decimal?      @db.Decimal(10, 1)
+  csEarnings         Float?
+  inviteEarnings     Float?
+  /// 打款状态：对账无误后由财务批量标记
+  paymentStatus      PaymentStatus @default(UNPAID)
+  paidAt             DateTime?
+  /// 审计：谁调的、什么时候调、为什么调
+  settledAt          DateTime      @default(now())
+  adjustedBy         Int?
+  adjustedAt         DateTime?
+  adjustRemark       String?
+  /// ✅ 本次结算批次号（一次结单/存单会生成 1 个批次号）
+  /// - 用途1：追溯/审计（将来查“这次结算跑了哪些流水”）
+  /// - 用途2：给外部系统/对账/异步任务（比如微信打款）做关联
+  /// - 注意：真正的“防重复”靠下面的 uniq 约束；batchId 是增强追踪能力
+  settlementBatchId  String        @db.VarChar(36)
+  dispatch           OrderDispatch @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
+  order              Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user               User          @relation(fields: [userId], references: [id])
+
+  @@unique([dispatchId, userId, settlementType], map: "uniq_settlement_dispatch_user_type")
+  @@index([orderId])
+  @@index([dispatchId])
+  @@index([userId])
+  @@index([paymentStatus])
+  @@index([settlementBatchId])
+}
+
+model SettlementBatch {
+  id               Int                 @id @default(autoincrement())
+  /// 批次类型：体验三日 / 正价月度
+  batchType        SettlementBatchType
+  /// 时间范围（自然日维度）
+  periodStart      DateTime
+  periodEnd        DateTime
+  /// 创建人（财务/客服主管）
+  createdBy        Int
+  /// 汇总缓存：用于前端“总收入/俱乐部收入/应结款”展示
+  /// 说明：这些值也可以实时聚合计算；缓存是为了查询快
+  totalIncome      Float?
+  clubIncome       Float?
+  payableToPlayers Float?
+  createdAt        DateTime            @default(now())
+  creator          User                @relation("BatchCreator", fields: [createdBy], references: [id])
+
+  @@index([batchType])
+  @@index([periodStart, periodEnd])
+  @@index([createdBy], map: "SettlementBatch_createdBy_fkey")
+}
+
+model WalletAccount {
+  id               Int      @id @default(autoincrement())
+  /// 一人一账
+  userId           Int      @unique
+  /// 可用余额（可提现/可抵扣）
+  availableBalance Decimal  @default(0.0) @db.Decimal(10, 1)
+  /// 冻结余额（未到解冻时间）
+  frozenBalance    Decimal  @default(0.0) @db.Decimal(10, 1)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  /// 钱包UID：展示级唯一号（大写字母+数字混合），兼容老数据先允许为空
+  walletUid        String?  @unique @db.VarChar(20)
+  depositBalance   Decimal  @default(0.00) @db.Decimal(10, 2)
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("wallet_accounts")
+}
+
+model WalletTransaction {
+  id                       Int                      @id @default(autoincrement())
+  userId                   Int
+  direction                WalletDirection
+  bizType                  WalletBizType
+  /// 约定：金额始终为正数，负向效果由 direction=OUT 或 bizType 语义决定（实现层做约束）
+  amount                   Float
+  status                   WalletTxStatus           @default(FROZEN)
+  /// 资金来源（用于幂等与追溯）
+  /// V0.1：sourceType 固定用 "ORDER_SETTLEMENT"
+  sourceType               String
+  sourceId                 Int
+  /// 方便查账的冗余关联（可空）
+  orderId                  Int?
+  dispatchId               Int?
+  settlementId             Int?
+  /// 退款冲正关联：reversalOfTxId 指向被冲正的那笔收益流水
+  reversalOfTxId           Int?
+  createdAt                DateTime                 @default(now())
+  /// ✅ 余额快照：本笔落账后的余额（用于前端展示“本笔后余额”/对账）
+  /// - 兼容历史：允许为空；新写入必须赋值
+  availableAfter           Decimal?                 @db.Decimal(18, 2)
+  frozenAfter              Decimal?                 @db.Decimal(18, 2)
+  hold                     WalletHold?              @relation("WalletEarningHold")
+  reversalOfTx             WalletTransaction?       @relation("WalletReversal", fields: [reversalOfTxId], references: [id])
+  reversals                WalletTransaction[]      @relation("WalletReversal")
+  user                     User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  withdrawalPayoutRequest  WalletWithdrawalRequest? @relation("WithdrawalPayoutTx")
+  withdrawalReserveRequest WalletWithdrawalRequest? @relation("WithdrawalReserveTx")
+
+  @@unique([sourceType, sourceId], map: "uniq_wallet_tx_source")
+  @@index([userId, createdAt])
+  @@index([orderId])
+  @@index([settlementId])
+  @@index([status])
+  @@index([reversalOfTxId], map: "wallet_transactions_reversalOfTxId_fkey")
+  @@map("wallet_transactions")
+}
+
+model WalletHold {
+  id          Int               @id @default(autoincrement())
+  userId      Int
+  /// 对应哪一笔收益流水（冻结从这里来）
+  earningTxId Int               @unique
+  amount      Float
+  status      WalletHoldStatus  @default(FROZEN)
+  /// 解冻时间（体验单 N+3；非体验 N+15；后续可按等级覆盖）
+  unlockAt    DateTime
+  createdAt   DateTime          @default(now())
+  releasedAt  DateTime?
+  earningTx   WalletTransaction @relation("WalletEarningHold", fields: [earningTxId], references: [id], onDelete: Cascade)
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, unlockAt])
+  @@index([userId], map: "wallet_holds_userId_fkey")
+  @@map("wallet_holds")
+}
+
+model WalletWithdrawalRequest {
+  id             Int                @id @default(autoincrement())
+  /// 申请人
+  userId         Int
+  /// 申请金额（始终为正数）
+  amount         Float
+  status         WithdrawalStatus   @default(PENDING_REVIEW)
+  channel        WithdrawalChannel  @default(MANUAL)
+  /// ✅ 幂等键：前端/客户端生成（推荐 uuid），用于防重复提交
+  /// - 同一个 userId + idempotencyKey 只能申请一次
+  idempotencyKey String             @db.VarChar(64)
+  /// ✅ 业务单号：服务端生成（可用于展示/对账/三方回调关联）
+  requestNo      String             @unique @db.VarChar(32)
+  /// 申请备注（可选）
+  remark         String?
+  /// 审批信息
+  reviewedBy     Int?
+  reviewedAt     DateTime?
+  reviewRemark   String?
+  /// ✅ 关键：关联“预扣流水”（申请时产生）
+  reserveTxId    Int                @unique
+  /// ✅ 关键：关联“出款流水”（打款成功时产生，可空）
+  payoutTxId     Int?               @unique
+  /// ---------- 为微信自动打款预留 ----------
+  /// 外部打款单号（你系统生成，发给微信用）
+  outTradeNo     String?            @db.VarChar(64)
+  /// 微信/三方返回的交易号
+  channelTradeNo String?            @db.VarChar(64)
+  /// 三方回调原始内容（可存 JSON 字符串）
+  callbackRaw    String?            @db.Text
+  /// 最近一次打款错误原因
+  failReason     String?            @db.Text
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  payoutTx       WalletTransaction? @relation("WithdrawalPayoutTx", fields: [payoutTxId], references: [id])
+  reserveTx      WalletTransaction  @relation("WithdrawalReserveTx", fields: [reserveTxId], references: [id])
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, idempotencyKey], map: "uniq_withdraw_user_idempotency")
+  @@index([userId, status, createdAt])
+  @@index([status, createdAt])
+  @@index([status, reviewedAt])
+  @@map("wallet_withdrawal_requests")
+}
+
+model WalletDepositTransaction {
+  id         Int            @id @default(autoincrement())
+  userId     Int
+  amount     Decimal        @db.Decimal(10, 2)
+  bizType    DepositBizType
+  remark     String?        @db.VarChar(255)
+  operatorId Int?
+  createdAt  DateTime       @default(now())
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+enum BillingMode {
+  HOURLY
+  GUARANTEED
+  MODE_PLAY
+}
+
+enum OrderType {
+  EXPERIENCE
+  FUN
+  ESCORT
+  LUCKY_BAG
+  BLIND_BOX
+  CUSTOM
+  CUSTOMIZED
+}
+
+enum ProjectStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum RevisitStatus {
+  NOT_REVISITED
+  GOOD
+  NEUTRAL
+  BAD
+  COMPLAINT
+}
+
+enum PermissionType {
+  PAGE
+  BUTTON
+}
+
+enum PlayerWorkStatus {
+  /// 空闲（可派单）
+  IDLE
+  /// 接单中（不可派单）
+  WORKING
+  /// 休息（不可派单）
+  RESTING
 }
 
 enum RatingStatus {
@@ -244,21 +564,20 @@ enum RechargeStatus {
   FAILED
 }
 
-// ----------订单相关----------
 /// 订单总状态（用于列表筛选与业务流转）
 /// 说明：我们把“每次派单”的细节放在 DispatchStatus，OrderStatus 体现订单整体所处阶段
 enum OrderStatus {
-  WAIT_ASSIGN // 待派单：订单创建后还没有当前派单批次，或当前批次处于待派单
-  WAIT_ACCEPT // 待接单：已派单但未全员接单完成
-  ACCEPTED // 已接单：当前批次全员已接单
-  ARCHIVED // 已存单：本轮存档，可再次派单（创建下一轮 dispatch）
-  COMPLETED_PENDING_CONFIRM //打手结单后进入待确认
-  COMPLETED //客服确认后才算最终结单（并同步钱包冻结）
-  WAIT_REVIEW // 待评价：业务预留
-  REVIEWED // 已评价：业务预留
-  WAIT_AFTERSALE // 待售后：业务预留
-  AFTERSALE_DONE // 已售后：业务预留
-  REFUNDED // 已退款：业务预留（退款后一般不再派单）
+  WAIT_ASSIGN
+  WAIT_ACCEPT
+  ACCEPTED
+  ARCHIVED
+  COMPLETED_PENDING_CONFIRM
+  COMPLETED
+  WAIT_REVIEW
+  REVIEWED
+  WAIT_AFTERSALE
+  AFTERSALE_DONE
+  REFUNDED
 }
 
 /// 派单批次状态（每一轮派单都有一个状态；一个订单可多轮派单）
@@ -266,15 +585,15 @@ enum OrderStatus {
 /// - 只有 ARCHIVED 才允许创建下一轮 dispatch
 /// - ACCEPTED 的判定是“本轮所有参与者都接单”
 enum DispatchStatus {
-  WAIT_ASSIGN // 待派单：可增减陪玩（应用层限制）
-  WAIT_ACCEPT // 待接单：已指派陪玩，等待陪玩接单
-  ACCEPTED // 已接单：全员接单完成（acceptedAllAt 写入）
+  WAIT_ASSIGN
+  WAIT_ACCEPT
+  ACCEPTED
   /// ✅ 并发互斥用：结算处理中（结单/存单都会先抢占到这个状态）
   /// - 作用：避免“一个点结单、一个点存单”同时跑结算链路
   /// - 约束：只能从 ACCEPTED -> SETTLING；最终落到 ARCHIVED 或 COMPLETED
   SETTLING
-  ARCHIVED // 已存单：陪玩存单（写入 archivedAt）
-  COMPLETED // 已结单：陪玩结单（写入 completedAt，并触发自动结算落库）
+  ARCHIVED
+  COMPLETED
 }
 
 /// 结算打款状态（财务对账后标记）
@@ -304,540 +623,223 @@ enum DeductMinutesOption {
 
 /// 钱包流水方向
 enum WalletDirection {
-  IN // 入账
-  OUT // 出账
+  IN
+  OUT
 }
 
 /// 钱包流水业务类型（V0.1 先覆盖收益/解冻/退款冲正）
 enum WalletBizType {
   /// 兼容历史：旧的“结算收益”
   SETTLEMENT_EARNING
-
   /// ✅ 基础结算收益（建议新数据都用这个）
   SETTLEMENT_EARNING_BASE
-
   /// ✅ 补单收益（炸单池补偿）
   SETTLEMENT_EARNING_CARRY
-
   /// ✅ 炸单损耗（负收益/成本扣减）
   SETTLEMENT_BOMB_LOSS
-
   /// ✅ 客服分红
   SETTLEMENT_EARNING_CS
-
-  RELEASE_FROZEN // 解冻：frozen -> available（内部划转）
-  REFUND_REVERSAL // 退款冲正：对冲收益（负向）
-
+  RELEASE_FROZEN
+  REFUND_REVERSAL
   /// ✅ 提现：申请时的资金预扣（available -> frozen）
   WITHDRAW_RESERVE
-
-  /// ✅ 提现：审批拒绝/取消时的退回（frozen -> available）
+  /// ✅ 提现：审批拒绝/��消时的退回（frozen -> available）
   WITHDRAW_RELEASE
-
   /// ✅ 提现：实际出款成功（冻结资金真正扣除）
   WITHDRAW_PAYOUT
-
   /// 新增：押金退还
-   DEPOSIT_REFUND
-
-  SETTLEMENT_REVERSAL   // 旧结算收益冲正
-  SETTLEMENT_RECALC     // 重算后新结算收益
+  DEPOSIT_REFUND
+  SETTLEMENT_REVERSAL
+  SETTLEMENT_RECALC
 }
 
 enum WithdrawalStatus {
-  PENDING_REVIEW // 待审核
-  APPROVED // 已审核通过（进入打款流程）
-  REJECTED // 已驳回（资金已退回可用）
-  PAYING // 打款中（已提交到微信/三方）
-  PAID // 已打款成功
-  FAILED // 打款失败（允许重试）
-  CANCELED // 用户取消（如你后续要开放）
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  PAYING
+  PAID
+  FAILED
+  CANCELED
 }
 
 enum WithdrawalChannel {
-  WECHAT // 预留：微信自动打款
-  MANUAL // 先人工线下打款（本期可用）
+  WECHAT
+  MANUAL
 }
 
 /// 钱包流水状态
 enum WalletTxStatus {
-  FROZEN // 冻结中（收益已入账但不可用）
-  AVAILABLE // 可用（已解冻）
-  REVERSED // 已被冲正/退款（不参与统计）
+  FROZEN
+  AVAILABLE
+  REVERSED
 }
 
 /// 冻结单状态
 enum WalletHoldStatus {
   FROZEN
   RELEASED
-  CANCELLED // 预留：被退款/冲正直接取消冻结
-}
-
-// 新增模型：Order
-model Order {
-  id Int @id @default(autoincrement())
-
-  /// 自动单号：建议 YYYYMMDD-0001（由代码生成，不靠 DB 自增）
-  autoSerial String @unique
-
-  /// 金额：手工录入（已确认 Q1=A）
-  receivableAmount Float  //应收金额（理论金额）
-  paidAmount       Float  //实付金额（用于结算计算）
-
-  /// 时间字段：
-  orderTime   DateTime? //下单时间（未来接线上商城平台）
-  paymentTime DateTime? //付款时间（未来接支付）
-  /// 是否已确认收款（人工确认）
-  /// - 先打后付场景：结单后可能仍未收款
-  /// - 确认收款接口会同时写入 paymentTime=now() 与 paidAmount（允许修正）
-  isPaid Boolean @default(false)
-  openedAt    DateTime  @default(now())  //开单时间（默认录入时间）
-
-  /// 保底数额（单位：万）
-  /// 仅保底/护航类项目使用；小时单可为空
-  baseAmountWan Float?
-
-  /// 小时单“总小时”不再需要手填：
-  /// 因为你要求用 接单时间 -> 存/结单时间 自动计算 billableHours
-  /// 所以小时单的小时数最终落在 OrderDispatch.billableHours 上
-  orderQuantity Int         @default(1) //下单数量、小时单预计时长
-  /// 关联项目：仍用 GameProject（必选）
-  projectId     Int
-  project       GameProject @relation(fields: [projectId], references: [id])
-
-  /// 项目快照：记录当时项目配置（项目可能随时调整）
-  /// 建议存：name/type/billingMode/baseAmount/clubRate/price 等
-  projectSnapshot Json
-
-  /// 客户游戏 ID / 昵称：用于查询消费记录
-  customerGameId String?
-
-  /// 派单客服：默认录单人
-  dispatcherId Int
-  dispatcher   User @relation("OrderDispatcher", fields: [dispatcherId], references: [id])
-
-  /// 回访登记：文本 + 状态
-  revisitDetail String?
-  revisitStatus RevisitStatus @default(NOT_REVISITED)
-
-  /// 分佣比例（可调）
-  csRate     Float?  //客服收益比例（默认 1%，体验单可设为 0）
-  inviteRate Float? //邀请/推广分佣（默认 5%）
-  inviter    String? // 邀请/推广人（可字符串或后期关联用户）
-
-  /// 俱乐部抽成比例（订单级固定抽成）
-  customClubRate Float? //录单时可自定义；优先级最高
-  clubRate       Float? //实际使用的抽成（落库快照，便于对账）
-
-  /// 结算汇总（可选，结单自动结算后写入，用于对账与校验）
-  clubEarnings        Float? // 本单俱乐部收益
-  totalPlayerEarnings Float? // 陪玩总收益（验证计算是否有错）
-
-  /// 订单状态（用于筛选）
-  status OrderStatus @default(WAIT_ASSIGN)
-
-  /// 当前派单批次（为了快速查“这一轮派单/状态”）
-  currentDispatchId Int?
-  currentDispatch   OrderDispatch? @relation("OrderCurrentDispatch", fields: [currentDispatchId], references: [id])
-
-  /// 历史派单批次：一单可多轮派单（存单后再派）
-  dispatches OrderDispatch[] @relation("OrderDispatches")
-  /// 是否赠送单：赠送单不收款，但仍正常结算/分红；
-  /// ⚠️ 日账单/营收统计需排除 isGifted=true 的订单
-  isGifted   Boolean         @default(false)
-
-  /// 赠送金额（用于统计活动成本/赠送成本）
-  /// - 前端不传
-  /// - 后端创建订单时：isGifted=true => giftedAmount = paidAmount（或订单价值口径）
-  giftedAmount Decimal? @db.Decimal(10, 2)
-
-  /// 结算明细：结单时落库（按订单+陪玩维度）
-  settlements OrderSettlement[]
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([projectId])
-  @@index([dispatcherId])
-  @@index([status])
-  @@index([customerGameId])
-}
-
-//新增模型：OrderDispatch（派单批次）
-model OrderDispatch {
-  id Int @id @default(autoincrement())
-
-  /// 属于哪个订单
-  orderId Int
-  order   Order @relation("OrderDispatches", fields: [orderId], references: [id], onDelete: Cascade)
-
-  /// 第几轮派单（从 1 开始递增）
-  /// 规则：只有上一轮 ARCHIVED 才允许创建下一轮
-  round Int
-
-  /// 本轮状态：待派 -> 待接 -> 已接 -> 存单/结单
-  status DispatchStatus @default(WAIT_ASSIGN)
-
-  /// 时间：
-  /// assignedAt：派单时间（客服执行派单时写入）
-  /// acceptedAllAt：全员接单完成时间（当本轮所有 participant.acceptedAt 非空时写入）
-  /// archivedAt：存单时间（打手点击存单写入）
-  /// completedAt：结单时间（打手点击结单写入）
-  assignedAt    DateTime?
-  acceptedAllAt DateTime?
-  archivedAt    DateTime?
-  completedAt   DateTime?
-
-  /// 小时单：中途扣除时间（整单统一扣除）
-  /// deductMinutes：枚举选项，用于 UI 固定下拉
-  /// deductMinutesValue：冗余数值，方便后端计算/前端展示（10/20/.../60）
-  deductMinutes      DeductMinutesOption?
-  deductMinutesValue Int?
-
-  /// 小时单：计费结果（由系统计算并落库）
-  /// billableMinutes：扣除后有效分钟
-  /// billableHours：计费小时（整数小时 + 分钟折算 0/0.5/1）
-  billableMinutes Int?
-  billableHours   Float?
-
-  /// 本轮备注：可存 “换号/异常/说明”
-  remark String?
-
-  /// 本轮参与者：最多 2 个（应用层限制，不做 DB 强约束）
-  participants OrderParticipant[]
-
-  /// 反向：哪些订单的 currentDispatch 指向本 dispatch
-  /// 理论上最多 1 个，但 Prisma 反向一般写数组
-  currentForOrders Order[] @relation("OrderCurrentDispatch")
-
-  /// 反向：本轮结单生成的结算明细
-  settlements OrderSettlement[]
-
-  @@unique([orderId, round])
-  @@index([orderId])
-  @@index([status])
-}
-
-//新增模型：OrderParticipant（参与者）
-model OrderParticipant {
-  id Int @id @default(autoincrement())
-
-  /// 属于哪一轮派单
-  dispatchId Int
-  dispatch   OrderDispatch @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
-
-  /// 陪玩/打手（User）
-  userId Int
-  user   User @relation(fields: [userId], references: [id])
-
-  /// 接单时间：陪玩确认接单后写入
-  /// 规则：本轮“已接单”必须所有参与者 acceptedAt 都有值
-  acceptedAt DateTime?
-
-  // ✅ 新增：拒单时间 + 拒单原因（拒单后 participant 置 isActive=false，进入历史）
-  rejectedAt   DateTime?
-  rejectReason String?
-
-  /// 贡献金额（可选）
-  /// v0.1：结单默认均分；存单按进度比例算（保底/小时），贡献字段先留作未来扩展
-  contributionAmount Float? @default(0)
-
-  /// 保底单：已打保底（单位：万）
-  /// 允许负数：炸单（前端用“炸单额外加保底”选择转成负数）
-  progressBaseWan Float?
-
-  /// 是否有效：存单再派可能替换陪玩（历史记录保留，但不参与后续）
-  isActive Boolean @default(true)
-
-  @@unique([dispatchId, userId])
-  @@index([dispatchId])
-  @@index([userId])
-}
-
-//新增模型：OrderSettlement（结算明细，按订单+陪玩维度落库）
-model OrderSettlement {
-  id Int @id @default(autoincrement())
-
-  /// 属于哪个订单
-  orderId Int
-  order   Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
-
-  /// 哪一轮派单产生的结算（结单时落库）
-  dispatchId Int
-  dispatch   OrderDispatch @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
-
-  /// 哪个陪玩/打手
-  userId Int
-  user   User @relation(fields: [userId], references: [id])
-
-  /// 结算类型：
-  /// - EXPERIENCE：体验/福袋（每 3 天批次结算）
-  /// - REGULAR：正价（按月批次结算）
-  /// v0.1 先用 String，后期可改 enum（避免迁移频繁）
-  settlementType    String
-  /// ✅ 本次结算批次号（一次结单/存单会生成 1 个批次号）
-  /// - 用途1：追溯/审计（将来查“这次结算跑了哪些流水”）
-  /// - 用途2：给外部系统/对账/异步任务（比如微信打款）做关联
-  /// - 注意：真正的“防重复”靠下面的 uniq 约束；batchId 是增强追踪能力
-  settlementBatchId String @db.VarChar(36)
-
-  /// 计算结果（结单时自动生成）
-  calculatedEarnings Decimal? @db.Decimal(10, 1)
-
-
-  /// 人工调整：客服主管/财务可对“单个陪玩-单个订单”调整收益（你明确要求）
-  /// finalEarnings = calculatedEarnings + manualAdjustment
-  manualAdjustment   Decimal? @db.Decimal(10, 1)
-  finalEarnings      Decimal? @db.Decimal(10, 1)
-
-  /// 拆分记录（用于对账展示，可选）
-  clubEarnings       Decimal? @db.Decimal(10, 1)  //俱乐部收益
-  csEarnings     Float?  // 客服收益
-  inviteEarnings Float?  // 邀请收益
-
-  /// 打款状态：对账无误后由财务批量标记
-  paymentStatus PaymentStatus @default(UNPAID)
-  paidAt        DateTime?
-
-  /// 审计：谁调的、什么时候调、为什么调
-  settledAt    DateTime  @default(now())
-  adjustedBy   Int?
-  adjustedAt   DateTime?
-  adjustRemark String?
-  /// ✅ 数据库兜底：同一 dispatch + 同一用户 + 同一 settlementType 只能有一条
-  /// - 这是防止并发重复结算的“最后一道门”
-  /// - 结单/存单都走结算，所以这个 uniq 至关重要
-  @@unique([dispatchId, userId, settlementType], map: "uniq_settlement_dispatch_user_type")
-  @@index([orderId])
-  @@index([dispatchId])
-  @@index([userId])
-  @@index([paymentStatus])
-  @@index([settlementBatchId])
-}
-
-//新增模型：SettlementBatch（批次结算）
-model SettlementBatch {
-  id Int @id @default(autoincrement())
-
-  /// 批次类型：体验三日 / 正价月度
-  batchType SettlementBatchType
-
-  /// 时间范围（自然日维度）
-  periodStart DateTime
-  periodEnd   DateTime
-
-  /// 创建人（财务/客服主管）
-  createdBy Int
-  creator   User @relation("BatchCreator", fields: [createdBy], references: [id])
-
-  /// 汇总缓存：用于前端“总收入/俱乐部收入/应结款”展示
-  /// 说明：这些值也可以实时聚合计算；缓存是为了查询快
-  totalIncome      Float? // 实收款统计（通常 sum(Order.paidAmount)）
-  clubIncome       Float? // 俱乐部提成统计（sum(Order.clubEarnings)）
-  payableToPlayers Float? // 应结款（sum(OrderSettlement.finalEarnings)）
-
-  createdAt DateTime @default(now())
-
-  @@index([batchType])
-  @@index([periodStart, periodEnd])
-}
-
-///1-3日开发
-
-//WalletAccount 钱包模块
-model WalletAccount {
-  id Int @id @default(autoincrement())
-
-  /// 钱包UID：展示级唯一号（大写字母+数字混合），兼容老数据先允许为空
-  walletUid String? @unique @db.VarChar(20)
-  /// 一人一账
-  userId    Int     @unique
-  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-
-
-  /// 可用余额（可提现/可抵扣）
-  availableBalance Decimal @db.Decimal(10, 1) @default(0)
-    depositBalance Decimal @db.Decimal(10,2) @default(0) //当前押金余额
-
-  /// 冻结余额（未到解冻时间）
-  frozenBalance    Decimal @db.Decimal(10, 1) @default(0)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  @@map("wallet_accounts")
-}
-
-//WalletTransaction（钱包账本流水）
-model WalletTransaction {
-  id Int @id @default(autoincrement())
-
-  userId Int
-  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  direction WalletDirection
-  bizType   WalletBizType
-
-  /// 约定：金额始终为正数，负向效果由 direction=OUT 或 bizType 语义决定（实现层做约束）
-  amount Float
-
-  status WalletTxStatus @default(FROZEN)
-
-  /// ✅ 余额快照：本笔落账后的余额（用于前端展示“本笔后余额”/对账）
-    /// - 兼容历史：允许为空；新写入必须赋值
-    availableAfter Decimal? @db.Decimal(18, 2)
-    frozenAfter    Decimal? @db.Decimal(18, 2)
-
-  /// 资金来源（用于幂等与追溯）
-  /// V0.1：sourceType 固定用 "ORDER_SETTLEMENT"
-  sourceType String
-  sourceId   Int
-
-  /// 方便查账的冗余关联（可空）
-  orderId      Int?
-  dispatchId   Int?
-  settlementId Int? // 对应 OrderSettlement.id
-
-  /// 退款冲正关联：reversalOfTxId 指向被冲正的那笔收益流水
-  reversalOfTxId Int?
-  reversalOfTx   WalletTransaction?  @relation("WalletReversal", fields: [reversalOfTxId], references: [id])
-  reversals      WalletTransaction[] @relation("WalletReversal")
-
-  createdAt DateTime    @default(now())
-  /// 冻结单：仅结算收益流水会生成（可空）
-  /// 对应冻结单（只有收益入账流水才会有）
-  hold      WalletHold? @relation("WalletEarningHold")
-
-  /// ✅ 反向：该流水是否作为“提现预扣流水”被某个申请单引用
-  withdrawalReserveRequest WalletWithdrawalRequest? @relation("WithdrawalReserveTx")
-
-  /// ✅ 反向：该流水是否作为“提现出款流水”被某个申请单引用
-  withdrawalPayoutRequest WalletWithdrawalRequest? @relation("WithdrawalPayoutTx")
-
-  /// 幂等关键：同一来源只能产生一条“结算收益流水”
-  @@unique([sourceType, sourceId], map: "uniq_wallet_tx_source")
-  @@index([userId, createdAt])
-  @@index([orderId])
-  @@index([settlementId])
-  @@index([status])
-  @@map("wallet_transactions")
-}
-
-//WalletHold（冻结单）
-model WalletHold {
-  id Int @id @default(autoincrement())
-
-  userId Int
-  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  /// 对应哪一笔收益流水（冻结从这里来）
-  earningTxId Int               @unique
-  earningTx   WalletTransaction @relation("WalletEarningHold", fields: [earningTxId], references: [id], onDelete: Cascade)
-
-  amount Float
-  status WalletHoldStatus @default(FROZEN)
-
-  /// 解冻时间（体验单 N+3；非体验 N+15；后续可按等级覆盖）
-  unlockAt DateTime
-
-  createdAt  DateTime  @default(now())
-  releasedAt DateTime?
-
-  @@index([status, unlockAt])
-  @@map("wallet_holds")
-}
-
-model WalletWithdrawalRequest {
-  id Int @id @default(autoincrement())
-
-  /// 申请人
-  userId Int
-  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  /// 申请金额（始终为正数）
-  amount Float
-
-  status  WithdrawalStatus  @default(PENDING_REVIEW)
-  channel WithdrawalChannel @default(MANUAL)
-
-  /// ✅ 幂等键：前端/客户端生成（推荐 uuid），用于防重复提交
-  /// - 同一个 userId + idempotencyKey 只能申请一次
-  idempotencyKey String @db.VarChar(64)
-
-  /// ✅ 业务单号：服务端生成（可用于展示/对账/三方回调关联）
-  requestNo String @unique @db.VarChar(32)
-
-  /// 申请备注（可选）
-  remark String?
-
-  /// 审批信息
-  reviewedBy   Int?
-  reviewedAt   DateTime?
-  reviewRemark String?
-
-  /// ✅ 关键：关联“预扣流水”（申请时产生）
-  reserveTxId Int               @unique
-  /// ✅ 申请时预扣冻结流水（available -> frozen）
-  reserveTx   WalletTransaction @relation("WithdrawalReserveTx", fields: [reserveTxId], references: [id], onDelete: Restrict)
-
-  /// ✅ 关键：关联“出款流水”（打款成功时产生，可空）
-  payoutTxId Int?               @unique
-  /// ✅ 实际出款流水（冻结资金真正扣除，打款成功后写入）
-  payoutTx   WalletTransaction? @relation("WithdrawalPayoutTx", fields: [payoutTxId], references: [id], onDelete: SetNull)
-
-  /// ---------- 为微信自动打款预留 ----------
-  /// 外部打款单号（你系统生成，发给微信用）
-  outTradeNo     String? @db.VarChar(64)
-  /// 微信/三方返回的交易号
-  channelTradeNo String? @db.VarChar(64)
-  /// 三方回调原始内容（可存 JSON 字符串）
-  callbackRaw    String? @db.Text
-  /// 最近一次打款错误原因
-  failReason     String? @db.Text
-
-  createdAt DateTime @default(dbgenerated("CURRENT_TIMESTAMP(3)"))
-  updatedAt DateTime @updatedAt
-
-  @@unique([userId, idempotencyKey], map: "uniq_withdraw_user_idempotency")
-  @@index([userId, status, createdAt])
-  @@index([status, createdAt])
-  @@index([status, reviewedAt])
-  @@map("wallet_withdrawal_requests")
+  CANCELLED
 }
 
 enum DepositBizType {
   /// 提现按比例缴纳押金（例如10%）
   WITHDRAW_PERCENT
-
   /// 奖励直接转押金
   REWARD_TRANSFER
-
   /// 主动缴纳押金
   MANUAL_DEPOSIT
-
   /// 处罚扣押金
   PENALTY_DEDUCT
-
   /// 退还押金
   DEPOSIT_REFUND
 }
 
-//押金流水表
-model WalletDepositTransaction {
+/// =========================
+/// 业绩 / 财务报表体系（Phase 0 2026-3-31）
+/// =========================
+
+enum PerformanceOwnerRoleType {
+  PLAYER     // 陪玩 / 打手
+  CS         // 客服
+  OPERATION  // 运营
+  CHANNEL    // 渠道 / 推广平台
+  LEADER     // 团长 / 介绍人（先预留）
+}
+
+enum PerformanceRecordStatus {
+  EFFECTIVE
+  REVOKED
+}
+
+enum FinanceRecordStatus {
+  EFFECTIVE
+  VOIDED
+}
+
+//业绩记录表
+model PerformanceRecord {
   id Int @id @default(autoincrement())
 
-  userId Int
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// 关联信息
+  orderId Int
+  dispatchId Int?
+  settlementId Int?
 
-  amount Decimal @db.Decimal(10,2)
+  /// 归属对象
+  ownerUserId Int
+  ownerRoleType PerformanceOwnerRoleType
 
-  bizType DepositBizType   //押金类型
+  /// 时间归属（用于日/月统计）
+  statsDate DateTime @db.Date
+  statsMonth String @db.VarChar(7) // 例如：2026-03
 
-  remark String? @db.VarChar(255) //备注
+  /// 订单 / 项目分类（尽量存结果型维度，避免大量联表）
+  billingMode BillingMode?
+  orderType OrderType?
+  projectId Int?
+  bizLine String? @db.VarChar(50)
 
-  operatorId Int?  //操作人
+  /// 金额结果
+  grossPerformanceAmount Decimal @db.Decimal(12, 2) // 抽成前业绩
+  netIncomeAmount Decimal @db.Decimal(12, 2) // 抽成后收益
+  negativeIncomeAmount Decimal @default(0) @db.Decimal(12, 2) // 负收益金额
 
-  createdAt DateTime @default(now())  //时间
+  /// 贡献辅助
+  contributionBaseAmount Decimal? @db.Decimal(12, 2)
+  commissionRate Decimal? @db.Decimal(6, 4)
 
-  @@index([userId])
+  /// 行为标记
+  isAccepted Boolean @default(false)
+  isArchived Boolean @default(false)
+  isCompleted Boolean @default(false)
+  isBombed Boolean @default(false)
+  isComplained Boolean @default(false)
+  isAfterSale Boolean @default(false)
+  isCancelled Boolean @default(false)
+
+  /// 投诉辅助金额（当前先预留）
+  complaintOrderAmount Decimal @default(0) @db.Decimal(12, 2)
+  complaintPenaltyAmount Decimal @default(0) @db.Decimal(12, 2)
+
+  remark String? @db.VarChar(255)
+  status PerformanceRecordStatus @default(EFFECTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ownerUserId, ownerRoleType, statsDate], map: "idx_perf_owner_date")
+  @@index([ownerRoleType, statsDate], map: "idx_perf_role_date")
+  @@index([orderId], map: "idx_perf_order")
+  @@index([dispatchId], map: "idx_perf_dispatch")
+  @@index([settlementId], map: "idx_perf_settlement")
+  @@index([billingMode, statsDate], map: "idx_perf_billing_date")
+  @@index([orderType, statsDate], map: "idx_perf_ordertype_date")
+  @@index([projectId, statsDate], map: "idx_perf_project_date")
+  @@index([bizLine, statsDate], map: "idx_perf_bizline_date")
+  @@index([isBombed, statsDate], map: "idx_perf_bombed_date")
+  @@index([isComplained, statsDate], map: "idx_perf_complained_date")
+  @@index([isAfterSale, statsDate], map: "idx_perf_aftersale_date")
+  @@index([isCancelled, statsDate], map: "idx_perf_cancelled_date")
+  @@index([statsMonth], map: "idx_perf_stats_month")
 }
+
+//订单财务记录表
+model OrderFinanceRecord {
+  id Int @id @default(autoincrement())
+
+  /// 关联信息
+  orderId Int @unique
+  customerUserId Int?
+
+  /// 时间归属
+  statsDate DateTime @db.Date
+  statsMonth String @db.VarChar(7) // 例如：2026-03
+
+  /// 订单 / 项目分类
+  billingMode BillingMode?
+  orderType OrderType?
+  projectId Int?
+  bizLine String? @db.VarChar(50)
+
+  /// 收入口径
+  receivableAmount Decimal @default(0) @db.Decimal(12, 2) // 应收
+  paidAmount Decimal @default(0) @db.Decimal(12, 2) // 实收
+  discountAmount Decimal @default(0) @db.Decimal(12, 2) // 总优惠
+  couponDiscountAmount Decimal @default(0) @db.Decimal(12, 2) // 优惠券优惠
+  otherDiscountAmount Decimal @default(0) @db.Decimal(12, 2) // 其他优惠
+
+  /// 支出口径
+  playerCostAmount Decimal @default(0) @db.Decimal(12, 2)
+  csCostAmount Decimal @default(0) @db.Decimal(12, 2)
+  operationCostAmount Decimal @default(0) @db.Decimal(12, 2)
+  channelCostAmount Decimal @default(0) @db.Decimal(12, 2)
+  complaintPenaltyAmount Decimal @default(0) @db.Decimal(12, 2)
+  afterSaleCostAmount Decimal @default(0) @db.Decimal(12, 2)
+
+  /// 结果口径
+  grossProfitAmount Decimal @default(0) @db.Decimal(12, 2)
+
+  /// 辅助标记（当前先预留）
+  isComplained Boolean @default(false)
+  isAfterSale Boolean @default(false)
+  isCancelled Boolean @default(false)
+
+  remark String? @db.VarChar(255)
+  status FinanceRecordStatus @default(EFFECTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([statsDate], map: "idx_fin_stats_date")
+  @@index([statsMonth], map: "idx_fin_stats_month")
+  @@index([customerUserId, statsDate], map: "idx_fin_customer_date")
+  @@index([billingMode, statsDate], map: "idx_fin_billing_date")
+  @@index([orderType, statsDate], map: "idx_fin_ordertype_date")
+  @@index([projectId, statsDate], map: "idx_fin_project_date")
+  @@index([bizLine, statsDate], map: "idx_fin_bizline_date")
+  @@index([isComplained, statsDate], map: "idx_fin_complained_date")
+  @@index([isAfterSale, statsDate], map: "idx_fin_aftersale_date")
+  @@index([isCancelled, statsDate], map: "idx_fin_cancelled_date")
+}
+
