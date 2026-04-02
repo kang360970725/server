@@ -305,7 +305,7 @@ export class OrdersController {
             throw new BadRequestException('id 必填且必须为正整数');
         }
 
-        return this.ordersService.repairWalletForOrderSettlementsV1({
+        return this.ordersService.repairWalletForOrderSettlementsV2({
             orderId,
             operatorId: req.user.id,
             reason: body?.reason,

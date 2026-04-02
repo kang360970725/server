@@ -20,6 +20,7 @@ import {FinanceModule} from './finance/finance.module';
 import {UserStatusGuard} from './common/guards/user-status.guard';
 import {JwtAuthGuard} from "./auth/guards/jwt-auth.guard";
 import {PermissionsGuard} from "./auth/guards/permissions.guard";
+import { PerformanceModule } from './performance/performance.module';
 
 
 @Module({
@@ -38,6 +39,7 @@ import {PermissionsGuard} from "./auth/guards/permissions.guard";
         UserLogsModule,
         MetaModule,
         FinanceModule,
+        PerformanceModule,
     ],
     controllers: [AppController],
     providers: [AppService, PrismaService,
