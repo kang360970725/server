@@ -258,3 +258,29 @@
 - 结算管理页面
 - 财务打款、批量审批流程
 - 打手端 UI 迭代与体验提升
+
+---
+
+## 2026-04-10 ｜代码事实盘点与文档补全
+
+### 本次动作
+- 全量复查 `server` 与 `system-admin` 当前代码。
+- 新增代码快照文档：`docs/CODEBASE_SNAPSHOT_2026-04-10.md`。
+
+### 补全的关键事实
+- 后端已形成“订单 + 钱包 + 提现 + 业绩 + 财务”闭环，不再只是 v0.2 的订单强化阶段。
+- `OrdersService` 已实现结算后重建：
+  - `PerformanceRecord`
+  - `OrderFinanceRecord`
+- 钱包提现规则已落地（次数限制、首次提现限制、预扣冻结）。
+- 全局 Guard 顺序已固定：`JWT -> UserStatus -> Permissions`。
+
+### 识别到的接口漂移风险
+- 前端 `system-admin/src/services/api.ts` 仍保留历史接口调用（如 `/bills/*`、`/finance/reconcile/*`、`/orders/update-archived-progress`、`/orders/repair-wallet-by-settlements`）。
+- 当前后端主用财务接口为：
+  - `/finance/dashboard/*`
+  - `/finance/records/list`
+
+### 后续建议
+- 以 `CODEBASE_SNAPSHOT_2026-04-10.md` 作为当前会话/新需求的事实基线。
+- 后续每次新增模块或接口，按同样方式补一条 DEV_LOG 记录，避免文档再次滞后。
