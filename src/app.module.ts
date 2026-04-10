@@ -21,6 +21,8 @@ import {UserStatusGuard} from './common/guards/user-status.guard';
 import {JwtAuthGuard} from "./auth/guards/jwt-auth.guard";
 import {PermissionsGuard} from "./auth/guards/permissions.guard";
 import { PerformanceModule } from './performance/performance.module';
+import { SystemConfigModule } from './system-config/system-config.module';
+import { OfflineFeeModule } from './offline-fee/offline-fee.module';
 
 
 @Module({
@@ -40,6 +42,8 @@ import { PerformanceModule } from './performance/performance.module';
         MetaModule,
         FinanceModule,
         PerformanceModule,
+        SystemConfigModule,
+        OfflineFeeModule,
     ],
     controllers: [AppController],
     providers: [AppService, PrismaService,

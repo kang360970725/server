@@ -6,6 +6,7 @@ import {WalletController} from "./wallet.controller";
 import {WalletWithdrawalsController} from "./wallet-withdrawals.controller";
 import {WalletWithdrawalsService} from "./wallet-withdrawals.service";
 import { WalletDepositService } from './wallet.deposit.service';
+import { OfflineFeeModule } from '../offline-fee/offline-fee.module';
 
 /**
  * WalletModule（V0.1）
@@ -16,6 +17,7 @@ import { WalletDepositService } from './wallet.deposit.service';
  * 这里沿用现有习惯，避免大范围重构。
  */
 @Module({
+    imports: [OfflineFeeModule],
     controllers: [
         WalletController,
         WalletWithdrawalsController, // ✅ 新增

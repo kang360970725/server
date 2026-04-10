@@ -36,6 +36,11 @@ export class MetaController {
                 RESTING: '休息',
             },
 
+            StaffWorkMode: {
+                ONLINE: '线上',
+                OFFLINE: '线下',
+            },
+
             OrderType: {
                 EXPERIENCE: '体验单',
                 FUN: '趣味玩法',
@@ -142,6 +147,13 @@ export class MetaController {
             WithdrawalChannel: {
                 WECHAT: '微信自动打款（预留）',
                 MANUAL: '人工线下打款',
+            },
+
+            OfflineFeeBillStatus: {
+                UNPAID: '未缴费',
+                PARTIAL: '部分缴纳',
+                PAID: '已缴清',
+                WAIVED: '已减免',
             },
 
             // =========================

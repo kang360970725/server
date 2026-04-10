@@ -2,6 +2,7 @@ import {BadRequestException, ForbiddenException, Injectable} from '@nestjs/commo
 import { PrismaService } from '../prisma.service';
 import {tcbGetTempFileURL} from "../common/cloudbase.storage";
 import { WalletDepositService } from './wallet.deposit.service';
+import { OfflineFeeService } from '../offline-fee/offline-fee.service';
 
 /** ✅ 截断到 2 位小数（不四舍五入） */
 const round2 = (v: any): number => {
@@ -24,6 +25,7 @@ export class WalletWithdrawalsService {
     constructor(
         private readonly prisma: PrismaService,
         private readonly walletDepositService: WalletDepositService,
+        private readonly offlineFeeService: OfflineFeeService,
     ) {}
 
     /**
@@ -55,6 +57,7 @@ export class WalletWithdrawalsService {
                         depositBalance: true,
                     },
                 },
+                workMode: true,
             },
         });
 
@@ -66,6 +69,7 @@ export class WalletWithdrawalsService {
             availableBalance: Number(user.walletAccount?.availableBalance || 0),
             depositBalance: Number(user.walletAccount?.depositBalance || 0),
             depositLimit: Number(user.depositLimit || 500),
+            workMode: user.workMode,
         };
     }
 
@@ -88,8 +92,9 @@ export class WalletWithdrawalsService {
         idempotencyKey: string;
         remark?: string;
         channel?: 'MANUAL' | 'WECHAT';
+        payOfflineFeeAmount?: number;
     }) {
-        const { userId, amount, idempotencyKey, remark, channel = 'MANUAL' } = params;
+        const { userId, amount, idempotencyKey, remark, channel = 'MANUAL', payOfflineFeeAmount } = params;
 
         if (!amount || amount <= 0) {
             throw new BadRequestException('提现金额必须大于 0');
@@ -107,6 +112,7 @@ export class WalletWithdrawalsService {
                     canWithdraw: true,
                     userType: true,
                     depositLimit: true,
+                    workMode: true,
                 },
             });
 
@@ -224,6 +230,27 @@ export class WalletWithdrawalsService {
                 throw new BadRequestException('账户存在欠款，请先补齐');
             }
 
+            let offlineFeePayment: {
+                paidOfflineFeeAmount: number;
+                billId: number | null;
+                paymentId: number | null;
+            } = {
+                paidOfflineFeeAmount: 0,
+                billId: null,
+                paymentId: null,
+            };
+
+            if (u.workMode === 'OFFLINE') {
+                offlineFeePayment = await this.offlineFeeService.validateAndCollectForWithdrawalTx({
+                    tx: tx as any,
+                    userId,
+                    withdrawAmount: amount,
+                    availableBalance: available,
+                    frozenBalance: Number(account.frozenBalance || 0),
+                    payOfflineFeeAmount,
+                });
+            }
+
             // =========================
             // Step 3：计算押金
             // =========================
@@ -310,12 +337,24 @@ export class WalletWithdrawalsService {
                 },
             });
 
+            await this.offlineFeeService.attachWithdrawalToPayment({
+                tx: tx as any,
+                paymentId: offlineFeePayment.paymentId,
+                withdrawalRequestId: request.id,
+            });
+
             await tx.walletTransaction.update({
                 where: { id: reserveTx.id },
                 data: { sourceId: request.id },
             });
 
-            return request;
+            return {
+                ...request,
+                offlineFee: {
+                    paidAmount: offlineFeePayment.paidOfflineFeeAmount,
+                    billId: offlineFeePayment.billId,
+                },
+            };
         });
     }
 

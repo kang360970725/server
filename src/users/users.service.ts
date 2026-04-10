@@ -12,8 +12,27 @@ import { WalletService } from '../wallet/wallet.service';
 export class UsersService {
   constructor(private prisma: PrismaService, private wallet: WalletService) {}
 
+  private normalizeWorkModePayload(input: { workMode?: 'ONLINE' | 'OFFLINE'; offlineJoinedAt?: string | Date | null }) {
+    const workMode = (input.workMode ?? 'ONLINE') as 'ONLINE' | 'OFFLINE';
+    const offlineJoinedAtRaw = input.offlineJoinedAt ?? null;
+    const offlineJoinedAt = offlineJoinedAtRaw ? new Date(offlineJoinedAtRaw as any) : null;
+
+    if (workMode === 'OFFLINE' && !offlineJoinedAt) {
+      throw new BadRequestException('线下员工必须填写转线下(入职)时间');
+    }
+
+    return {
+      workMode,
+      offlineJoinedAt: workMode === 'OFFLINE' ? offlineJoinedAt : null,
+    };
+  }
+
   async create(createUserDto: CreateUserDto, operatorId?: number) {
     const { phone, password, userType = UserType.REGISTERED_USER, ...rest } = createUserDto;
+    const workModePayload = this.normalizeWorkModePayload({
+      workMode: createUserDto.workMode,
+      offlineJoinedAt: createUserDto.offlineJoinedAt,
+    });
 
     // 检查用户是否已存在
     const existingUser = await this.prisma.user.findUnique({
@@ -46,6 +65,7 @@ export class UsersService {
           userType,
           needResetPwd: userType !== UserType.REGISTERED_USER,// 员工首次登录需要重置密码
           ...rest,
+          ...workModePayload,
         },
         include: this.getUserIncludeFields(),
       });
@@ -299,11 +319,24 @@ export class UsersService {
       updateUserDto.password = await bcrypt.hash(updateUserDto.password, 10);
     }
 
+    const hasWorkModePatch = Object.prototype.hasOwnProperty.call(updateUserDto, 'workMode')
+        || Object.prototype.hasOwnProperty.call(updateUserDto, 'offlineJoinedAt');
+
+    const workModePayload = hasWorkModePatch
+        ? this.normalizeWorkModePayload({
+          workMode: (updateUserDto as any).workMode ?? (oldUser as any).workMode ?? 'ONLINE',
+          offlineJoinedAt: (updateUserDto as any).offlineJoinedAt ?? (oldUser as any).offlineJoinedAt ?? null,
+        })
+        : null;
+
     return this.prisma.$transaction(async (tx) => {
 
       const user = await tx.user.update({
         where: { id },
-        data: updateUserDto,
+        data: {
+          ...updateUserDto,
+          ...(workModePayload || {}),
+        },
         include: this.getUserIncludeFields(),
       });
 

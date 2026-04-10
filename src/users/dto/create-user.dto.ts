@@ -5,6 +5,8 @@ import {
     IsOptional,
     IsNumber,
     IsBoolean, Min,
+    IsIn,
+    IsDateString,
 } from 'class-validator';
 import { UserType, UserStatus } from '@prisma/client';
 
@@ -65,4 +67,12 @@ export class CreateUserDto {
     @IsNumber()
     @Min(500)
     depositLimit?: number;
+
+    @IsOptional()
+    @IsIn(['ONLINE', 'OFFLINE'])
+    workMode?: 'ONLINE' | 'OFFLINE';
+
+    @IsOptional()
+    @IsDateString()
+    offlineJoinedAt?: string;
 }
