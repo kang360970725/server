@@ -365,9 +365,25 @@ export class OfflineFeeService {
     return this.prisma.$transaction(async (tx) => {
       const bill = await this.getLastMonthOutstandingBillTx(tx as any, userId);
       const cfg = await this.getFeeConfig(tx as any);
+      const account = await (tx as any).walletAccount.findUnique({
+        where: { userId },
+        select: { availableBalance: true, frozenBalance: true },
+      });
+
+      const availableBalance = this.toFixed2(Number(account?.availableBalance || 0));
+      const frozenBalance = this.toFixed2(Number(account?.frozenBalance || 0));
+      const walletTotal = this.toFixed2(availableBalance + frozenBalance);
 
       if (!bill) {
-        return { hasOutstanding: false, partialMinPay: cfg.partialMinPay, bill: null };
+        return {
+          hasOutstanding: false,
+          partialMinPay: cfg.partialMinPay,
+          bill: null,
+          availableBalance,
+          frozenBalance,
+          walletTotal,
+          canPartialPayByWalletRule: true,
+        };
       }
 
       const remaining = Number(bill.remainingAmount || 0);
@@ -376,6 +392,12 @@ export class OfflineFeeService {
         hasOutstanding: remaining > 0,
         partialMinPay: effectivePartialMinPay,
         bill,
+        availableBalance,
+        frozenBalance,
+        walletTotal,
+        // 规则：若要部分缴纳，缴后剩余钱包总额度(含冻结)需大于剩余未缴。
+        // 该不等式可约简为：当前钱包总额度 > 当前未缴额度。
+        canPartialPayByWalletRule: walletTotal > this.toFixed2(remaining),
       };
     });
   }
