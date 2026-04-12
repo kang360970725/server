@@ -371,9 +371,10 @@ export class OfflineFeeService {
       }
 
       const remaining = Number(bill.remainingAmount || 0);
+      const effectivePartialMinPay = this.toFixed2(Math.max(0, Math.min(cfg.partialMinPay, remaining)));
       return {
         hasOutstanding: remaining > 0,
-        partialMinPay: cfg.partialMinPay,
+        partialMinPay: effectivePartialMinPay,
         bill,
       };
     });
@@ -489,6 +490,8 @@ export class OfflineFeeService {
       return { paidOfflineFeeAmount: 0, billId: bill.id, paymentId: null };
     }
 
+    // 部分缴纳最低额需受当前账单未缴余额约束，避免“剩余小于配置最低额”时无法缴清
+    const effectivePartialMinPay = this.toFixed2(Math.max(0, Math.min(cfg.partialMinPay, remaining)));
     const requested = this.toFixed2(Number(payOfflineFeeAmount || 0));
 
     if (bill.enforceFullPayment && requested < remaining) {
@@ -496,11 +499,11 @@ export class OfflineFeeService {
     }
 
     if (requested <= 0) {
-      throw new BadRequestException(`上月线下运营成本未缴清，需先缴纳（至少 ${cfg.partialMinPay}）`);
+      throw new BadRequestException(`上月线下运营成本未缴清，需先缴纳（至少 ${effectivePartialMinPay}）`);
     }
 
-    if (requested < cfg.partialMinPay && requested < remaining) {
-      throw new BadRequestException(`部分缴纳最低金额为 ${cfg.partialMinPay}`);
+    if (requested < effectivePartialMinPay && requested < remaining) {
+      throw new BadRequestException(`部分缴纳最低金额为 ${effectivePartialMinPay}`);
     }
 
     const actualPay = this.toFixed2(Math.min(requested, remaining));
