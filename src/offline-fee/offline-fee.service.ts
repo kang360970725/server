@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma.service';
 import { SystemConfigService } from '../system-config/system-config.service';
 import { QueryOfflineFeeBillsDto } from './dto/query-offline-fee-bills.dto';
 import { ManualCreateOfflineFeeBillDto } from './dto/manual-create-offline-fee-bill.dto';
+import { UpdateOfflineFeeBillDto } from './dto/update-offline-fee-bill.dto';
 
 const BEIJING_TZ = 'Asia/Shanghai';
 
@@ -349,6 +350,38 @@ export class OfflineFeeService {
     return this.prisma.offlineFeeBill.update({
       where: { id: billId },
       data: { lastRemindAt: new Date() },
+    });
+  }
+
+  async updateBill(dto: UpdateOfflineFeeBillDto) {
+    const billId = Number(dto.billId);
+    const performanceBaseAmount = this.toFixed2(Math.max(0, Number(dto.performanceBaseAmount || 0)));
+
+    return this.prisma.$transaction(async (tx) => {
+      const bill = await (tx as any).offlineFeeBill.findUnique({ where: { id: billId } });
+      if (!bill) throw new NotFoundException('线下费用账单不存在');
+
+      // 账单编辑沿用账单生成时固化的费率与上下限，确保历史口径一致
+      const shouldPay = this.calcShouldPay(
+        performanceBaseAmount,
+        Number(bill.rate || 0),
+        Number(bill.minAmount || 0),
+        Number(bill.capAmount || 0),
+      );
+
+      const paid = this.toFixed2(Number(bill.paidAmount || 0));
+      const remaining = this.toFixed2(Math.max(0, shouldPay - paid));
+      const status = remaining <= 0 ? 'PAID' : paid > 0 ? 'PARTIAL' : 'UNPAID';
+
+      return (tx as any).offlineFeeBill.update({
+        where: { id: billId },
+        data: {
+          performanceBaseAmount,
+          shouldPayAmount: shouldPay,
+          remainingAmount: remaining,
+          status,
+        },
+      });
     });
   }
 

@@ -8,6 +8,7 @@ import { EnforceOfflineFeeBillDto } from './dto/enforce-offline-fee-bill.dto';
 import { PayOfflineFeeBillDto } from './dto/pay-offline-fee-bill.dto';
 import { QueryOfflineStaffOptionsDto } from './dto/query-offline-staff-options.dto';
 import { ManualCreateOfflineFeeBillDto } from './dto/manual-create-offline-fee-bill.dto';
+import { UpdateOfflineFeeBillDto } from './dto/update-offline-fee-bill.dto';
 
 @Controller('offline-fees')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -36,6 +37,12 @@ export class OfflineFeeController {
   @Permissions('finance:records:list')
   async manualEntry(@Body() dto: ManualCreateOfflineFeeBillDto) {
     return this.service.manualCreateBill(dto);
+  }
+
+  @Post('bills/update')
+  @Permissions('finance:records:list')
+  async updateBill(@Body() dto: UpdateOfflineFeeBillDto) {
+    return this.service.updateBill(dto);
   }
 
   @Post('bills/enforce')
