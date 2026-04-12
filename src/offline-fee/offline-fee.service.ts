@@ -387,7 +387,14 @@ export class OfflineFeeService {
 
   private async getLastMonthOutstandingBillTx(db: PrismaTx, userId: number, now = new Date()) {
     const billMonth = this.getPreviousMonth(now);
-    await this.generateBillsForMonthTx(db, billMonth);
+    // 仅在账单不存在时补生成，避免覆盖人工修订后的账单
+    const existing = await (db as any).offlineFeeBill.findUnique({
+      where: { userId_billMonth: { userId, billMonth } },
+    });
+
+    if (!existing) {
+      await this.generateBillsForMonthTx(db, billMonth);
+    }
 
     return (db as any).offlineFeeBill.findUnique({
       where: { userId_billMonth: { userId, billMonth } },
