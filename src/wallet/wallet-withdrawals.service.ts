@@ -292,12 +292,26 @@ export class WalletWithdrawalsService {
             // Step 5：押金流水
             // =========================
             if (depositAdd) {
-                await tx.walletDepositTransaction.create({
+                const depositTx = await tx.walletDepositTransaction.create({
                     data: {
                         userId,
                         amount: depositAdd,
                         bizType: 'WITHDRAW_PERCENT',
                         remark: '提现自动缴纳押金',
+                    },
+                });
+
+                await tx.walletTransaction.create({
+                    data: {
+                        userId,
+                        direction: 'OUT',
+                        bizType: 'DEPOSIT_ADD',
+                        amount: round2(depositAdd),
+                        status: 'AVAILABLE',
+                        sourceType: 'WALLET_DEPOSIT',
+                        sourceId: depositTx.id,
+                        availableAfter: round2(Number(accountAfterUpdate.availableBalance || 0)),
+                        frozenAfter: round2(Number(accountAfterUpdate.frozenBalance || 0)),
                     },
                 });
             }

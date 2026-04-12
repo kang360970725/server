@@ -727,6 +727,10 @@ enum WalletBizType {
   WITHDRAW_PAYOUT
   /// 新增：押金退还
   DEPOSIT_REFUND
+  /// 押金增加（通用，含手动缴纳/规则转押金）
+  DEPOSIT_ADD
+  /// 押金扣减（通用，含处罚扣减等）
+  DEPOSIT_DEDUCT
   /// 线下运营成本缴费
   OFFLINE_FEE_PAYMENT
   SETTLEMENT_REVERSAL

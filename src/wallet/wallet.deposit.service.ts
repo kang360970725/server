@@ -5,6 +5,10 @@ import {PrismaService} from '../prisma.service';
 export class WalletDepositService {
     constructor(private readonly prisma: PrismaService) {}
 
+    private round2(v: any) {
+        return Math.round((Number(v) || 0) * 100) / 100;
+    }
+
     /**
      * 获取押金余额
      */
@@ -40,7 +44,7 @@ export class WalletDepositService {
         return this.prisma.$transaction(async (tx) => {
             const account = await tx.walletAccount.findUnique({
                 where: { userId },
-                select: { depositBalance: true },
+                select: { depositBalance: true, availableBalance: true, frozenBalance: true },
             });
 
             if (!account) {
@@ -66,6 +70,20 @@ export class WalletDepositService {
                     bizType,
                     remark,
                     operatorId,
+                },
+            });
+
+            await tx.walletTransaction.create({
+                data: {
+                    userId,
+                    direction: 'IN',
+                    bizType: 'DEPOSIT_ADD',
+                    amount: this.round2(amount),
+                    status: 'AVAILABLE',
+                    sourceType: 'WALLET_DEPOSIT',
+                    sourceId: record.id,
+                    availableAfter: this.round2(Number(account.availableBalance || 0)),
+                    frozenAfter: this.round2(Number(account.frozenBalance || 0)),
                 },
             });
 
@@ -95,7 +113,7 @@ export class WalletDepositService {
         return this.prisma.$transaction(async (tx) => {
             const account = await tx.walletAccount.findUnique({
                 where: { userId },
-                select: { depositBalance: true },
+                select: { depositBalance: true, availableBalance: true, frozenBalance: true },
             });
 
             if (!account) {
@@ -129,6 +147,20 @@ export class WalletDepositService {
                 },
             });
 
+            await tx.walletTransaction.create({
+                data: {
+                    userId,
+                    direction: 'OUT',
+                    bizType: 'DEPOSIT_DEDUCT',
+                    amount: this.round2(amount),
+                    status: 'AVAILABLE',
+                    sourceType: 'WALLET_DEPOSIT',
+                    sourceId: record.id,
+                    availableAfter: this.round2(Number(account.availableBalance || 0)),
+                    frozenAfter: this.round2(Number(account.frozenBalance || 0)),
+                },
+            });
+
             return {
                 depositBalance: newBalance,
                 record,
@@ -151,16 +183,20 @@ export class WalletDepositService {
 
         return this.prisma.$transaction(async (tx) => {
 
-            await tx.walletAccount.update({
+            const accountAfter = await tx.walletAccount.update({
                 where: { userId },
                 data: {
                     depositBalance: {
                         increment: amount,
                     },
                 },
+                select: {
+                    availableBalance: true,
+                    frozenBalance: true,
+                },
             });
 
-            return await tx.walletDepositTransaction.create({
+            const depositTx = await tx.walletDepositTransaction.create({
                 data: {
                     userId,
                     amount,
@@ -169,6 +205,22 @@ export class WalletDepositService {
                     operatorId: operatorId ?? null,
                 },
             });
+
+            await tx.walletTransaction.create({
+                data: {
+                    userId,
+                    direction: 'IN',
+                    bizType: 'DEPOSIT_ADD',
+                    amount: this.round2(amount),
+                    status: 'AVAILABLE',
+                    sourceType: 'WALLET_DEPOSIT',
+                    sourceId: depositTx.id,
+                    availableAfter: this.round2(Number(accountAfter.availableBalance || 0)),
+                    frozenAfter: this.round2(Number(accountAfter.frozenBalance || 0)),
+                },
+            });
+
+            return depositTx;
         });
     }
 

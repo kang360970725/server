@@ -136,6 +136,8 @@ export class MetaController {
                 SETTLEMENT_RECALC: '重算后新结算收益',
 
                 DEPOSIT_REFUND: '押金退还',
+                DEPOSIT_ADD: '押金增加',
+                DEPOSIT_DEDUCT: '押金扣减',
                 RELEASE_FROZEN: '解冻入账',
                 REFUND_REVERSAL: '退款冲正',
 
