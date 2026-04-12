@@ -83,6 +83,10 @@ model User {
   dispatchedOrders         Order[]                    @relation("OrderDispatcher")
   offlineFeeBills          OfflineFeeBill[]
   offlineFeePayments       OfflineFeeBillPayment[]
+  announcementsCreated     SystemAnnouncement[]      @relation("AnnouncementCreator")
+  announcementReads        SystemAnnouncementRead[]
+  notifications            UserNotification[]
+  csDutySchedules          CsDutySchedule[]
   orderParticipants        OrderParticipant[]
   orderSettlements         OrderSettlement[]
   recharges                Recharge[]
@@ -115,6 +119,72 @@ model SystemConfig {
 
   @@index([enabled])
   @@map("system_configs")
+}
+
+model SystemAnnouncement {
+  id          Int                      @id @default(autoincrement())
+  title       String                   @db.VarChar(120)
+  content     String                   @db.Text
+  forceRead   Boolean                  @default(false)
+  enabled     Boolean                  @default(true)
+  publishAt   DateTime?
+  expireAt    DateTime?
+  createdBy   Int?
+  createdAt   DateTime                 @default(now())
+  updatedAt   DateTime                 @updatedAt
+  creator     User?                    @relation("AnnouncementCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  reads       SystemAnnouncementRead[]
+
+  @@index([enabled, publishAt, expireAt], map: "idx_announcement_publish")
+  @@index([forceRead], map: "idx_announcement_force_read")
+  @@map("system_announcements")
+}
+
+model SystemAnnouncementRead {
+  id             Int                @id @default(autoincrement())
+  announcementId Int
+  userId         Int
+  readAt         DateTime           @default(now())
+  announcement   SystemAnnouncement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([announcementId, userId], map: "uniq_announcement_read_user")
+  @@index([userId, readAt], map: "idx_announcement_read_user")
+  @@map("system_announcement_reads")
+}
+
+model UserNotification {
+  id        Int              @id @default(autoincrement())
+  userId    Int
+  type      NotificationType
+  title     String           @db.VarChar(120)
+  content   String           @db.Text
+  payload   Json?
+  isRead    Boolean          @default(false)
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead, createdAt], map: "idx_notification_user_read")
+  @@index([type, createdAt], map: "idx_notification_type")
+  @@map("user_notifications")
+}
+
+model CsDutySchedule {
+  id          Int      @id @default(autoincrement())
+  userId      Int
+  weekday     Int
+  startMinute Int
+  endMinute   Int
+  enabled     Boolean  @default(true)
+  remark      String?  @db.VarChar(255)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([weekday, enabled, startMinute, endMinute], map: "idx_cs_duty_shift")
+  @@index([userId, enabled], map: "idx_cs_duty_user")
+  @@map("cs_duty_schedules")
 }
 
 model OfflineFeeBill {
@@ -777,6 +847,13 @@ enum DepositBizType {
   PENALTY_DEDUCT
   /// 退还押金
   DEPOSIT_REFUND
+}
+
+enum NotificationType {
+  SYSTEM_ANNOUNCEMENT
+  DISPATCH_ASSIGNED
+  DISPATCH_ARCHIVED
+  DISPATCH_COMPLETED
 }
 
 /// =========================

@@ -22,12 +22,14 @@ import {
 } from "../utils/orderDispatches/revenueInit";
 import {compareSettlementsToPlan} from "../utils/finance/generateRepairPlan";
 import {computeSettlementFreezeTime} from "../utils/orderDispatches/settlement-freeze.rule";
+import { NotificationsService } from '../notifications/notifications.service';
 
 @Injectable()
 export class OrdersService {
     constructor(
         private prisma: PrismaService,
         private wallet: WalletService,
+        private notificationsService: NotificationsService,
     ) {
     }
 
@@ -630,6 +632,18 @@ export class OrdersService {
             });
         }
 
+        // 派单成功后给对应打手推送接单通知（通知失败不影响主流程）
+        try {
+            await this.notificationsService.pushDispatchAssigned({
+                orderId,
+                dispatchId: dispatch.id,
+                playerIds,
+                autoSerial: (order as any).autoSerial || undefined,
+            });
+        } catch (e) {
+            console.error('[notify][dispatch-assigned] failed', e?.message || e);
+        }
+
         return this.getOrderDetail(orderId);
     }
 
@@ -780,6 +794,23 @@ export class OrdersService {
                 throw e;
             }
         }, {maxWait: 5000, timeout: 20000});
+
+        // 打手存单/结单后给当班客服推送（通知失败不影响主流程）
+        try {
+            const order = await this.prisma.order.findUnique({
+                where: { id: Number(orderId) },
+                select: { autoSerial: true },
+            });
+
+            await this.notificationsService.pushDispatchArchiveOrCompleteToDutyCs({
+                orderId: Number(orderId),
+                dispatchId,
+                autoSerial: order?.autoSerial || undefined,
+                status: dispatchStatus === DispatchStatus.COMPLETED ? 'COMPLETED' : 'ARCHIVED',
+            });
+        } catch (e) {
+            console.error('[notify][dispatch-archive-complete] failed', e?.message || e);
+        }
 
         return {
             code: 200,

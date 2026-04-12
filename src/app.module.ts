@@ -23,6 +23,7 @@ import {PermissionsGuard} from "./auth/guards/permissions.guard";
 import { PerformanceModule } from './performance/performance.module';
 import { SystemConfigModule } from './system-config/system-config.module';
 import { OfflineFeeModule } from './offline-fee/offline-fee.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 
 @Module({
@@ -44,6 +45,7 @@ import { OfflineFeeModule } from './offline-fee/offline-fee.module';
         PerformanceModule,
         SystemConfigModule,
         OfflineFeeModule,
+        NotificationsModule,
     ],
     controllers: [AppController],
     providers: [AppService, PrismaService,

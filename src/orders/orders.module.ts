@@ -3,6 +3,7 @@ import { OrdersController } from './orders.controller';
 import { OrdersService } from './orders.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletModule } from '../wallet/wallet.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 /**
  * OrdersModule
@@ -10,7 +11,7 @@ import { WalletModule } from '../wallet/wallet.module';
  * - 仅新增 imports，不影响既有 controller/provider 行为
  */
 @Module({
-    imports: [WalletModule],
+    imports: [WalletModule, NotificationsModule],
     controllers: [OrdersController],
     providers: [OrdersService, PrismaService],
     exports: [OrdersService],

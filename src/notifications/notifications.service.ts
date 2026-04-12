@@ -1,0 +1,418 @@
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { NotificationType, UserType } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import { CreateAnnouncementDto } from './dto/create-announcement.dto';
+import { UpdateAnnouncementDto } from './dto/update-announcement.dto';
+import { ListAnnouncementsDto } from './dto/list-announcements.dto';
+import { UpsertDutyCsScheduleDto } from './dto/upsert-duty-cs-schedule.dto';
+import { ListMyNotificationsDto } from './dto/list-my-notifications.dto';
+
+@Injectable()
+export class NotificationsService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  private parseMaybeDate(v?: string) {
+    if (!v) return null;
+    const d = new Date(v);
+    if (Number.isNaN(d.getTime())) throw new BadRequestException('日期格式不正确');
+    return d;
+  }
+
+  private parseMinuteOfDay(v: string) {
+    const str = String(v || '').trim();
+    const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(str);
+    if (!m) throw new BadRequestException('时间格式必须为 HH:mm');
+    return Number(m[1]) * 60 + Number(m[2]);
+  }
+
+  private minuteToText(minute: number) {
+    const h = `${Math.floor(minute / 60)}`.padStart(2, '0');
+    const m = `${minute % 60}`.padStart(2, '0');
+    return `${h}:${m}`;
+  }
+
+  async adminListAnnouncements(dto: ListAnnouncementsDto) {
+    const page = Math.max(1, Number(dto.page || 1));
+    const limit = Math.min(100, Math.max(1, Number(dto.limit || 20)));
+    const where: any = {};
+
+    const keyword = String(dto.keyword || '').trim();
+    if (keyword) {
+      where.OR = [
+        { title: { contains: keyword } },
+        { content: { contains: keyword } },
+      ];
+    }
+
+    const [list, total] = await this.prisma.$transaction([
+      this.prisma.systemAnnouncement.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: [{ id: 'desc' }],
+        include: {
+          creator: { select: { id: true, name: true, phone: true } },
+        },
+      }),
+      this.prisma.systemAnnouncement.count({ where }),
+    ]);
+
+    return { list, total, page, limit };
+  }
+
+  async adminCreateAnnouncement(dto: CreateAnnouncementDto, operatorId?: number) {
+    const publishAt = this.parseMaybeDate(dto.publishAt || undefined);
+    const expireAt = this.parseMaybeDate(dto.expireAt || undefined);
+
+    if (publishAt && expireAt && publishAt >= expireAt) {
+      throw new BadRequestException('发布时间必须早于过期时间');
+    }
+
+    return this.prisma.systemAnnouncement.create({
+      data: {
+        title: dto.title,
+        content: dto.content,
+        forceRead: Boolean(dto.forceRead),
+        enabled: dto.enabled !== false,
+        publishAt,
+        expireAt,
+        createdBy: operatorId || null,
+      },
+    });
+  }
+
+  async adminUpdateAnnouncement(dto: UpdateAnnouncementDto) {
+    const row = await this.prisma.systemAnnouncement.findUnique({ where: { id: Number(dto.id) } });
+    if (!row) throw new NotFoundException('公告不存在');
+
+    const publishAt = dto.publishAt === undefined ? row.publishAt : this.parseMaybeDate(dto.publishAt || undefined);
+    const expireAt = dto.expireAt === undefined ? row.expireAt : this.parseMaybeDate(dto.expireAt || undefined);
+
+    if (publishAt && expireAt && publishAt >= expireAt) {
+      throw new BadRequestException('发布时间必须早于过期时间');
+    }
+
+    return this.prisma.systemAnnouncement.update({
+      where: { id: row.id },
+      data: {
+        title: dto.title,
+        content: dto.content,
+        forceRead: dto.forceRead,
+        enabled: dto.enabled,
+        publishAt,
+        expireAt,
+      },
+    });
+  }
+
+  async listMyAnnouncements(userId: number) {
+    const now = new Date();
+    const list = await this.prisma.systemAnnouncement.findMany({
+      where: {
+        enabled: true,
+        OR: [{ publishAt: null }, { publishAt: { lte: now } }],
+        AND: [{ OR: [{ expireAt: null }, { expireAt: { gt: now } }] }],
+      },
+      orderBy: [{ id: 'desc' }],
+      include: {
+        reads: {
+          where: { userId },
+          select: { id: true, readAt: true },
+          take: 1,
+        },
+      },
+    });
+
+    return list.map((item) => ({
+      ...item,
+      isRead: item.reads.length > 0,
+      readAt: item.reads[0]?.readAt || null,
+      reads: undefined,
+    }));
+  }
+
+  async markAnnouncementRead(userId: number, announcementId: number) {
+    const row = await this.prisma.systemAnnouncement.findUnique({ where: { id: announcementId } });
+    if (!row || !row.enabled) throw new NotFoundException('公告不存在或已下线');
+
+    await this.prisma.systemAnnouncementRead.upsert({
+      where: {
+        announcementId_userId: {
+          announcementId,
+          userId,
+        },
+      },
+      update: { readAt: new Date() },
+      create: {
+        announcementId,
+        userId,
+      },
+    });
+
+    return { success: true };
+  }
+
+  async getMyForceAnnouncementStats(userId: number) {
+    const list = await this.listMyAnnouncements(userId);
+    const forceUnread = list.filter((x) => Boolean(x.forceRead) && !Boolean((x as any).isRead));
+    return {
+      unreadForceCount: forceUnread.length,
+      list: forceUnread,
+    };
+  }
+
+  async listDutySchedules(dto: { keyword?: string }) {
+    const keyword = String(dto.keyword || '').trim();
+    const where: any = {};
+    if (keyword) {
+      where.user = {
+        OR: [
+          { phone: { contains: keyword } },
+          { name: { contains: keyword } },
+          { realName: { contains: keyword } },
+        ],
+      };
+    }
+
+    const rows = await this.prisma.csDutySchedule.findMany({
+      where,
+      include: {
+        user: {
+          select: { id: true, phone: true, name: true, realName: true, userType: true, status: true },
+        },
+      },
+      orderBy: [{ weekday: 'asc' }, { startMinute: 'asc' }, { id: 'desc' }],
+    });
+
+    return rows.map((item) => ({
+      ...item,
+      startTime: this.minuteToText(item.startMinute),
+      endTime: this.minuteToText(item.endMinute),
+    }));
+  }
+
+  async upsertDutySchedule(dto: UpsertDutyCsScheduleDto) {
+    const userId = Number(dto.userId);
+    const weekday = Number(dto.weekday);
+    const startMinute = this.parseMinuteOfDay(dto.startTime);
+    const endMinute = this.parseMinuteOfDay(dto.endTime);
+
+    if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) {
+      throw new BadRequestException('weekday 必须在 0-6 范围');
+    }
+
+    if (startMinute >= endMinute) {
+      throw new BadRequestException('开始时间必须早于结束时间');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, userType: true, status: true },
+    });
+
+    if (!user) throw new NotFoundException('用户不存在');
+    if (user.userType !== UserType.CUSTOMER_SERVICE) {
+      throw new BadRequestException('仅允许配置客服用户为当班客服');
+    }
+
+    if (dto.id) {
+      const old = await this.prisma.csDutySchedule.findUnique({ where: { id: Number(dto.id) } });
+      if (!old) throw new NotFoundException('当班配置不存在');
+
+      return this.prisma.csDutySchedule.update({
+        where: { id: old.id },
+        data: {
+          userId,
+          weekday,
+          startMinute,
+          endMinute,
+          enabled: dto.enabled !== false,
+          remark: dto.remark || null,
+        },
+      });
+    }
+
+    return this.prisma.csDutySchedule.create({
+      data: {
+        userId,
+        weekday,
+        startMinute,
+        endMinute,
+        enabled: dto.enabled !== false,
+        remark: dto.remark || null,
+      },
+    });
+  }
+
+  async deleteDutySchedule(id: number) {
+    const row = await this.prisma.csDutySchedule.findUnique({ where: { id } });
+    if (!row) throw new NotFoundException('当班配置不存在');
+    await this.prisma.csDutySchedule.delete({ where: { id } });
+    return { success: true };
+  }
+
+  async createNotification(input: {
+    userId: number;
+    type: NotificationType;
+    title: string;
+    content: string;
+    payload?: any;
+  }) {
+    return this.prisma.userNotification.create({
+      data: {
+        userId: Number(input.userId),
+        type: input.type,
+        title: input.title,
+        content: input.content,
+        payload: input.payload as any,
+      },
+    });
+  }
+
+  async batchCreateNotifications(input: {
+    userIds: number[];
+    type: NotificationType;
+    title: string;
+    content: string;
+    payload?: any;
+  }) {
+    const userIds = Array.from(new Set((input.userIds || []).map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0)));
+    if (!userIds.length) return { created: 0 };
+
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: userIds }, status: 'ACTIVE' },
+      select: { id: true },
+    });
+
+    if (!users.length) return { created: 0 };
+
+    const now = new Date();
+    const data = users.map((u) => ({
+      userId: u.id,
+      type: input.type,
+      title: input.title,
+      content: input.content,
+      payload: input.payload as any,
+      isRead: false,
+      createdAt: now,
+    }));
+
+    const res = await this.prisma.userNotification.createMany({ data });
+    return { created: Number(res.count || 0) };
+  }
+
+  async listMyNotifications(userId: number, dto: ListMyNotificationsDto) {
+    const page = Math.max(1, Number(dto.page || 1));
+    const limit = Math.min(100, Math.max(1, Number(dto.limit || 20)));
+
+    const where: any = { userId };
+    if (dto.type) where.type = dto.type as any;
+
+    const [list, total, unreadCount] = await this.prisma.$transaction([
+      this.prisma.userNotification.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: [{ id: 'desc' }],
+      }),
+      this.prisma.userNotification.count({ where }),
+      this.prisma.userNotification.count({ where: { userId, isRead: false } }),
+    ]);
+
+    return { list, total, page, limit, unreadCount };
+  }
+
+  async markMyNotificationRead(userId: number, dto: { notificationId?: number; markAll?: boolean }) {
+    if (dto.markAll) {
+      await this.prisma.userNotification.updateMany({
+        where: { userId, isRead: false },
+        data: { isRead: true, readAt: new Date() },
+      });
+      return { success: true };
+    }
+
+    const id = Number(dto.notificationId || 0);
+    if (!id) throw new BadRequestException('notificationId 必填');
+
+    await this.prisma.userNotification.updateMany({
+      where: { id, userId },
+      data: { isRead: true, readAt: new Date() },
+    });
+
+    return { success: true };
+  }
+
+  async getMyNotificationUnreadCount(userId: number) {
+    const unreadCount = await this.prisma.userNotification.count({ where: { userId, isRead: false } });
+    return { unreadCount };
+  }
+
+  private getNowShanghaiWeekdayAndMinute(now = new Date()) {
+    const weekday = now.getDay();
+    const minuteOfDay = now.getHours() * 60 + now.getMinutes();
+    return { weekday, minuteOfDay };
+  }
+
+  async getOnDutyCustomerServiceUserIds(now = new Date()) {
+    const { weekday, minuteOfDay } = this.getNowShanghaiWeekdayAndMinute(now);
+
+    const rows = await this.prisma.csDutySchedule.findMany({
+      where: {
+        enabled: true,
+        weekday,
+        startMinute: { lte: minuteOfDay },
+        endMinute: { gt: minuteOfDay },
+        user: {
+          userType: UserType.CUSTOMER_SERVICE,
+          status: 'ACTIVE',
+        },
+      },
+      select: { userId: true },
+    });
+
+    return Array.from(new Set(rows.map((x) => Number(x.userId))));
+  }
+
+  async pushDispatchAssigned(input: {
+    orderId: number;
+    dispatchId: number;
+    playerIds: number[];
+    autoSerial?: string;
+  }) {
+    return this.batchCreateNotifications({
+      userIds: input.playerIds,
+      type: NotificationType.DISPATCH_ASSIGNED,
+      title: '你有新的接单通知',
+      content: `订单 ${input.autoSerial || `#${input.orderId}`} 已派单，请及时接单。`,
+      payload: {
+        orderId: input.orderId,
+        dispatchId: input.dispatchId,
+        autoSerial: input.autoSerial || null,
+      },
+    });
+  }
+
+  async pushDispatchArchiveOrCompleteToDutyCs(input: {
+    orderId: number;
+    dispatchId: number;
+    autoSerial?: string;
+    status: 'ARCHIVED' | 'COMPLETED';
+  }) {
+    const csIds = await this.getOnDutyCustomerServiceUserIds();
+    if (!csIds.length) return { created: 0 };
+
+    const isArchived = input.status === 'ARCHIVED';
+    return this.batchCreateNotifications({
+      userIds: csIds,
+      type: isArchived ? NotificationType.DISPATCH_ARCHIVED : NotificationType.DISPATCH_COMPLETED,
+      title: isArchived ? '打手已存单，请及时处理' : '打手已结单，请及时确认',
+      content: `订单 ${input.autoSerial || `#${input.orderId}`} ${isArchived ? '已存单' : '已结单'}，请当班客服尽快处理。`,
+      payload: {
+        orderId: input.orderId,
+        dispatchId: input.dispatchId,
+        autoSerial: input.autoSerial || null,
+        status: input.status,
+      },
+    });
+  }
+}

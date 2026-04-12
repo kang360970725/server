@@ -1,0 +1,99 @@
+import { Body, Controller, Post, Req, UseGuards } from '@nestjs/common';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { PermissionsGuard } from '../auth/guards/permissions.guard';
+import { Permissions } from '../auth/decorators/permissions.decorator';
+import { NotificationsService } from './notifications.service';
+import { CreateAnnouncementDto } from './dto/create-announcement.dto';
+import { UpdateAnnouncementDto } from './dto/update-announcement.dto';
+import { ListAnnouncementsDto } from './dto/list-announcements.dto';
+import { ReadAnnouncementDto } from './dto/read-announcement.dto';
+import { ListDutyCsScheduleDto } from './dto/list-duty-cs-schedule.dto';
+import { UpsertDutyCsScheduleDto } from './dto/upsert-duty-cs-schedule.dto';
+import { DeleteDutyCsScheduleDto } from './dto/delete-duty-cs-schedule.dto';
+import { ListMyNotificationsDto } from './dto/list-my-notifications.dto';
+import { MarkNotificationReadDto } from './dto/mark-notification-read.dto';
+
+@Controller('notifications')
+@UseGuards(JwtAuthGuard)
+export class NotificationsController {
+  constructor(private readonly service: NotificationsService) {}
+
+  @Post('admin/announcements/list')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  async adminListAnnouncements(@Body() dto: ListAnnouncementsDto) {
+    return this.service.adminListAnnouncements(dto);
+  }
+
+  @Post('admin/announcements/create')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  async adminCreateAnnouncement(@Body() dto: CreateAnnouncementDto, @Req() req: any) {
+    const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.adminCreateAnnouncement(dto, Number.isFinite(operatorId) ? operatorId : undefined);
+  }
+
+  @Post('admin/announcements/update')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  async adminUpdateAnnouncement(@Body() dto: UpdateAnnouncementDto) {
+    return this.service.adminUpdateAnnouncement(dto);
+  }
+
+  @Post('admin/duty-cs/list')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  async listDutySchedules(@Body() dto: ListDutyCsScheduleDto) {
+    return this.service.listDutySchedules(dto);
+  }
+
+  @Post('admin/duty-cs/upsert')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  async upsertDutySchedule(@Body() dto: UpsertDutyCsScheduleDto) {
+    return this.service.upsertDutySchedule(dto);
+  }
+
+  @Post('admin/duty-cs/delete')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  async deleteDutySchedule(@Body() dto: DeleteDutyCsScheduleDto) {
+    return this.service.deleteDutySchedule(Number(dto.id));
+  }
+
+  @Post('my/announcements')
+  async myAnnouncements(@Req() req: any) {
+    const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.listMyAnnouncements(userId);
+  }
+
+  @Post('my/announcements/read')
+  async readAnnouncement(@Req() req: any, @Body() dto: ReadAnnouncementDto) {
+    const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.markAnnouncementRead(userId, Number(dto.announcementId));
+  }
+
+  @Post('my/announcements/pending-force')
+  async pendingForceAnnouncements(@Req() req: any) {
+    const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.getMyForceAnnouncementStats(userId);
+  }
+
+  @Post('my/list')
+  async myNotifications(@Req() req: any, @Body() dto: ListMyNotificationsDto) {
+    const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.listMyNotifications(userId, dto);
+  }
+
+  @Post('my/read')
+  async readNotification(@Req() req: any, @Body() dto: MarkNotificationReadDto) {
+    const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.markMyNotificationRead(userId, dto);
+  }
+
+  @Post('my/unread-count')
+  async unreadCount(@Req() req: any) {
+    const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.getMyNotificationUnreadCount(userId);
+  }
+}
