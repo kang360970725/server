@@ -8,6 +8,7 @@ import { ManualCreateOfflineFeeBillDto } from './dto/manual-create-offline-fee-b
 import { UpdateOfflineFeeBillDto } from './dto/update-offline-fee-bill.dto';
 
 const BEIJING_TZ = 'Asia/Shanghai';
+const WITHDRAWAL_PARTIAL_MIN_PAY = 100;
 
 type PrismaTx = PrismaClient | Prisma.TransactionClient;
 
@@ -404,7 +405,6 @@ export class OfflineFeeService {
   async getWithdrawalGuardInfo(userId: number) {
     return this.prisma.$transaction(async (tx) => {
       const bill = await this.getLastMonthOutstandingBillTx(tx as any, userId);
-      const cfg = await this.getFeeConfig(tx as any);
       const account = await (tx as any).walletAccount.findUnique({
         where: { userId },
         select: { availableBalance: true, frozenBalance: true },
@@ -417,7 +417,7 @@ export class OfflineFeeService {
       if (!bill) {
         return {
           hasOutstanding: false,
-          partialMinPay: cfg.partialMinPay,
+          partialMinPay: WITHDRAWAL_PARTIAL_MIN_PAY,
           bill: null,
           availableBalance,
           frozenBalance,
@@ -427,7 +427,7 @@ export class OfflineFeeService {
       }
 
       const remaining = Number(bill.remainingAmount || 0);
-      const effectivePartialMinPay = this.toFixed2(Math.max(0, Math.min(cfg.partialMinPay, remaining)));
+      const effectivePartialMinPay = this.toFixed2(Math.max(0, Math.min(WITHDRAWAL_PARTIAL_MIN_PAY, remaining)));
       return {
         hasOutstanding: remaining > 0,
         partialMinPay: effectivePartialMinPay,
@@ -541,7 +541,6 @@ export class OfflineFeeService {
     const { tx, userId, withdrawAmount, availableBalance, frozenBalance, payOfflineFeeAmount } = params;
 
     const bill = await this.getLastMonthOutstandingBillTx(tx, userId);
-    const cfg = await this.getFeeConfig(tx);
 
     if (!bill) {
       return { paidOfflineFeeAmount: 0, billId: null, paymentId: null };
@@ -553,7 +552,7 @@ export class OfflineFeeService {
     }
 
     // 部分缴纳最低额需受当前账单未缴余额约束，避免“剩余小于配置最低额”时无法缴清
-    const effectivePartialMinPay = this.toFixed2(Math.max(0, Math.min(cfg.partialMinPay, remaining)));
+    const effectivePartialMinPay = this.toFixed2(Math.max(0, Math.min(WITHDRAWAL_PARTIAL_MIN_PAY, remaining)));
     const requested = this.toFixed2(Number(payOfflineFeeAmount || 0));
 
     if (bill.enforceFullPayment && requested < remaining) {
