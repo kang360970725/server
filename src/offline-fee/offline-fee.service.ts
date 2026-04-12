@@ -4,6 +4,7 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { SystemConfigService } from '../system-config/system-config.service';
 import { QueryOfflineFeeBillsDto } from './dto/query-offline-fee-bills.dto';
+import { ManualCreateOfflineFeeBillDto } from './dto/manual-create-offline-fee-bill.dto';
 
 const BEIJING_TZ = 'Asia/Shanghai';
 
@@ -205,6 +206,130 @@ export class OfflineFeeService {
     ]);
 
     return { list, total, page, limit };
+  }
+
+  async listOfflineStaffOptions(keyword?: string) {
+    const where: any = {
+      userType: 'STAFF',
+      workMode: 'OFFLINE',
+    };
+
+    const q = String(keyword || '').trim();
+    if (q) {
+      where.OR = [
+        { name: { contains: q } },
+        { phone: { contains: q } },
+        { realName: { contains: q } },
+      ];
+      if (/^\d+$/.test(q)) {
+        where.OR.push({ id: Number(q) });
+      }
+    }
+
+    const rows = await this.prisma.user.findMany({
+      where,
+      take: 100,
+      orderBy: [{ id: 'desc' }],
+      select: {
+        id: true,
+        name: true,
+        realName: true,
+        phone: true,
+        status: true,
+        offlineJoinedAt: true,
+      },
+    });
+
+    return rows.map((item) => ({
+      id: item.id,
+      label: `${item.name || item.realName || item.phone} (${item.phone})`,
+      name: item.name,
+      realName: item.realName,
+      phone: item.phone,
+      status: item.status,
+      offlineJoinedAt: item.offlineJoinedAt,
+    }));
+  }
+
+  async manualCreateBill(dto: ManualCreateOfflineFeeBillDto) {
+    const userId = Number(dto.userId);
+    const month = String(dto.month || '').trim();
+    const performanceBaseAmount = this.toFixed2(Math.max(0, Number(dto.performanceBaseAmount || 0)));
+    const { start, end } = this.getMonthRange(month);
+
+    return this.prisma.$transaction(async (tx) => {
+      const user = await (tx as any).user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          userType: true,
+          workMode: true,
+          offlineJoinedAt: true,
+        },
+      });
+
+      if (!user) throw new NotFoundException('员工不存在');
+      if (user.userType !== 'STAFF' || user.workMode !== 'OFFLINE') {
+        throw new BadRequestException('仅支持为线下员工录入账单');
+      }
+
+      // 线下入职日期晚于账单周期时，不允许录入该月份账单
+      if (user.offlineJoinedAt) {
+        const joinDate = new Date(Date.UTC(
+          user.offlineJoinedAt.getUTCFullYear(),
+          user.offlineJoinedAt.getUTCMonth(),
+          user.offlineJoinedAt.getUTCDate(),
+        ));
+        if (joinDate > end) {
+          throw new BadRequestException('该员工在线下入职时间之后才生效，不能录入该月份账单');
+        }
+      }
+
+      const cfg = await this.getFeeConfig(tx as any);
+      const shouldPay = this.calcShouldPay(performanceBaseAmount, cfg.rate, cfg.minAmount, cfg.capAmount);
+
+      const existing = await (tx as any).offlineFeeBill.findUnique({
+        where: { userId_billMonth: { userId, billMonth: month } },
+        select: { id: true, paidAmount: true },
+      });
+
+      const paid = Number(existing?.paidAmount || 0);
+      const remaining = this.toFixed2(Math.max(0, shouldPay - paid));
+      const status = remaining <= 0 ? 'PAID' : paid > 0 ? 'PARTIAL' : 'UNPAID';
+
+      const bill = await (tx as any).offlineFeeBill.upsert({
+        where: { userId_billMonth: { userId, billMonth: month } },
+        update: {
+          periodStart: start,
+          periodEnd: end,
+          performanceBaseAmount,
+          rate: cfg.rate,
+          minAmount: cfg.minAmount,
+          capAmount: cfg.capAmount,
+          shouldPayAmount: shouldPay,
+          remainingAmount: remaining,
+          status,
+          generatedAt: new Date(),
+        },
+        create: {
+          userId,
+          billMonth: month,
+          periodStart: start,
+          periodEnd: end,
+          performanceBaseAmount,
+          rate: cfg.rate,
+          minAmount: cfg.minAmount,
+          capAmount: cfg.capAmount,
+          shouldPayAmount: shouldPay,
+          paidAmount: 0,
+          remainingAmount: shouldPay,
+          status: shouldPay > 0 ? 'UNPAID' : 'PAID',
+          generatedAt: new Date(),
+        },
+      });
+
+      return bill;
+    });
   }
 
   async setEnforceFullPayment(billId: number, enforceFullPayment: boolean) {
