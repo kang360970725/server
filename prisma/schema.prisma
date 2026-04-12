@@ -125,10 +125,12 @@ model SystemAnnouncement {
   id          Int                      @id @default(autoincrement())
   title       String                   @db.VarChar(120)
   content     String                   @db.Text
+  audience    AnnouncementAudience     @default(ALL)
   forceRead   Boolean                  @default(false)
   enabled     Boolean                  @default(true)
   publishAt   DateTime?
   expireAt    DateTime?
+  notifiedAt  DateTime?
   createdBy   Int?
   createdAt   DateTime                 @default(now())
   updatedAt   DateTime                 @updatedAt
@@ -854,6 +856,12 @@ enum NotificationType {
   DISPATCH_ASSIGNED
   DISPATCH_ARCHIVED
   DISPATCH_COMPLETED
+}
+
+enum AnnouncementAudience {
+  ADMIN
+  APPLET
+  ALL
 }
 
 /// =========================

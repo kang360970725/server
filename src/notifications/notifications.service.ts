@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { NotificationType, UserType } from '@prisma/client';
+import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateAnnouncementDto } from './dto/create-announcement.dto';
 import { UpdateAnnouncementDto } from './dto/update-announcement.dto';
@@ -10,6 +11,26 @@ import { ListMyNotificationsDto } from './dto/list-my-notifications.dto';
 @Injectable()
 export class NotificationsService {
   constructor(private readonly prisma: PrismaService) {}
+
+  typeAnnouncementAudience(v?: string): 'ADMIN' | 'APPLET' | 'ALL' {
+    const val = String(v || 'ALL').toUpperCase();
+    if (val === 'ADMIN' || val === 'APPLET' || val === 'ALL') return val;
+    throw new BadRequestException('audience 只能是 ADMIN / APPLET / ALL');
+  }
+
+  private isAdminPortalUserType(userType: UserType) {
+    return ([
+      UserType.ADMIN,
+      UserType.SUPER_ADMIN,
+      UserType.FINANCE,
+      UserType.OPERATION,
+      UserType.CUSTOMER_SERVICE,
+    ] as UserType[]).includes(userType);
+  }
+
+  private parseAudience(v?: string): 'ADMIN' | 'APPLET' | 'ALL' {
+    return this.typeAnnouncementAudience(v);
+  }
 
   private parseMaybeDate(v?: string) {
     if (!v) return null;
@@ -68,10 +89,13 @@ export class NotificationsService {
       throw new BadRequestException('发布时间必须早于过期时间');
     }
 
-    return this.prisma.systemAnnouncement.create({
+    const audience = this.parseAudience(dto.audience);
+
+    const created = await this.prisma.systemAnnouncement.create({
       data: {
         title: dto.title,
         content: dto.content,
+        audience,
         forceRead: Boolean(dto.forceRead),
         enabled: dto.enabled !== false,
         publishAt,
@@ -79,6 +103,18 @@ export class NotificationsService {
         createdBy: operatorId || null,
       },
     });
+
+    // 发布即推送（未来若需要“定时发布自动推送”，可再补 scheduler）
+    const now = new Date();
+    if (created.enabled && (!created.publishAt || created.publishAt <= now) && (!created.expireAt || created.expireAt > now)) {
+      await this.pushAnnouncementToAudience(created);
+      await this.prisma.systemAnnouncement.update({
+        where: { id: created.id },
+        data: { notifiedAt: new Date() },
+      });
+    }
+
+    return created;
   }
 
   async adminUpdateAnnouncement(dto: UpdateAnnouncementDto) {
@@ -97,6 +133,7 @@ export class NotificationsService {
       data: {
         title: dto.title,
         content: dto.content,
+        audience: dto.audience ? this.parseAudience(dto.audience) : undefined,
         forceRead: dto.forceRead,
         enabled: dto.enabled,
         publishAt,
@@ -106,10 +143,21 @@ export class NotificationsService {
   }
 
   async listMyAnnouncements(userId: number) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, userType: true },
+    });
+    if (!user) throw new NotFoundException('用户不存在');
+
+    const audienceList: Array<'ADMIN' | 'APPLET' | 'ALL'> = this.isAdminPortalUserType(user.userType)
+      ? ['ADMIN', 'ALL']
+      : ['APPLET', 'ALL'];
+
     const now = new Date();
     const list = await this.prisma.systemAnnouncement.findMany({
       where: {
         enabled: true,
+        audience: { in: audienceList },
         OR: [{ publishAt: null }, { publishAt: { lte: now } }],
         AND: [{ OR: [{ expireAt: null }, { expireAt: { gt: now } }] }],
       },
@@ -159,6 +207,65 @@ export class NotificationsService {
       unreadForceCount: forceUnread.length,
       list: forceUnread,
     };
+  }
+
+  private async resolveAudienceUserIds(audience: 'ADMIN' | 'APPLET' | 'ALL') {
+    if (audience === 'ALL') {
+      const rows = await this.prisma.user.findMany({
+        where: { status: 'ACTIVE' },
+        select: { id: true },
+      });
+      return rows.map((x) => Number(x.id));
+    }
+
+    if (audience === 'ADMIN') {
+      const rows = await this.prisma.user.findMany({
+        where: {
+          status: 'ACTIVE',
+          userType: {
+            in: [
+              UserType.ADMIN,
+              UserType.SUPER_ADMIN,
+              UserType.FINANCE,
+              UserType.OPERATION,
+              UserType.CUSTOMER_SERVICE,
+            ],
+          },
+        },
+        select: { id: true },
+      });
+      return rows.map((x) => Number(x.id));
+    }
+
+    const rows = await this.prisma.user.findMany({
+      where: {
+        status: 'ACTIVE',
+        userType: { in: [UserType.STAFF, UserType.REGISTERED_USER] },
+      },
+      select: { id: true },
+    });
+    return rows.map((x) => Number(x.id));
+  }
+
+  async pushAnnouncementToAudience(announcement: {
+    id: number;
+    title: string;
+    content: string;
+    audience: 'ADMIN' | 'APPLET' | 'ALL';
+  }) {
+    const userIds = await this.resolveAudienceUserIds(announcement.audience);
+    if (!userIds.length) return { created: 0 };
+
+    return this.batchCreateNotifications({
+      userIds,
+      type: NotificationType.SYSTEM_ANNOUNCEMENT,
+      title: `系统公告：${announcement.title}`,
+      content: `你有新的系统公告，请及时查看：${announcement.title}`,
+      payload: {
+        announcementId: announcement.id,
+        audience: announcement.audience,
+      },
+    });
   }
 
   async listDutySchedules(dto: { keyword?: string }) {
@@ -414,5 +521,43 @@ export class NotificationsService {
         status: input.status,
       },
     });
+  }
+
+  @Cron('0 * * * * *', { timeZone: 'Asia/Shanghai' })
+  async cronPushScheduledAnnouncements() {
+    const now = new Date();
+    const list = await this.prisma.systemAnnouncement.findMany({
+      where: {
+        enabled: true,
+        notifiedAt: null,
+        OR: [{ publishAt: null }, { publishAt: { lte: now } }],
+        AND: [{ OR: [{ expireAt: null }, { expireAt: { gt: now } }] }],
+      },
+      select: {
+        id: true,
+        title: true,
+        content: true,
+        audience: true,
+      },
+      take: 100,
+      orderBy: [{ id: 'asc' }],
+    });
+
+    for (const item of list) {
+      try {
+        await this.pushAnnouncementToAudience({
+          id: item.id,
+          title: item.title,
+          content: item.content,
+          audience: item.audience as any,
+        });
+        await this.prisma.systemAnnouncement.update({
+          where: { id: item.id },
+          data: { notifiedAt: new Date() },
+        });
+      } catch (e) {
+        console.error('[announcement][cron-push] failed id=', item.id, e?.message || e);
+      }
+    }
   }
 }
