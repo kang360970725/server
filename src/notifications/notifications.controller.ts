@@ -1,4 +1,4 @@
-import { Body, Controller, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, MessageEvent, Post, Req, Sse, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { Permissions } from '../auth/decorators/permissions.decorator';
@@ -13,8 +13,11 @@ import { DeleteDutyCsScheduleDto } from './dto/delete-duty-cs-schedule.dto';
 import { ListDutyCsLeaveDto } from './dto/list-duty-cs-leave.dto';
 import { UpsertDutyCsLeaveDto } from './dto/upsert-duty-cs-leave.dto';
 import { DeleteDutyCsLeaveDto } from './dto/delete-duty-cs-leave.dto';
+import { ClearRealtimeNotificationDto } from './dto/clear-realtime-notification.dto';
+import { SendTestRealtimeNotificationDto } from './dto/send-test-realtime-notification.dto';
 import { ListMyNotificationsDto } from './dto/list-my-notifications.dto';
 import { MarkNotificationReadDto } from './dto/mark-notification-read.dto';
+import { Observable } from 'rxjs';
 
 @Controller('notifications')
 @UseGuards(JwtAuthGuard)
@@ -120,5 +123,36 @@ export class NotificationsController {
   async unreadCount(@Req() req: any) {
     const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
     return this.service.getMyNotificationUnreadCount(userId);
+  }
+
+  @Sse('my/realtime/stream')
+  realtimeStream(@Req() req: any): Observable<MessageEvent> {
+    const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.subscribeMyRealtimeNotifications(userId);
+  }
+
+  @Post('my/realtime/list')
+  async myRealtimeList(@Req() req: any) {
+    const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.listMyRealtimeNotifications(userId);
+  }
+
+  @Post('my/realtime/clear-one')
+  async clearOneRealtime(@Req() req: any, @Body() dto: ClearRealtimeNotificationDto) {
+    const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.clearMyRealtimeNotification(userId, dto.id);
+  }
+
+  @Post('my/realtime/clear-all')
+  async clearAllRealtime(@Req() req: any) {
+    const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.clearMyAllRealtimeNotifications(userId);
+  }
+
+  @Post('admin/test-push/send')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  async adminSendTestPush(@Body() dto: SendTestRealtimeNotificationDto) {
+    return this.service.adminSendTestRealtimePush(dto);
   }
 }

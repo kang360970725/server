@@ -8,11 +8,16 @@ import { ListAnnouncementsDto } from './dto/list-announcements.dto';
 import { UpsertDutyCsScheduleDto } from './dto/upsert-duty-cs-schedule.dto';
 import { ListDutyCsLeaveDto } from './dto/list-duty-cs-leave.dto';
 import { UpsertDutyCsLeaveDto } from './dto/upsert-duty-cs-leave.dto';
+import { SendTestRealtimeNotificationDto } from './dto/send-test-realtime-notification.dto';
 import { ListMyNotificationsDto } from './dto/list-my-notifications.dto';
+import { RealtimeNotificationsService } from './realtime-notifications.service';
 
 @Injectable()
 export class NotificationsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly realtimeNotificationsService: RealtimeNotificationsService,
+  ) {}
 
   typeAnnouncementAudience(v?: string): 'ADMIN' | 'APPLET' | 'ALL' {
     const val = String(v || 'ALL').toUpperCase();
@@ -760,6 +765,20 @@ export class NotificationsService {
     playerIds: number[];
     autoSerial?: string;
   }) {
+    // 实时消息中心：派单后立即推给对应打手（不持久化，仅内存缓存 + SSE）
+    this.realtimeNotificationsService.pushToUsers({
+      userIds: input.playerIds,
+      type: NotificationType.DISPATCH_ASSIGNED,
+      title: '你有新的接单通知',
+      content: `订单 ${input.autoSerial || `#${input.orderId}`} 已派单，请及时接单。`,
+      route: '/staff/my-orders',
+      payload: {
+        orderId: input.orderId,
+        dispatchId: input.dispatchId,
+        autoSerial: input.autoSerial || null,
+      },
+    });
+
     return this.batchCreateNotifications({
       userIds: input.playerIds,
       type: NotificationType.DISPATCH_ASSIGNED,
@@ -783,6 +802,21 @@ export class NotificationsService {
     if (!csIds.length) return { created: 0 };
 
     const isArchived = input.status === 'ARCHIVED';
+    // 实时消息中心：结单/存单待客服处理时，推给当班客服
+    this.realtimeNotificationsService.pushToUsers({
+      userIds: csIds,
+      type: isArchived ? NotificationType.DISPATCH_ARCHIVED : NotificationType.DISPATCH_COMPLETED,
+      title: isArchived ? '打手已存单，请及时处理' : '打手已结单，请及时确认',
+      content: `订单 ${input.autoSerial || `#${input.orderId}`} ${isArchived ? '已存单' : '已结单'}，请当班客服尽快处理。`,
+      route: '/orders',
+      payload: {
+        orderId: input.orderId,
+        dispatchId: input.dispatchId,
+        autoSerial: input.autoSerial || null,
+        status: input.status,
+      },
+    });
+
     return this.batchCreateNotifications({
       userIds: csIds,
       type: isArchived ? NotificationType.DISPATCH_ARCHIVED : NotificationType.DISPATCH_COMPLETED,
@@ -833,5 +867,82 @@ export class NotificationsService {
         console.error('[announcement][cron-push] failed id=', item.id, e?.message || e);
       }
     }
+  }
+
+  subscribeMyRealtimeNotifications(userId: number) {
+    return this.realtimeNotificationsService.subscribe(userId);
+  }
+
+  listMyRealtimeNotifications(userId: number) {
+    const list = this.realtimeNotificationsService.list(userId);
+    return { list, unreadCount: list.length };
+  }
+
+  clearMyRealtimeNotification(userId: number, id: string) {
+    return this.realtimeNotificationsService.clearOne(userId, id);
+  }
+
+  clearMyAllRealtimeNotifications(userId: number) {
+    return this.realtimeNotificationsService.clearAll(userId);
+  }
+
+  async adminSendTestRealtimePush(dto: SendTestRealtimeNotificationDto) {
+    const targetUserIds = Array.isArray(dto.targetUserIds)
+      ? dto.targetUserIds.map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0)
+      : [];
+
+    let roleMatchedUserIds: number[] = [];
+    const targetRole = dto.targetRole || 'BOTH';
+
+    if (targetRole === 'STAFF') {
+      const users = await this.prisma.user.findMany({
+        where: { status: 'ACTIVE', userType: UserType.STAFF },
+        select: { id: true },
+      });
+      roleMatchedUserIds = users.map((u) => Number(u.id));
+    } else if (targetRole === 'CUSTOMER_SERVICE') {
+      const users = await this.prisma.user.findMany({
+        where: { status: 'ACTIVE', userType: UserType.CUSTOMER_SERVICE },
+        select: { id: true },
+      });
+      roleMatchedUserIds = users.map((u) => Number(u.id));
+    } else {
+      const users = await this.prisma.user.findMany({
+        where: { status: 'ACTIVE', userType: { in: [UserType.STAFF, UserType.CUSTOMER_SERVICE] } },
+        select: { id: true },
+      });
+      roleMatchedUserIds = users.map((u) => Number(u.id));
+    }
+
+    const userIds = Array.from(new Set([...roleMatchedUserIds, ...targetUserIds]));
+    if (!userIds.length) return { pushed: 0 };
+
+    const mockType = dto.mockType || 'CUSTOM';
+    const title = String(dto.title || '').trim() || (mockType === 'DISPATCH_ASSIGNED' ? '你有新的接单通知' : '测试推送');
+    const content = String(dto.content || '').trim() || (
+      mockType === 'DISPATCH_ASSIGNED'
+        ? '测试：订单已派单，请及时接单。'
+        : mockType === 'DISPATCH_COMPLETED'
+          ? '测试：订单已结单，请客服尽快确认。'
+          : mockType === 'DISPATCH_ARCHIVED'
+            ? '测试：订单已存单，请客服尽快处理。'
+            : '这是一条实时测试推送'
+    );
+    const route = mockType === 'DISPATCH_ASSIGNED'
+      ? '/staff/my-orders'
+      : mockType === 'DISPATCH_ARCHIVED' || mockType === 'DISPATCH_COMPLETED'
+        ? '/orders'
+        : mockType === 'CS_DUTY_SUBSTITUTION'
+          ? '/system/duty-cs'
+          : '/welcome';
+
+    return this.realtimeNotificationsService.pushToUsers({
+      userIds,
+      type: mockType,
+      title,
+      content,
+      route,
+      payload: { source: 'admin-test-push', mockType },
+    });
   }
 }

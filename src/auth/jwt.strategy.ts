@@ -7,7 +7,11 @@ import { PrismaService } from '../prisma.service';
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(private prisma: PrismaService) {
     super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      // 支持 SSE 场景：EventSource 无法自定义 Authorization header，允许 query.token 透传
+      jwtFromRequest: ExtractJwt.fromExtractors([
+        ExtractJwt.fromAuthHeaderAsBearerToken(),
+        (req: any) => String(req?.query?.token || '').trim() || null,
+      ]),
       ignoreExpiration: false,
       // ✅ 统一从 env 取，避免写死
       secretOrKey: process.env.JWT_SECRET || 'your-secret-key',
