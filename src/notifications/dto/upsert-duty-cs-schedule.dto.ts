@@ -1,4 +1,5 @@
-import { IsBoolean, IsNumber, IsOptional, IsString, MaxLength } from 'class-validator';
+import { Type } from 'class-transformer';
+import { ArrayNotEmpty, IsArray, IsBoolean, IsNumber, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export class UpsertDutyCsScheduleDto {
   @IsOptional()
@@ -8,8 +9,16 @@ export class UpsertDutyCsScheduleDto {
   @IsNumber()
   userId: number;
 
+  @IsOptional()
   @IsNumber()
-  weekday: number;
+  weekday?: number;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayNotEmpty()
+  @Type(() => Number)
+  @IsNumber({}, { each: true })
+  weekdays?: number[];
 
   @IsString()
   startTime: string;

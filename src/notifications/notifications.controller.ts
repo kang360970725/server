@@ -10,6 +10,9 @@ import { ReadAnnouncementDto } from './dto/read-announcement.dto';
 import { ListDutyCsScheduleDto } from './dto/list-duty-cs-schedule.dto';
 import { UpsertDutyCsScheduleDto } from './dto/upsert-duty-cs-schedule.dto';
 import { DeleteDutyCsScheduleDto } from './dto/delete-duty-cs-schedule.dto';
+import { ListDutyCsLeaveDto } from './dto/list-duty-cs-leave.dto';
+import { UpsertDutyCsLeaveDto } from './dto/upsert-duty-cs-leave.dto';
+import { DeleteDutyCsLeaveDto } from './dto/delete-duty-cs-leave.dto';
 import { ListMyNotificationsDto } from './dto/list-my-notifications.dto';
 import { MarkNotificationReadDto } from './dto/mark-notification-read.dto';
 
@@ -59,6 +62,28 @@ export class NotificationsController {
   @Permissions('system:role:page')
   async deleteDutySchedule(@Body() dto: DeleteDutyCsScheduleDto) {
     return this.service.deleteDutySchedule(Number(dto.id));
+  }
+
+  @Post('admin/duty-cs/leave/list')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  async listDutyLeaves(@Body() dto: ListDutyCsLeaveDto) {
+    return this.service.listDutyLeaves(dto);
+  }
+
+  @Post('admin/duty-cs/leave/upsert')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  async upsertDutyLeave(@Body() dto: UpsertDutyCsLeaveDto, @Req() req: any) {
+    const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.upsertDutyLeave(dto, Number.isFinite(operatorId) ? operatorId : undefined);
+  }
+
+  @Post('admin/duty-cs/leave/delete')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  async deleteDutyLeave(@Body() dto: DeleteDutyCsLeaveDto) {
+    return this.service.deleteDutyLeave(Number(dto.id));
   }
 
   @Post('my/announcements')

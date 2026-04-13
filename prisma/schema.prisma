@@ -87,6 +87,9 @@ model User {
   announcementReads        SystemAnnouncementRead[]
   notifications            UserNotification[]
   csDutySchedules          CsDutySchedule[]
+  csDutyLeaves             CsDutyLeave[]            @relation("CsDutyLeaveUser")
+  csDutySubstituteLeaves   CsDutyLeave[]            @relation("CsDutyLeaveSubstitute")
+  csDutyLeaveCreated       CsDutyLeave[]            @relation("CsDutyLeaveCreator")
   orderParticipants        OrderParticipant[]
   orderSettlements         OrderSettlement[]
   recharges                Recharge[]
@@ -176,6 +179,7 @@ model CsDutySchedule {
   id          Int      @id @default(autoincrement())
   userId      Int
   weekday     Int
+  weekdaysMask Int     @default(0)
   startMinute Int
   endMinute   Int
   enabled     Boolean  @default(true)
@@ -185,8 +189,30 @@ model CsDutySchedule {
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([weekday, enabled, startMinute, endMinute], map: "idx_cs_duty_shift")
+  @@index([weekdaysMask, enabled], map: "idx_cs_duty_mask")
   @@index([userId, enabled], map: "idx_cs_duty_user")
   @@map("cs_duty_schedules")
+}
+
+model CsDutyLeave {
+  id               Int      @id @default(autoincrement())
+  userId           Int
+  substituteUserId Int
+  startAt          DateTime
+  endAt            DateTime
+  reason           String?  @db.VarChar(255)
+  enabled          Boolean  @default(true)
+  createdBy        Int?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  user             User     @relation("CsDutyLeaveUser", fields: [userId], references: [id], onDelete: Cascade)
+  substituteUser   User     @relation("CsDutyLeaveSubstitute", fields: [substituteUserId], references: [id], onDelete: Cascade)
+  creator          User?    @relation("CsDutyLeaveCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([userId, enabled, startAt, endAt], map: "idx_cs_duty_leave_user_time")
+  @@index([substituteUserId, enabled, startAt, endAt], map: "idx_cs_duty_leave_sub_time")
+  @@index([enabled, startAt, endAt], map: "idx_cs_duty_leave_time")
+  @@map("cs_duty_leaves")
 }
 
 model OfflineFeeBill {
@@ -856,6 +882,7 @@ enum NotificationType {
   DISPATCH_ASSIGNED
   DISPATCH_ARCHIVED
   DISPATCH_COMPLETED
+  CS_DUTY_SUBSTITUTION
 }
 
 enum AnnouncementAudience {
