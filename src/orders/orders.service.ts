@@ -33,6 +33,37 @@ export class OrdersService {
     ) {
     }
 
+    /**
+     * 根据“仍在进行中的有效接单”刷新打手工作状态。
+     * - 存在有效已接单：WORKING
+     * - 否则：IDLE
+     */
+    private async refreshPlayerWorkStatusByActiveAcceptedDispatches(tx: any, userIds: number[]) {
+        const uniqUserIds = Array.from(new Set((userIds || []).map((x) => Number(x)).filter((x) => Number.isFinite(x) && x > 0)));
+        if (!uniqUserIds.length) return;
+
+        for (const userId of uniqUserIds) {
+            const activeAcceptedCount = await tx.orderParticipant.count({
+                where: {
+                    userId,
+                    isActive: true,
+                    rejectedAt: null,
+                    acceptedAt: { not: null },
+                    dispatch: {
+                        status: { in: [DispatchStatus.ACCEPTED, DispatchStatus.SETTLING] },
+                    },
+                },
+            });
+
+            await tx.user.update({
+                where: { id: userId },
+                data: {
+                    workStatus: activeAcceptedCount > 0 ? PlayerWorkStatus.WORKING : PlayerWorkStatus.IDLE,
+                },
+            });
+        }
+    }
+
     private readonly settlementRepairCache = new Map<
         number,
         {
@@ -665,7 +696,15 @@ export class OrdersService {
                 if (!dispatch) throw new BadRequestException('派单批次不存在');
 
                 // ✅ 1) 权限校验：必须是参与者（最小实现：只允许参与者存单）
-                const isParticipant = dispatch.participants?.some((p) => p.userId === operatorId);
+                // 严格要求“当前轮 + 仍有效参与者”，防止被替换打手继续操作
+                if (Number(dispatch.order.currentDispatchId || 0) !== Number(dispatch.id)) {
+                    throw new BadRequestException('当前派单已更新，请刷新后再操作');
+                }
+                const isParticipant = dispatch.participants?.some((p) => (
+                    Number(p.userId) === Number(operatorId)
+                    && p.isActive !== false
+                    && !p.rejectedAt
+                ));
                 if (!isParticipant) throw new BadRequestException('你不是本轮派单参与者，无权操作');
 
                 // ✅ 2) 防重复（可选但建议）
@@ -892,15 +931,22 @@ export class OrdersService {
             if (!dispatch) throw new NotFoundException('派单批次不存在');
 
             finalOrderId = Number(dispatch.orderId);
+            const currentDispatchId = Number((dispatch.order as any)?.currentDispatchId || dispatchId);
+            if (currentDispatchId !== Number(dispatchId)) {
+                throw new BadRequestException('当前派单已更新，请刷新后重试');
+            }
+
+            const activeParticipants = (dispatch.participants || []).filter((p: any) => p?.isActive !== false);
 
             // 锁轮判断：已不是 WAIT_ACCEPT / 有人接单 / 有人拒单（含 rejectedAt） => 必须新建一轮
-            const hasAccepted = dispatch.participants.some((p: any) => !!p.acceptedAt);
-            const hasRejected = dispatch.participants.some((p: any) => !!p.rejectedAt);
+            const hasAccepted = activeParticipants.some((p: any) => !!p.acceptedAt);
+            const hasRejected = activeParticipants.some((p: any) => !!p.rejectedAt);
 
             const shouldCreateNewRound =
                 dispatch.status !== DispatchStatus.WAIT_ACCEPT || hasAccepted || hasRejected;
 
             if (shouldCreateNewRound) {
+                const oldActiveUserIds = activeParticipants.map((p: any) => Number(p.userId));
                 // 1) 旧轮次不再是 latest（如果你确实有 isLatest 字段）
                 //    注意：如果你没有 isLatest 字段，请删除这一段
                 try {
@@ -912,22 +958,28 @@ export class OrdersService {
                     // 如果 schema 没有 isLatest，避免事务直接炸（你可以删掉 try/catch 改为显式字段）
                 }
 
-                // 2) 新建一轮派单（⚠️ 若 OrderDispatch 有必填字段，请在这里补齐）
+                // 2) 旧轮有效参与者归档，避免继续以旧轮操作
+                await tx.orderParticipant.updateMany({
+                    where: { dispatchId, isActive: true },
+                    data: { isActive: false },
+                });
+
+                // 3) 新建一轮派单
+                const nextRound = (Number((dispatch as any).round || 0) || 0) + 1;
                 const newDispatch = await tx.orderDispatch.create({
                     data: {
                         orderId: dispatch.orderId,
+                        round: nextRound,
                         status: DispatchStatus.WAIT_ACCEPT,
+                        assignedAt: now,
+                        remark: dto?.remark ?? null,
                         isLatest: true,
-                        // ⚠️ TODO: 如果你的 OrderDispatch 还有必填字段（如 round/batchNo/dispatcherId/createdBy 等），请在这里补上
-                        // round: (dispatch.round ?? 0) + 1,
-                        // operatorId,
-                        // remark: dto?.remark ?? null,
                     } as any,
                 });
 
                 finalDispatchId = Number(newDispatch.id);
 
-                // 3) 给新轮次写入参与者
+                // 4) 给新轮次写入参与者
                 await tx.orderParticipant.createMany({
                     data: target.map((uid) => ({
                         dispatchId: newDispatch.id,
@@ -937,11 +989,24 @@ export class OrdersService {
                     skipDuplicates: true,
                 });
 
-                // 4) 记录日志
+                // 5) 切到新轮次，订单状态回到待接单
+                await tx.order.update({
+                    where: { id: dispatch.orderId },
+                    data: {
+                        status: OrderStatus.WAIT_ACCEPT,
+                        currentDispatchId: newDispatch.id,
+                    },
+                });
+
+                // 6) 刷新旧参与者工作状态（避免被替换后仍卡 WORKING）
+                await this.refreshPlayerWorkStatusByActiveAcceptedDispatches(tx, oldActiveUserIds);
+
+                // 7) 记录日志
                 await this.logOrderAction(operatorId, dispatch.orderId, 'CREATE_NEW_DISPATCH_AND_SET_PARTICIPANTS', {
                     fromDispatchId: dispatchId,
                     toDispatchId: newDispatch.id,
                     targetUserIds: target,
+                    oldActiveUserIds,
                     reason: {
                         status: dispatch.status,
                         hasAccepted,
@@ -954,27 +1019,65 @@ export class OrdersService {
                 return;
             }
 
-            // ✅ 否则：仍在 WAIT_ACCEPT 且无人接单/拒单 —— 允许在本轮“整体覆盖”
-            await tx.orderParticipant.updateMany({
-                where: {dispatchId},
-                data: {isActive: false},
-            });
+            // ✅ 否则：仍在 WAIT_ACCEPT 且无人接单/拒单
+            // 不能“全量失效+createMany(skipDuplicates)”；否则同一 user 会因唯一键无法重建活跃记录。
+            // 改为：按 userId 差量更新（保留/移除/新增）保证同一参与者可安全改派。
+            const activeUserIds = Array.from(new Set(activeParticipants.map((p: any) => Number(p.userId))));
+            const targetSet = new Set(target);
+            const toDisable = activeUserIds.filter((uid) => !targetSet.has(uid));
 
-            await tx.orderParticipant.createMany({
-                data: target.map((uid) => ({
-                    dispatchId,
-                    userId: uid,
-                    isActive: true,
-                })),
-                skipDuplicates: true,
-            });
+            if (toDisable.length > 0) {
+                await tx.orderParticipant.updateMany({
+                    where: {
+                        dispatchId,
+                        userId: { in: toDisable },
+                        isActive: true,
+                    },
+                    data: { isActive: false },
+                });
+            }
+
+            // 对目标参与者做 upsert，兼容“同一人重新指派”
+            for (const uid of target) {
+                await tx.orderParticipant.upsert({
+                    where: {
+                        dispatchId_userId: {
+                            dispatchId,
+                            userId: uid,
+                        },
+                    },
+                    update: {
+                        isActive: true,
+                        // 被重新纳入时，恢复可接单状态
+                        acceptedAt: null,
+                        rejectedAt: null,
+                        rejectReason: null,
+                    } as any,
+                    create: {
+                        dispatchId,
+                        userId: uid,
+                        isActive: true,
+                    },
+                });
+            }
 
             await this.logOrderAction(operatorId, dispatch.orderId, 'UPDATE_DISPATCH_PARTICIPANTS', {
                 dispatchId,
+                beforeActiveUserIds: activeUserIds,
+                removedUserIds: toDisable,
                 targetUserIds: target,
                 remark: dto?.remark ?? null,
                 at: now,
             });
+
+            // 本轮仍是当前轮，确保订单状态保持待接单
+            await tx.order.update({
+                where: { id: dispatch.orderId },
+                data: { status: OrderStatus.WAIT_ACCEPT, currentDispatchId: dispatchId },
+            });
+
+            // 同步被移除参与者的工作状态，避免“已被替换但仍无法再次派单”
+            await this.refreshPlayerWorkStatusByActiveAcceptedDispatches(tx, toDisable);
         });
 
         // 返回订单详情，供前端刷新
@@ -2665,7 +2768,12 @@ export class OrdersService {
         this.ensureDispatchStatus(dispatch, [DispatchStatus.WAIT_ACCEPT, DispatchStatus.ACCEPTED], '当前状态不可接单');
 
         const participant = dispatch.participants.find((p) => p.userId === userId);
-        if (!participant) throw new BadRequestException('不是该订单的参与者');
+        if (Number(dispatch.order.currentDispatchId || 0) !== Number(dispatch.id)) {
+            throw new BadRequestException('当前派单已更新，请刷新后重试');
+        }
+        if (!participant || participant.isActive === false || !!participant.rejectedAt) {
+            throw new BadRequestException('不是该订单当前有效参与者');
+        }
 
         if (participant.acceptedAt) {
             // 幂等：已接单直接返回
