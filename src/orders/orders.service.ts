@@ -986,6 +986,26 @@ export class OrdersService {
             finalOrderId = Number(after?.orderId);
         }
 
+        // ✅ 关键修复：
+        // updateDispatchParticipants（改派/重派）之前未触发“已派单待接单”消息，
+        // 导致打手侧实时消息中心收不到派单通知。
+        // 这里补齐与 assignDispatch 一致的推送行为。
+        try {
+            const order = await this.prisma.order.findUnique({
+                where: { id: Number(finalOrderId) },
+                select: { autoSerial: true },
+            });
+
+            await this.notificationsService.pushDispatchAssigned({
+                orderId: Number(finalOrderId),
+                dispatchId: Number(finalDispatchId),
+                playerIds: target,
+                autoSerial: order?.autoSerial || undefined,
+            });
+        } catch (e) {
+            console.error('[notify][update-dispatch-participants] failed', e?.message || e);
+        }
+
         return this.getOrderDetail(Number(finalOrderId));
     }
 
