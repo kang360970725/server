@@ -769,8 +769,8 @@ export class NotificationsService {
     this.realtimeNotificationsService.pushToUsers({
       userIds: input.playerIds,
       type: NotificationType.DISPATCH_ASSIGNED,
-      title: '你有新的接单通知',
-      content: `订单 ${input.autoSerial || `#${input.orderId}`} 已派单，请及时接单。`,
+      title: `待接单：${input.autoSerial || `#${input.orderId}`}`,
+      content: `订单已派单，请尽快接单处理。点击可直接进入打手工作台。`,
       route: '/staff/workbench',
       payload: {
         orderId: input.orderId,
@@ -782,8 +782,8 @@ export class NotificationsService {
     return this.batchCreateNotifications({
       userIds: input.playerIds,
       type: NotificationType.DISPATCH_ASSIGNED,
-      title: '你有新的接单通知',
-      content: `订单 ${input.autoSerial || `#${input.orderId}`} 已派单，请及时接单。`,
+      title: `待接单：${input.autoSerial || `#${input.orderId}`}`,
+      content: `订单已派单，请尽快接单处理。点击可直接进入打手工作台。`,
       payload: {
         orderId: input.orderId,
         dispatchId: input.dispatchId,
@@ -806,8 +806,8 @@ export class NotificationsService {
     this.realtimeNotificationsService.pushToUsers({
       userIds: csIds,
       type: isArchived ? NotificationType.DISPATCH_ARCHIVED : NotificationType.DISPATCH_COMPLETED,
-      title: isArchived ? '打手已存单，请及时处理' : '打手已结单，请及时确认',
-      content: `订单 ${input.autoSerial || `#${input.orderId}`} ${isArchived ? '已存单' : '已结单'}，请当班客服尽快处理。`,
+      title: `${isArchived ? '待处理存单' : '待确认结单'}：${input.autoSerial || `#${input.orderId}`}`,
+      content: `订单${isArchived ? '已存单' : '已结单'}，请尽快处理。点击将新开订单详情页。`,
       route: `/orders/${input.orderId}`,
       payload: {
         orderId: input.orderId,
@@ -821,8 +821,8 @@ export class NotificationsService {
     return this.batchCreateNotifications({
       userIds: csIds,
       type: isArchived ? NotificationType.DISPATCH_ARCHIVED : NotificationType.DISPATCH_COMPLETED,
-      title: isArchived ? '打手已存单，请及时处理' : '打手已结单，请及时确认',
-      content: `订单 ${input.autoSerial || `#${input.orderId}`} ${isArchived ? '已存单' : '已结单'}，请当班客服尽快处理。`,
+      title: `${isArchived ? '待处理存单' : '待确认结单'}：${input.autoSerial || `#${input.orderId}`}`,
+      content: `订单${isArchived ? '已存单' : '已结单'}，请尽快处理。点击将新开订单详情页。`,
       payload: {
         orderId: input.orderId,
         dispatchId: input.dispatchId,
