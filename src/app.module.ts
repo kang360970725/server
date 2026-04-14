@@ -24,6 +24,7 @@ import { PerformanceModule } from './performance/performance.module';
 import { SystemConfigModule } from './system-config/system-config.module';
 import { OfflineFeeModule } from './offline-fee/offline-fee.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { CouponsModule } from './coupons/coupons.module';
 
 
 @Module({
@@ -46,6 +47,7 @@ import { NotificationsModule } from './notifications/notifications.module';
         SystemConfigModule,
         OfflineFeeModule,
         NotificationsModule,
+        CouponsModule,
     ],
     controllers: [AppController],
     providers: [AppService, PrismaService,
