@@ -106,4 +106,13 @@ export class CreateOrderDto {
     @IsNumber()
     manualAdjustAmount?: number;
 
+    /**
+     * 用户券ID（可选）：
+     * - 传入后由后端按券模板规则计算优惠金额
+     * - 计算成功会自动核销为 USED
+     */
+    @IsOptional()
+    @IsInt()
+    userCouponId?: number;
+
 }

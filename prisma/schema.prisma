@@ -102,6 +102,7 @@ model User {
   walletHolds              WalletHold[]
   walletTransactions       WalletTransaction[]
   walletWithdrawalRequests WalletWithdrawalRequest[]
+  userCoupons              UserCoupon[]
 
   @@index([workStatus])
   @@index([workMode, offlineJoinedAt])
@@ -122,6 +123,54 @@ model SystemConfig {
 
   @@index([enabled])
   @@map("system_configs")
+}
+
+model CouponTemplate {
+  id                Int                  @id @default(autoincrement())
+  name              String               @db.VarChar(120)
+  type              CouponTemplateType
+  discountValue     Decimal?             @db.Decimal(10, 2)
+  thresholdAmount   Decimal?             @db.Decimal(10, 2)
+  maxDiscountAmount Decimal?             @db.Decimal(10, 2)
+  applicableScope   CouponScope          @default(ALL)
+  /// 当 applicableScope=PROJECT 时，存项目ID数组
+  applicableProjectIds Json?
+  status            CouponTemplateStatus @default(DRAFT)
+  startAt           DateTime?
+  endAt             DateTime?
+  totalLimit        Int?
+  perUserLimit      Int?
+  issuedCount       Int                  @default(0)
+  usedCount         Int                  @default(0)
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  userCoupons       UserCoupon[]
+
+  @@index([status, startAt, endAt], map: "idx_coupon_template_status_time")
+  @@index([applicableScope], map: "idx_coupon_template_scope")
+  @@map("coupon_templates")
+}
+
+model UserCoupon {
+  id         Int             @id @default(autoincrement())
+  userId     Int
+  templateId Int
+  status     UserCouponStatus @default(UNUSED)
+  receivedAt DateTime        @default(now())
+  usedAt     DateTime?
+  expiresAt  DateTime?
+  orderId    Int?
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  template   CouponTemplate  @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  order      Order?          @relation("OrderAppliedUserCoupon", fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status, expiresAt], map: "idx_user_coupon_user_status_expire")
+  @@index([templateId, status], map: "idx_user_coupon_template_status")
+  @@index([orderId], map: "idx_user_coupon_order")
+  @@unique([orderId], map: "uniq_user_coupon_order")
+  @@map("user_coupons")
 }
 
 model SystemAnnouncement {
@@ -382,6 +431,7 @@ model Order {
   marketingCostAmount   Decimal           @default(0) @db.Decimal(10, 2)
   /// 优惠类型：NONE / COUPON / ACTIVITY / GIFT / MANUAL / MIXED
   discountType          String?           @db.VarChar(20)
+  appliedUserCoupon     UserCoupon?       @relation("OrderAppliedUserCoupon")
   currentDispatch     OrderDispatch?    @relation("OrderCurrentDispatch", fields: [currentDispatchId], references: [id])
   dispatcher          User              @relation("OrderDispatcher", fields: [dispatcherId], references: [id])
   project             GameProject       @relation(fields: [projectId], references: [id])
@@ -760,6 +810,34 @@ enum ConfigValueType {
   STRING
   BOOLEAN
   JSON
+}
+
+enum CouponTemplateType {
+  CASH
+  DISCOUNT
+  FULL_REDUCTION
+  FREE
+}
+
+enum CouponTemplateStatus {
+  DRAFT
+  ACTIVE
+  DISABLED
+  EXPIRED
+}
+
+enum CouponScope {
+  ALL
+  PROJECT
+  CATEGORY
+  USER_LEVEL
+}
+
+enum UserCouponStatus {
+  UNUSED
+  USED
+  EXPIRED
+  LOCKED
 }
 
 enum UserStatus {

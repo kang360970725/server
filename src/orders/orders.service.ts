@@ -5,11 +5,15 @@ import {AcceptDispatchDto} from './dto/accept-dispatch.dto';
 import {MarkPaidDto} from './dto/mark-paid.dto';
 import {
     BillingMode,
+    CouponScope,
+    CouponTemplateStatus,
+    CouponTemplateType,
     DispatchStatus,
     OrderStatus,
     OrderType,
     PaymentStatus,
     PlayerWorkStatus,
+    UserCouponStatus,
     WalletBizType
 } from '@prisma/client';
 import {WalletService} from '../wallet/wallet.service';
@@ -91,6 +95,73 @@ export class OrdersService {
         return 'MIXED';
     }
 
+    private calcCouponDiscount(params: {
+        originalAmount: number;
+        projectId: number;
+        template: {
+            id: number;
+            name: string;
+            type: CouponTemplateType;
+            status: CouponTemplateStatus;
+            discountValue: any;
+            thresholdAmount: any;
+            maxDiscountAmount: any;
+            applicableScope: CouponScope;
+            applicableProjectIds: any;
+            startAt: Date | null;
+            endAt: Date | null;
+        };
+    }) {
+        const { originalAmount, projectId, template } = params;
+        const now = new Date();
+        if (template.status !== CouponTemplateStatus.ACTIVE) {
+            throw new BadRequestException('优惠券不可用（状态非生效）');
+        }
+        if (template.startAt && now < template.startAt) {
+            throw new BadRequestException('优惠券尚未开始生效');
+        }
+        if (template.endAt && now > template.endAt) {
+            throw new BadRequestException('优惠券已过期');
+        }
+        if (template.applicableScope === CouponScope.PROJECT) {
+            const ids = Array.isArray(template.applicableProjectIds)
+                ? template.applicableProjectIds.map((x: any) => Number(x)).filter((x: number) => Number.isFinite(x))
+                : [];
+            if (!ids.includes(Number(projectId))) {
+                throw new BadRequestException('该优惠券不适用于当前项目');
+            }
+        }
+
+        const discountValue = Number(template.discountValue ?? 0);
+        const thresholdAmount = Number(template.thresholdAmount ?? 0);
+        const maxDiscountAmount = Number(template.maxDiscountAmount ?? 0);
+        let discount = 0;
+
+        if (template.type === CouponTemplateType.CASH) {
+            discount = discountValue;
+        } else if (template.type === CouponTemplateType.FULL_REDUCTION) {
+            if (originalAmount < thresholdAmount) {
+                throw new BadRequestException(`未满足满减门槛：满${thresholdAmount}可用`);
+            }
+            discount = discountValue;
+        } else if (template.type === CouponTemplateType.DISCOUNT) {
+            let rate = discountValue;
+            if (rate > 1) rate = rate / 10; // 兼容 8 表示 8 折
+            if (!(rate > 0 && rate <= 1)) {
+                throw new BadRequestException('折扣券配置异常');
+            }
+            discount = originalAmount * (1 - rate);
+        } else if (template.type === CouponTemplateType.FREE) {
+            discount = originalAmount;
+        }
+
+        discount = Math.max(0, discount);
+        if (maxDiscountAmount > 0) {
+            discount = Math.min(discount, maxDiscountAmount);
+        }
+        return this.toAmount2(Math.min(discount, originalAmount));
+    }
+
     private readonly settlementRepairCache = new Map<
         number,
         {
@@ -134,6 +205,23 @@ export class OrdersService {
         };
 
         const serial = await this.generateOrderSerial();
+        const userCouponId = Number((dto as any).userCouponId || 0);
+        let selectedUserCoupon: any = null;
+        if (userCouponId > 0) {
+            selectedUserCoupon = await this.prisma.userCoupon.findUnique({
+                where: { id: userCouponId },
+                include: { template: true },
+            });
+            if (!selectedUserCoupon) {
+                throw new BadRequestException('用户券不存在');
+            }
+            if (selectedUserCoupon.status !== UserCouponStatus.UNUSED) {
+                throw new BadRequestException('优惠券已使用或不可用');
+            }
+            if (selectedUserCoupon.expiresAt && new Date(selectedUserCoupon.expiresAt) < new Date()) {
+                throw new BadRequestException('优惠券已过期');
+            }
+        }
 
         // ✅ 赠送单：不收款，但仍然要正常结算/分红
         // - 为避免前端误传金额导致“赠送单被计入营收”，后端这里强制清零
@@ -145,7 +233,13 @@ export class OrdersService {
         const isPaid = dto.isGifted ? false : Boolean(dto.isPaid);
 
         // 统一优惠汇总（先接基础口径，便于后续无缝接优惠券/活动）
-        const couponDiscountAmount = this.toAmount2(Number(dto.couponDiscountAmount ?? 0));
+        const couponDiscountAmount = selectedUserCoupon
+            ? this.calcCouponDiscount({
+                originalAmount,
+                projectId: project.id,
+                template: selectedUserCoupon.template,
+            })
+            : this.toAmount2(Number(dto.couponDiscountAmount ?? 0));
         const activityDiscountAmount = this.toAmount2(Number(dto.activityDiscountAmount ?? 0));
         const manualAdjustAmount = this.toAmount2(Number(dto.manualAdjustAmount ?? 0));
         const giftDiscountAmount = this.toAmount2(giftedAmount);
@@ -161,6 +255,7 @@ export class OrdersService {
         });
         const discountDetails: Array<{
             sourceType: string;
+            sourceId?: number;
             ruleType: string;
             amount: number;
             description: string;
@@ -168,9 +263,12 @@ export class OrdersService {
         if (couponDiscountAmount > 0) {
             discountDetails.push({
                 sourceType: 'COUPON',
-                ruleType: 'CASH',
+                sourceId: selectedUserCoupon?.templateId ? Number(selectedUserCoupon.templateId) : undefined,
+                ruleType: selectedUserCoupon?.template?.type || 'CASH',
                 amount: couponDiscountAmount,
-                description: '下单优惠券减免',
+                description: selectedUserCoupon?.template?.name
+                    ? `使用优惠券：${selectedUserCoupon.template.name}`
+                    : '下单优惠券减免',
             });
         }
         if (activityDiscountAmount > 0) {
@@ -198,8 +296,9 @@ export class OrdersService {
             });
         }
 
-        const order = await this.prisma.order.create({
-            data: {
+        const order = await this.prisma.$transaction(async (tx) => {
+            const createdOrder = await tx.order.create({
+                data: {
                 orderQuantity: Number(dto.orderQuantity ?? 1),
                 autoSerial: serial,
                 // receivableAmount: dto.receivableAmount,
@@ -253,12 +352,35 @@ export class OrdersService {
                         },
                     }
                     : {}),
-            },
-            include: {
-                project: true,
-                currentDispatch: true,
-                discountDetails: true,
-            },
+                },
+                include: {
+                    project: true,
+                    currentDispatch: true,
+                    discountDetails: true,
+                },
+            });
+
+            if (selectedUserCoupon) {
+                const consumeResult = await tx.userCoupon.updateMany({
+                    where: {
+                        id: Number(selectedUserCoupon.id),
+                        status: UserCouponStatus.UNUSED,
+                    },
+                    data: {
+                        status: UserCouponStatus.USED,
+                        usedAt: new Date(),
+                        orderId: Number(createdOrder.id),
+                    },
+                });
+                if (consumeResult.count !== 1) {
+                    throw new ConflictException('优惠券已被使用，请刷新后重试');
+                }
+                await tx.couponTemplate.update({
+                    where: { id: Number(selectedUserCoupon.templateId) },
+                    data: { usedCount: { increment: 1 } },
+                });
+            }
+            return createdOrder;
         });
 
         await this.logOrderAction(dispatcherId, order.id, 'CREATE_ORDER', {
