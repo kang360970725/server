@@ -5,6 +5,29 @@ echo "[entrypoint] Starting app..."
 echo "[entrypoint] NODE_ENV=${NODE_ENV:-}"
 
 # ----------------------------
+# Prisma migration files check
+# ----------------------------
+if [ -d "/app/prisma/migrations" ]; then
+  MIGRATION_DIR_COUNT=$(find /app/prisma/migrations -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+  echo "[entrypoint] prisma migrations dir count=${MIGRATION_DIR_COUNT}"
+else
+  echo "[entrypoint] ERROR: /app/prisma/migrations not found"
+  exit 1
+fi
+
+# 可选：发布时设置 PRISMA_REQUIRED_MIGRATION，确保新迁移目录已打进镜像
+# 例如：PRISMA_REQUIRED_MIGRATION=20260413080000_add_weekdays_mask_for_cs_duty_schedule
+if [ -n "${PRISMA_REQUIRED_MIGRATION:-}" ]; then
+  if [ ! -d "/app/prisma/migrations/${PRISMA_REQUIRED_MIGRATION}" ]; then
+    echo "[entrypoint] ERROR: required migration not found: ${PRISMA_REQUIRED_MIGRATION}"
+    echo "[entrypoint] Existing migrations:"
+    ls -1 /app/prisma/migrations || true
+    exit 1
+  fi
+  echo "[entrypoint] required migration found: ${PRISMA_REQUIRED_MIGRATION}"
+fi
+
+# ----------------------------
 # Prisma migrate (production)
 # ----------------------------
 # 默认开启：PRISMA_MIGRATE_DEPLOY=1
