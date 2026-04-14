@@ -771,7 +771,7 @@ export class NotificationsService {
       type: NotificationType.DISPATCH_ASSIGNED,
       title: '你有新的接单通知',
       content: `订单 ${input.autoSerial || `#${input.orderId}`} 已派单，请及时接单。`,
-      route: '/staff/my-orders',
+      route: '/staff/workbench',
       payload: {
         orderId: input.orderId,
         dispatchId: input.dispatchId,
@@ -808,12 +808,13 @@ export class NotificationsService {
       type: isArchived ? NotificationType.DISPATCH_ARCHIVED : NotificationType.DISPATCH_COMPLETED,
       title: isArchived ? '打手已存单，请及时处理' : '打手已结单，请及时确认',
       content: `订单 ${input.autoSerial || `#${input.orderId}`} ${isArchived ? '已存单' : '已结单'}，请当班客服尽快处理。`,
-      route: '/orders',
+      route: `/orders/${input.orderId}`,
       payload: {
         orderId: input.orderId,
         dispatchId: input.dispatchId,
         autoSerial: input.autoSerial || null,
         status: input.status,
+        openInNewTab: true,
       },
     });
 
@@ -929,7 +930,7 @@ export class NotificationsService {
             : '这是一条实时测试推送'
     );
     const route = mockType === 'DISPATCH_ASSIGNED'
-      ? '/staff/my-orders'
+      ? '/staff/workbench'
       : mockType === 'DISPATCH_ARCHIVED' || mockType === 'DISPATCH_COMPLETED'
         ? '/orders'
         : mockType === 'CS_DUTY_SUBSTITUTION'
