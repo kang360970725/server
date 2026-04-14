@@ -64,6 +64,33 @@ export class OrdersService {
         }
     }
 
+    /**
+     * 金额统一保留两位，避免优惠字段出现浮点误差。
+     */
+    private toAmount2(value: number) {
+        return Number(Number(value || 0).toFixed(2));
+    }
+
+    /**
+     * 根据已拆分优惠字段，计算订单优惠类型标签。
+     * 用途：列表/统计快速分组，不替代明细表。
+     */
+    private resolveDiscountType(input: {
+        couponDiscountAmount: number;
+        activityDiscountAmount: number;
+        giftDiscountAmount: number;
+        manualAdjustAmount: number;
+    }): string {
+        const types: string[] = [];
+        if (input.couponDiscountAmount > 0) types.push('COUPON');
+        if (input.activityDiscountAmount > 0) types.push('ACTIVITY');
+        if (input.giftDiscountAmount > 0) types.push('GIFT');
+        if (input.manualAdjustAmount > 0) types.push('MANUAL');
+        if (!types.length) return 'NONE';
+        if (types.length === 1) return types[0];
+        return 'MIXED';
+    }
+
     private readonly settlementRepairCache = new Map<
         number,
         {
@@ -112,11 +139,64 @@ export class OrdersService {
         // - 为避免前端误传金额导致“赠送单被计入营收”，后端这里强制清零
         const isGifted = Boolean(dto.isGifted);
 
-        // 赠送金额口径（最小改动方案）：
-        // - 赠送单 giftedAmount = paidAmount（等同“这单价值由平台承担”）
-        // - 非赠送单 giftedAmount = 0（或 null）
-        const giftedAmount = isGifted ? Number(dto.paidAmount ?? 0) : 0;
+        // 赠送金额口径（本期统一为“按应收承担成本”）
+        const originalAmount = this.toAmount2(Number(dto.receivableAmount ?? 0));
+        const giftedAmount = isGifted ? originalAmount : 0;
         const isPaid = dto.isGifted ? false : Boolean(dto.isPaid);
+
+        // 统一优惠汇总（先接基础口径，便于后续无缝接优惠券/活动）
+        const couponDiscountAmount = this.toAmount2(Number(dto.couponDiscountAmount ?? 0));
+        const activityDiscountAmount = this.toAmount2(Number(dto.activityDiscountAmount ?? 0));
+        const manualAdjustAmount = this.toAmount2(Number(dto.manualAdjustAmount ?? 0));
+        const giftDiscountAmount = this.toAmount2(giftedAmount);
+        const discountAmount = this.toAmount2(
+            couponDiscountAmount + activityDiscountAmount + giftDiscountAmount + manualAdjustAmount,
+        );
+        const finalPayableAmount = this.toAmount2(Math.max(0, originalAmount - discountAmount));
+        const discountType = this.resolveDiscountType({
+            couponDiscountAmount,
+            activityDiscountAmount,
+            giftDiscountAmount,
+            manualAdjustAmount,
+        });
+        const discountDetails: Array<{
+            sourceType: string;
+            ruleType: string;
+            amount: number;
+            description: string;
+        }> = [];
+        if (couponDiscountAmount > 0) {
+            discountDetails.push({
+                sourceType: 'COUPON',
+                ruleType: 'CASH',
+                amount: couponDiscountAmount,
+                description: '下单优惠券减免',
+            });
+        }
+        if (activityDiscountAmount > 0) {
+            discountDetails.push({
+                sourceType: 'ACTIVITY',
+                ruleType: 'FULL_REDUCTION',
+                amount: activityDiscountAmount,
+                description: '活动优惠减免',
+            });
+        }
+        if (giftDiscountAmount > 0) {
+            discountDetails.push({
+                sourceType: 'GIFT',
+                ruleType: 'GIFT',
+                amount: giftDiscountAmount,
+                description: '赠送单减免',
+            });
+        }
+        if (manualAdjustAmount > 0) {
+            discountDetails.push({
+                sourceType: 'MANUAL',
+                ruleType: 'MANUAL',
+                amount: manualAdjustAmount,
+                description: '人工优惠减免',
+            });
+        }
 
         const order = await this.prisma.order.create({
             data: {
@@ -156,11 +236,28 @@ export class OrdersService {
                 // ✅ 落库赠送标识
                 isGifted,
                 giftedAmount,
+                originalAmount,
+                discountAmount,
+                couponDiscountAmount,
+                activityDiscountAmount,
+                giftDiscountAmount,
+                manualAdjustAmount,
+                finalPayableAmount,
+                marketingCostAmount: discountAmount,
+                discountType,
                 status: OrderStatus.WAIT_ASSIGN,
+                ...(discountDetails.length
+                    ? {
+                        discountDetails: {
+                            create: discountDetails,
+                        },
+                    }
+                    : {}),
             },
             include: {
                 project: true,
                 currentDispatch: true,
+                discountDetails: true,
             },
         });
 

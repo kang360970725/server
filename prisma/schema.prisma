@@ -368,17 +368,51 @@ model Order {
   /// - 先打后付场景：结单后可能仍未收款
   /// - 确认收款接�����会同时写入 paymentTime=now() 与 paidAmount（允许修正）
   isPaid              Boolean           @default(false)
+  /// 订单优惠汇总（统一优惠口径）
+  /// - originalAmount：优惠前基准金额（通常=应收）
+  /// - discountAmount：总优惠（可由多来源叠加）
+  /// - finalPayableAmount：最终应付（优惠后）
+  originalAmount        Decimal           @default(0) @db.Decimal(10, 2)
+  discountAmount        Decimal           @default(0) @db.Decimal(10, 2)
+  couponDiscountAmount  Decimal           @default(0) @db.Decimal(10, 2)
+  activityDiscountAmount Decimal          @default(0) @db.Decimal(10, 2)
+  giftDiscountAmount    Decimal           @default(0) @db.Decimal(10, 2)
+  manualAdjustAmount    Decimal           @default(0) @db.Decimal(10, 2)
+  finalPayableAmount    Decimal           @default(0) @db.Decimal(10, 2)
+  marketingCostAmount   Decimal           @default(0) @db.Decimal(10, 2)
+  /// 优惠类型：NONE / COUPON / ACTIVITY / GIFT / MANUAL / MIXED
+  discountType          String?           @db.VarChar(20)
   currentDispatch     OrderDispatch?    @relation("OrderCurrentDispatch", fields: [currentDispatchId], references: [id])
   dispatcher          User              @relation("OrderDispatcher", fields: [dispatcherId], references: [id])
   project             GameProject       @relation(fields: [projectId], references: [id])
   dispatches          OrderDispatch[]   @relation("OrderDispatches")
   settlements         OrderSettlement[]
+  discountDetails     OrderDiscount[]
 
   @@index([projectId])
   @@index([dispatcherId])
   @@index([status])
   @@index([customerGameId])
   @@index([currentDispatchId], map: "Order_currentDispatchId_fkey")
+}
+
+model OrderDiscount {
+  id          Int      @id @default(autoincrement())
+  orderId     Int
+  /// 优惠来源：COUPON / GIFT / ACTIVITY / MANUAL
+  sourceType  String   @db.VarChar(20)
+  /// 来源主键：优惠券ID/活动ID/操作人ID（可空）
+  sourceId    Int?
+  /// 规则类型：CASH / DISCOUNT / FULL_REDUCTION / GIFT / MANUAL
+  ruleType    String   @db.VarChar(30)
+  amount      Decimal  @db.Decimal(10, 2)
+  description String?  @db.VarChar(255)
+  createdAt   DateTime @default(now())
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId], map: "idx_order_discounts_order_id")
+  @@index([sourceType, createdAt], map: "idx_order_discounts_source_type")
+  @@map("order_discounts")
 }
 
 model OrderDispatch {

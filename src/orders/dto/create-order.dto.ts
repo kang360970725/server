@@ -82,4 +82,28 @@ export class CreateOrderDto {
     @IsBoolean()
     isPaid?: boolean;
 
+    /**
+     * 优惠汇总输入（可选）：
+     * - 不传则默认为 0
+     * - 先提供总线字段，后续再接完整券引擎
+     */
+    @IsOptional()
+    @IsNumber()
+    @Min(0)
+    couponDiscountAmount?: number;
+
+    @IsOptional()
+    @IsNumber()
+    @Min(0)
+    activityDiscountAmount?: number;
+
+    /**
+     * 人工调整金额：
+     * - >0 代表减免
+     * - <0 代表加价（本期先保留字段，前端后续可开放）
+     */
+    @IsOptional()
+    @IsNumber()
+    manualAdjustAmount?: number;
+
 }
