@@ -102,6 +102,13 @@ model User {
   walletHolds              WalletHold[]
   walletTransactions       WalletTransaction[]
   walletWithdrawalRequests WalletWithdrawalRequest[]
+  createdPenaltyRules      PenaltyRule[]             @relation("PenaltyRuleCreator")
+  penaltyTickets           PenaltyTicket[]           @relation("PenaltyTicketUser")
+  createdPenaltyTickets    PenaltyTicket[]           @relation("PenaltyTicketCreator")
+  reviewedPenaltyTickets   PenaltyTicket[]           @relation("PenaltyTicketReviewer")
+  penaltyAppeals           PenaltyAppeal[]           @relation("PenaltyAppealUser")
+  reviewedPenaltyAppeals   PenaltyAppeal[]           @relation("PenaltyAppealReviewer")
+  penaltyFundFlows         PenaltyFundFlow[]
   userCoupons              UserCoupon[]
 
   @@index([workStatus])
@@ -1037,6 +1044,51 @@ enum OfflineFeePaymentSource {
   MANUAL
 }
 
+/// 罚单条例分类
+enum PenaltyRuleCategory {
+  SERVICE
+  ATTENDANCE
+  DISCIPLINE
+  SAFETY
+  OTHER
+}
+
+/// 罚单状态
+enum PenaltyTicketStatus {
+  /// 待陪玩确认/申诉
+  PENDING_CONFIRM
+  /// 申诉审核中
+  APPEAL_PENDING
+  /// 罚单生效并已扣款
+  EFFECTIVE
+  /// 申诉通过，罚单失效
+  INVALID
+}
+
+/// 申诉状态
+enum PenaltyAppealStatus {
+  NONE
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// 罚款资金池流水方向
+enum PenaltyFundDirection {
+  IN
+  OUT
+}
+
+/// 罚款资金池业务类型
+enum PenaltyFundBizType {
+  /// 罚单扣款入池
+  PENALTY_DEDUCT
+  /// 审核通过退款出池（预留）
+  APPEAL_REFUND
+  /// 人工调整（预留）
+  MANUAL_ADJUST
+}
+
 //业绩记录表
 model PerformanceRecord {
   id Int @id @default(autoincrement())
@@ -1161,4 +1213,131 @@ model OrderFinanceRecord {
   @@index([isComplained, statsDate], map: "idx_fin_complained_date")
   @@index([isAfterSale, statsDate], map: "idx_fin_aftersale_date")
   @@index([isCancelled, statsDate], map: "idx_fin_cancelled_date")
+}
+
+model PenaltyRule {
+  id          Int                 @id @default(autoincrement())
+  code        String              @unique @db.VarChar(32)
+  name        String              @db.VarChar(120)
+  category    PenaltyRuleCategory
+  amount      Decimal             @db.Decimal(10, 2)
+  description String?             @db.VarChar(255)
+  enabled     Boolean             @default(true)
+  sortOrder   Int                 @default(0)
+  createdBy   Int?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  creator     User?               @relation("PenaltyRuleCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  ticketDetails PenaltyTicketDetail[]
+
+  @@index([enabled, sortOrder], map: "idx_penalty_rule_enabled_sort")
+  @@index([category, enabled], map: "idx_penalty_rule_category")
+  @@map("penalty_rules")
+}
+
+model PenaltyTicket {
+  id               Int                @id @default(autoincrement())
+  ticketNo         String             @unique @db.VarChar(32)
+  userId           Int
+  creatorId        Int?
+  appealReviewerId Int?
+  status           PenaltyTicketStatus @default(PENDING_CONFIRM)
+  appealStatus     PenaltyAppealStatus @default(NONE)
+  ruleAmount       Decimal            @db.Decimal(10, 2)
+  finalAmount      Decimal            @db.Decimal(10, 2)
+  deductedAmount   Decimal            @default(0.00) @db.Decimal(10, 2)
+  deductedAt       DateTime?
+  deductWalletTxId Int?
+  reason           String?            @db.VarChar(255)
+  sameCategoryStats Json?
+  confirmAt        DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  user             User               @relation("PenaltyTicketUser", fields: [userId], references: [id], onDelete: Cascade)
+  creator          User?              @relation("PenaltyTicketCreator", fields: [creatorId], references: [id], onDelete: SetNull)
+  appealReviewer   User?              @relation("PenaltyTicketReviewer", fields: [appealReviewerId], references: [id], onDelete: SetNull)
+  details          PenaltyTicketDetail[]
+  appeals          PenaltyAppeal[]
+  fundFlows        PenaltyFundFlow[]
+
+  @@index([userId, status, createdAt], map: "idx_penalty_ticket_user_status")
+  @@index([status, createdAt], map: "idx_penalty_ticket_status")
+  @@index([appealStatus, createdAt], map: "idx_penalty_ticket_appeal")
+  @@index([creatorId], map: "idx_penalty_ticket_creator")
+  @@map("penalty_tickets")
+}
+
+model PenaltyTicketDetail {
+  id                   Int               @id @default(autoincrement())
+  ticketId             Int
+  ruleId               Int?
+  ruleCodeSnapshot     String?           @db.VarChar(32)
+  ruleNameSnapshot     String            @db.VarChar(120)
+  ruleCategorySnapshot PenaltyRuleCategory
+  amount               Decimal           @db.Decimal(10, 2)
+  descriptionSnapshot  String?           @db.VarChar(255)
+  createdAt            DateTime          @default(now())
+  ticket               PenaltyTicket     @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  rule                 PenaltyRule?      @relation(fields: [ruleId], references: [id], onDelete: SetNull)
+
+  @@index([ticketId], map: "idx_penalty_ticket_detail_ticket")
+  @@index([ruleCategorySnapshot], map: "idx_penalty_ticket_detail_category")
+  @@map("penalty_ticket_details")
+}
+
+model PenaltyAppeal {
+  id           Int                @id @default(autoincrement())
+  ticketId     Int                @unique
+  userId       Int
+  content      String             @db.Text
+  status       PenaltyAppealStatus @default(PENDING)
+  reviewedBy   Int?
+  reviewedAt   DateTime?
+  reviewRemark String?            @db.VarChar(255)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  ticket       PenaltyTicket      @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user         User               @relation("PenaltyAppealUser", fields: [userId], references: [id], onDelete: Cascade)
+  reviewer     User?              @relation("PenaltyAppealReviewer", fields: [reviewedBy], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt], map: "idx_penalty_appeal_user")
+  @@index([status, createdAt], map: "idx_penalty_appeal_status")
+  @@map("penalty_appeals")
+}
+
+model PenaltyFundPool {
+  id        Int               @id
+  totalIn   Decimal           @default(0.00) @db.Decimal(12, 2)
+  totalOut  Decimal           @default(0.00) @db.Decimal(12, 2)
+  balance   Decimal           @default(0.00) @db.Decimal(12, 2)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  flows     PenaltyFundFlow[]
+
+  @@map("penalty_fund_pools")
+}
+
+model PenaltyFundFlow {
+  id            Int                @id @default(autoincrement())
+  poolId         Int                @default(1)
+  ticketId       Int?
+  userId         Int?
+  direction      PenaltyFundDirection
+  bizType        PenaltyFundBizType
+  amount         Decimal            @db.Decimal(10, 2)
+  beforeBalance  Decimal            @db.Decimal(12, 2)
+  afterBalance   Decimal            @db.Decimal(12, 2)
+  walletTxId     Int?
+  operatorId     Int?
+  remark         String?            @db.VarChar(255)
+  createdAt      DateTime           @default(now())
+  pool           PenaltyFundPool    @relation(fields: [poolId], references: [id], onDelete: Cascade)
+  ticket         PenaltyTicket?     @relation(fields: [ticketId], references: [id], onDelete: SetNull)
+  user           User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@unique([ticketId, bizType], map: "uniq_penalty_flow_ticket_biz")
+  @@index([createdAt], map: "idx_penalty_fund_flow_created")
+  @@index([userId, createdAt], map: "idx_penalty_fund_flow_user")
+  @@index([bizType, createdAt], map: "idx_penalty_fund_flow_biz")
+  @@map("penalty_fund_flows")
 }

@@ -610,6 +610,18 @@ export class NotificationsService {
     return { created: Number(res.count || 0) };
   }
 
+  // 对外暴露一个轻量实时推送入口，方便其他业务模块（如罚单）复用统一消息中心
+  async pushRealtimeToUsers(input: {
+    userIds: number[];
+    type: string;
+    title: string;
+    content: string;
+    route?: string;
+    payload?: any;
+  }) {
+    return this.realtimeNotificationsService.pushToUsers(input);
+  }
+
   async listMyNotifications(userId: number, dto: ListMyNotificationsDto) {
     const page = Math.max(1, Number(dto.page || 1));
     const limit = Math.min(100, Math.max(1, Number(dto.limit || 20)));
