@@ -79,6 +79,13 @@ export class PenaltiesController {
     return this.penaltiesService.getTicketDetail(Number(body?.ticketId));
   }
 
+  @Post('tickets/remind')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  remindTicket(@Body() body: any) {
+    return this.penaltiesService.remindTicket(Number(body?.ticketId));
+  }
+
   @Post('tickets/review-appeal')
   @UseGuards(PermissionsGuard)
   @Permissions('system:role:page')

@@ -3,6 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import {
   NotificationType,
   PenaltyAppealStatus,
@@ -30,6 +31,10 @@ import { ListPenaltyRankingDto } from './dto/list-penalty-ranking.dto';
 
 @Injectable()
 export class PenaltiesService {
+  // 进程内催办冷却（30分钟），避免同一罚单频繁强提醒造成骚扰
+  private readonly remindCooldownMs = 30 * 60 * 1000;
+  private readonly remindCooldownMap = new Map<number, number>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly walletService: WalletService,
@@ -39,6 +44,66 @@ export class PenaltiesService {
   // 钱包余额是 1 位小数，这里统一到 1 位，避免账户与流水金额出现尾差
   private round1(value: number) {
     return Math.round(Number(value || 0) * 10) / 10;
+  }
+
+  // 枚举中文化：前端可以直接展示，避免出现原始 ENUM 常量
+  private readonly categoryLabelMap: Record<PenaltyRuleCategory, string> = {
+    SERVICE: '服务类违规',
+    ATTENDANCE: '出勤类违规',
+    DISCIPLINE: '纪律类违规',
+    SAFETY: '安全类违规',
+    OTHER: '其他违规',
+  };
+
+  private readonly ticketStatusLabelMap: Record<PenaltyTicketStatus, string> = {
+    PENDING_CONFIRM: '待确认/申诉',
+    APPEAL_PENDING: '申诉审核中',
+    EFFECTIVE: '已生效',
+    INVALID: '已失效',
+  };
+
+  private readonly appealStatusLabelMap: Record<PenaltyAppealStatus, string> = {
+    NONE: '未申诉',
+    PENDING: '申诉待审核',
+    APPROVED: '申诉通过',
+    REJECTED: '申诉驳回',
+  };
+
+  private readonly fundBizTypeLabelMap: Record<PenaltyFundBizType, string> = {
+    PENALTY_DEDUCT: '罚单扣款入池',
+    APPEAL_REFUND: '申诉退款出池',
+    MANUAL_ADJUST: '人工调整',
+  };
+
+  private enrichRuleLabel<T extends { category: PenaltyRuleCategory }>(row: T) {
+    return {
+      ...row,
+      categoryLabel: this.categoryLabelMap[row.category] || row.category,
+    };
+  }
+
+  private enrichTicketLabel<
+    T extends { status: PenaltyTicketStatus; appealStatus: PenaltyAppealStatus; details?: any[]; sameCategoryStats?: any }
+  >(row: T) {
+    return {
+      ...row,
+      statusLabel: this.ticketStatusLabelMap[row.status] || row.status,
+      appealStatusLabel: this.appealStatusLabelMap[row.appealStatus] || row.appealStatus,
+      details: Array.isArray(row.details)
+        ? row.details.map((x) => ({
+            ...x,
+            ruleCategoryLabel: this.categoryLabelMap[x.ruleCategorySnapshot] || x.ruleCategorySnapshot,
+          }))
+        : row.details,
+      sameCategoryStatsLabel: row.sameCategoryStats
+        ? Object.fromEntries(
+            Object.keys(row.sameCategoryStats).map((key) => [
+              this.categoryLabelMap[key as PenaltyRuleCategory] || key,
+              (row.sameCategoryStats as any)[key],
+            ]),
+          )
+        : undefined,
+    };
   }
 
   private normalizePaging(body: any) {
@@ -126,7 +191,16 @@ export class PenaltiesService {
       this.prisma.penaltyRule.count({ where }),
     ]);
 
-    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+    return {
+      data: data.map((x) => this.enrichRuleLabel(x)),
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      dict: {
+        categoryLabelMap: this.categoryLabelMap,
+      },
+    };
   }
 
   async listEnabledRulesForSelect() {
@@ -142,7 +216,12 @@ export class PenaltiesService {
         description: true,
       },
     });
-    return { data };
+    return {
+      data: data.map((x) => this.enrichRuleLabel(x)),
+      dict: {
+        categoryLabelMap: this.categoryLabelMap,
+      },
+    };
   }
 
   async createRule(dto: CreatePenaltyRuleDto, operatorId?: number) {
@@ -222,7 +301,19 @@ export class PenaltiesService {
       rules.reduce((sum, item) => sum + Number(item.amount || 0), 0),
     );
 
-    return { rules, categories, ruleAmount, sameCategoryStats };
+    return {
+      rules: rules.map((x) => this.enrichRuleLabel(x)),
+      categories,
+      categoryLabels: categories.map((x) => ({
+        key: x,
+        label: this.categoryLabelMap[x] || x,
+      })),
+      ruleAmount,
+      sameCategoryStats,
+      sameCategoryStatsLabel: Object.fromEntries(
+        categories.map((x) => [this.categoryLabelMap[x] || x, sameCategoryStats[x] || 0]),
+      ),
+    };
   }
 
   async createTicket(dto: CreatePenaltyTicketDto, operatorId?: number) {
@@ -273,7 +364,7 @@ export class PenaltiesService {
       amount: Number(created.finalAmount),
     });
 
-    return created;
+    return this.enrichTicketLabel(created as any);
   }
 
   async listTickets(body: any) {
@@ -311,7 +402,18 @@ export class PenaltiesService {
       this.prisma.penaltyTicket.count({ where }),
     ]);
 
-    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+    return {
+      data: data.map((x) => this.enrichTicketLabel(x as any)),
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      dict: {
+        ticketStatusLabelMap: this.ticketStatusLabelMap,
+        appealStatusLabelMap: this.appealStatusLabelMap,
+        categoryLabelMap: this.categoryLabelMap,
+      },
+    };
   }
 
   async listMyTickets(userId: number, body: any) {
@@ -336,7 +438,7 @@ export class PenaltiesService {
     if (userId && Number(row.userId) !== Number(userId)) {
       throw new BadRequestException('无权查看该罚单');
     }
-    return row;
+    return this.enrichTicketLabel(row as any);
   }
 
   async getMyPendingStats(userId: number) {
@@ -505,7 +607,7 @@ export class PenaltiesService {
       });
     });
 
-    return updated;
+    return this.enrichTicketLabel(updated as any);
   }
 
   async submitMyAppeal(userId: number, dto: SubmitPenaltyAppealDto) {
@@ -544,7 +646,7 @@ export class PenaltiesService {
       });
     });
 
-    return updated;
+    return this.enrichTicketLabel(updated as any);
   }
 
   async reviewAppeal(dto: ReviewPenaltyAppealDto, reviewerId?: number) {
@@ -653,7 +755,7 @@ export class PenaltiesService {
       await this.pushPenaltyStrongReminder(notifyPayload);
     }
 
-    return updated;
+    return this.enrichTicketLabel(updated as any);
   }
 
   async getFundStats() {
@@ -700,7 +802,19 @@ export class PenaltiesService {
       this.prisma.penaltyFundFlow.count({ where }),
     ]);
 
-    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+    return {
+      data: data.map((x) => ({
+        ...x,
+        bizTypeLabel: this.fundBizTypeLabelMap[x.bizType] || x.bizType,
+      })),
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      dict: {
+        fundBizTypeLabelMap: this.fundBizTypeLabelMap,
+      },
+    };
   }
 
   async listPenaltyRanking(dto: ListPenaltyRankingDto) {
@@ -766,6 +880,85 @@ export class PenaltiesService {
     for (const row of grouped) {
       result[row.ruleCategorySnapshot] = Number(row._count?._all || 0);
     }
-    return result;
+    return {
+      value: result,
+      labelValue: Object.fromEntries(
+        Object.keys(result).map((k) => [
+          this.categoryLabelMap[k as PenaltyRuleCategory] || k,
+          result[k as PenaltyRuleCategory],
+        ]),
+      ),
+      dict: {
+        categoryLabelMap: this.categoryLabelMap,
+      },
+    };
+  }
+
+  // 手动催办：管理端可对指定罚单再次触发强提醒
+  async remindTicket(ticketId: number) {
+    const id = Number(ticketId);
+    if (!id) throw new BadRequestException('ticketId不能为空');
+
+    const ticket = await this.prisma.penaltyTicket.findUnique({ where: { id } });
+    if (!ticket) throw new NotFoundException('罚单不存在');
+    const pendingStatuses: PenaltyTicketStatus[] = [
+      PenaltyTicketStatus.PENDING_CONFIRM,
+      PenaltyTicketStatus.APPEAL_PENDING,
+    ];
+    if (!pendingStatuses.includes(ticket.status)) {
+      throw new BadRequestException('当前状态无需催办');
+    }
+
+    await this.pushPenaltyStrongReminder({
+      userId: ticket.userId,
+      ticketId: ticket.id,
+      ticketNo: ticket.ticketNo,
+      amount: Number(ticket.finalAmount),
+      title: `【催办】请优先处理罚单`,
+      content: `罚单号 ${ticket.ticketNo} 仍待处理，请尽快确认或申诉。`,
+    });
+
+    this.remindCooldownMap.set(ticket.id, Date.now());
+    return { success: true };
+  }
+
+  // 自动催办：每10分钟扫描待处理罚单，并按冷却策略推送，减少遗漏
+  @Cron('0 */10 * * * *', { timeZone: 'Asia/Shanghai' })
+  async autoRemindPendingTickets() {
+    const now = Date.now();
+    const rows = await this.prisma.penaltyTicket.findMany({
+      where: {
+        status: {
+          in: [PenaltyTicketStatus.PENDING_CONFIRM, PenaltyTicketStatus.APPEAL_PENDING],
+        },
+      },
+      select: {
+        id: true,
+        userId: true,
+        ticketNo: true,
+        finalAmount: true,
+      },
+      orderBy: [{ id: 'desc' }],
+      take: 200,
+    });
+
+    for (const row of rows) {
+      const lastAt = Number(this.remindCooldownMap.get(row.id) || 0);
+      if (now - lastAt < this.remindCooldownMs) continue;
+      try {
+        await this.pushPenaltyStrongReminder({
+          userId: row.userId,
+          ticketId: row.id,
+          ticketNo: row.ticketNo,
+          amount: Number(row.finalAmount),
+          title: `【强提醒】你有待处理罚单`,
+          content: `罚单号 ${row.ticketNo} 仍在待处理状态，请优先处理。`,
+        });
+        this.remindCooldownMap.set(row.id, now);
+      } catch (e) {
+        // 定时任务不抛出，避免影响后续任务轮次
+        console.error('[penalties][autoRemindPendingTickets] failed:', row.id, e?.message || e);
+      }
+    }
   }
 }
