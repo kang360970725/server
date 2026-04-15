@@ -35,6 +35,7 @@ async function main() {
         { key: 'staff-ratings:page', name: '评级管理页', module: 'staff-ratings', type: PermissionType.PAGE },
 
         { key: 'orders:list:page', name: '订单管理页', module: 'orders', type: PermissionType.PAGE },
+        { key: 'penalties:page', name: '罚单管理页', module: 'penalties', type: PermissionType.PAGE },
 
         { key: 'staff:my-orders:page', name: '陪玩-我的接单页', module: 'staff', type: PermissionType.PAGE },
         { key: 'staff:workbench:page', name: '陪玩-工作台页', module: 'staff', type: PermissionType.PAGE },

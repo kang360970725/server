@@ -21,6 +21,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { UserLogsService } from '../user-logs/user-logs.service';
 import { CreatePenaltyRuleDto } from './dto/create-penalty-rule.dto';
 import { UpdatePenaltyRuleDto } from './dto/update-penalty-rule.dto';
 import { CreatePenaltyTicketDto } from './dto/create-penalty-ticket.dto';
@@ -40,6 +41,7 @@ export class PenaltiesService {
     private readonly prisma: PrismaService,
     private readonly walletService: WalletService,
     private readonly notificationsService: NotificationsService,
+    private readonly userLogsService: UserLogsService,
   ) {}
 
   // 钱包余额是 1 位小数，这里统一到 1 位，避免账户与流水金额出现尾差
@@ -270,6 +272,15 @@ export class PenaltiesService {
     };
   }
 
+  async getDict() {
+    return {
+      categoryLabelMap: this.categoryLabelMap,
+      ticketStatusLabelMap: this.ticketStatusLabelMap,
+      appealStatusLabelMap: this.appealStatusLabelMap,
+      fundBizTypeLabelMap: this.fundBizTypeLabelMap,
+    };
+  }
+
   async createRule(dto: CreatePenaltyRuleDto, operatorId?: number) {
     const code = String(dto.code || '').trim().toUpperCase();
     if (!code) throw new BadRequestException('条例编码不能为空');
@@ -279,7 +290,7 @@ export class PenaltiesService {
     const amount = this.round1(Number(dto.amount || 0));
     if (amount < 0) throw new BadRequestException('处罚金额不能小于0');
 
-    return this.prisma.penaltyRule.create({
+    const created = await this.prisma.penaltyRule.create({
       data: {
         code,
         name,
@@ -291,14 +302,27 @@ export class PenaltiesService {
         createdBy: Number.isFinite(operatorId as any) ? Number(operatorId) : null,
       },
     });
+
+    if (operatorId) {
+      await this.userLogsService.writeLog({
+        userId: Number(operatorId),
+        action: 'PENALTY_RULE_CREATE',
+        targetType: 'PENALTY_RULE',
+        targetId: created.id,
+        newData: created as any,
+        remark: `创建处罚条例：${created.name}(${created.code})`,
+      });
+    }
+
+    return created;
   }
 
-  async updateRule(dto: UpdatePenaltyRuleDto) {
+  async updateRule(dto: UpdatePenaltyRuleDto, operatorId?: number) {
     const id = Number(dto.id);
     const exists = await this.prisma.penaltyRule.findUnique({ where: { id } });
     if (!exists) throw new NotFoundException('处罚条例不存在');
 
-    return this.prisma.penaltyRule.update({
+    const updated = await this.prisma.penaltyRule.update({
       where: { id },
       data: {
         name: dto.name == null ? undefined : String(dto.name).trim(),
@@ -309,6 +333,20 @@ export class PenaltiesService {
         sortOrder: dto.sortOrder == null ? undefined : Number(dto.sortOrder),
       },
     });
+
+    if (operatorId) {
+      await this.userLogsService.writeLog({
+        userId: Number(operatorId),
+        action: 'PENALTY_RULE_UPDATE',
+        targetType: 'PENALTY_RULE',
+        targetId: updated.id,
+        oldData: exists as any,
+        newData: updated as any,
+        remark: `更新处罚条例：${updated.name}(${updated.code})`,
+      });
+    }
+
+    return updated;
   }
 
   async getCreateTicketContext(userId: number, ruleIds: number[]) {
@@ -409,6 +447,23 @@ export class PenaltiesService {
       ticketNo: created.ticketNo,
       amount: Number(created.finalAmount),
     });
+
+    if (operatorId) {
+      await this.userLogsService.writeLog({
+        userId: Number(operatorId),
+        action: 'PENALTY_TICKET_CREATE',
+        targetType: 'PENALTY_TICKET',
+        targetId: created.id,
+        newData: {
+          userId: created.userId,
+          ticketNo: created.ticketNo,
+          ruleAmount: created.ruleAmount,
+          finalAmount: created.finalAmount,
+          detailIds: created.details?.map((x) => x.id) || [],
+        } as any,
+        remark: `开具罚单：${created.ticketNo}`,
+      });
+    }
 
     return this.enrichTicketLabel(created as any);
   }
@@ -653,6 +708,19 @@ export class PenaltiesService {
       });
     });
 
+    await this.userLogsService.writeLog({
+      userId: Number(userId),
+      action: 'PENALTY_TICKET_CONFIRM',
+      targetType: 'PENALTY_TICKET',
+      targetId: updated.id,
+      newData: {
+        status: updated.status,
+        deductedAmount: updated.deductedAmount,
+        deductWalletTxId: updated.deductWalletTxId,
+      } as any,
+      remark: `确认罚单并扣款：${updated.ticketNo}`,
+    });
+
     return this.enrichTicketLabel(updated as any);
   }
 
@@ -702,6 +770,18 @@ export class PenaltiesService {
     if (notifyReviewPayload) {
       await this.pushAppealReviewReminderToAdmins(notifyReviewPayload);
     }
+
+    await this.userLogsService.writeLog({
+      userId: Number(userId),
+      action: 'PENALTY_APPEAL_SUBMIT',
+      targetType: 'PENALTY_TICKET',
+      targetId: updated.id,
+      newData: {
+        status: updated.status,
+        appealStatus: updated.appealStatus,
+      } as any,
+      remark: `发起罚单申诉：${ticketId}`,
+    });
 
     return this.enrichTicketLabel(updated as any);
   }
@@ -810,6 +890,22 @@ export class PenaltiesService {
 
     if (notifyPayload) {
       await this.pushPenaltyStrongReminder(notifyPayload);
+    }
+
+    if (reviewerId) {
+      await this.userLogsService.writeLog({
+        userId: Number(reviewerId),
+        action: dto.approved ? 'PENALTY_APPEAL_APPROVE' : 'PENALTY_APPEAL_REJECT',
+        targetType: 'PENALTY_TICKET',
+        targetId: updated.id,
+        newData: {
+          status: updated.status,
+          appealStatus: updated.appealStatus,
+          deductedAmount: updated.deductedAmount,
+          deductWalletTxId: updated.deductWalletTxId,
+        } as any,
+        remark: `审核罚单申诉：${ticketId}`,
+      });
     }
 
     return this.enrichTicketLabel(updated as any);
@@ -1040,7 +1136,7 @@ export class PenaltiesService {
   }
 
   // 手动催办：管理端可对指定罚单再次触发强提醒
-  async remindTicket(ticketId: number) {
+  async remindTicket(ticketId: number, operatorId?: number) {
     const id = Number(ticketId);
     if (!id) throw new BadRequestException('ticketId不能为空');
 
@@ -1064,6 +1160,15 @@ export class PenaltiesService {
     });
 
     this.remindCooldownMap.set(ticket.id, Date.now());
+    if (operatorId) {
+      await this.userLogsService.writeLog({
+        userId: Number(operatorId),
+        action: 'PENALTY_TICKET_REMIND',
+        targetType: 'PENALTY_TICKET',
+        targetId: ticket.id,
+        remark: `手动催办罚单：${ticket.ticketNo}`,
+      });
+    }
     return { success: true };
   }
 

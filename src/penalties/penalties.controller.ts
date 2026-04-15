@@ -12,6 +12,9 @@ import { ConfirmPenaltyTicketDto } from './dto/confirm-penalty-ticket.dto';
 import { ListPenaltyFundFlowsDto } from './dto/list-penalty-fund-flows.dto';
 import { ListPenaltyRankingDto } from './dto/list-penalty-ranking.dto';
 
+const PENALTIES_PAGE = 'penalties:page';
+const LEGACY_PAGE = 'system:role:page';
+
 @Controller('penalties')
 @UseGuards(JwtAuthGuard)
 export class PenaltiesController {
@@ -21,21 +24,28 @@ export class PenaltiesController {
 
   @Post('rules/list')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
   listRules(@Body() body: any) {
     return this.penaltiesService.listRules(body || {});
   }
 
   @Post('rules/options')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
   listRuleOptions() {
     return this.penaltiesService.listEnabledRulesForSelect();
   }
 
+  @Post('dict')
+  @UseGuards(PermissionsGuard)
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
+  dict() {
+    return this.penaltiesService.getDict();
+  }
+
   @Post('rules/create')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
   createRule(@Body() dto: CreatePenaltyRuleDto, @Req() req: any) {
     const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
     return this.penaltiesService.createRule(dto, Number.isFinite(operatorId) ? operatorId : undefined);
@@ -43,23 +53,24 @@ export class PenaltiesController {
 
   @Post('rules/update')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
-  updateRule(@Body() dto: UpdatePenaltyRuleDto) {
-    return this.penaltiesService.updateRule(dto);
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
+  updateRule(@Body() dto: UpdatePenaltyRuleDto, @Req() req: any) {
+    const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.penaltiesService.updateRule(dto, Number.isFinite(operatorId) ? operatorId : undefined);
   }
 
   // ===== 管理端：罚单 =====
 
   @Post('tickets/context')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
   getCreateTicketContext(@Body() body: any) {
     return this.penaltiesService.getCreateTicketContext(Number(body?.userId), body?.ruleIds || []);
   }
 
   @Post('tickets/create')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
   createTicket(@Body() dto: CreatePenaltyTicketDto, @Req() req: any) {
     const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
     return this.penaltiesService.createTicket(dto, Number.isFinite(operatorId) ? operatorId : undefined);
@@ -67,35 +78,39 @@ export class PenaltiesController {
 
   @Post('tickets/list')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
   listTickets(@Body() body: any) {
     return this.penaltiesService.listTickets(body || {});
   }
 
   @Post('appeals/list')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
   listAppeals(@Body() body: any) {
     return this.penaltiesService.listAppeals(body || {});
   }
 
   @Post('tickets/detail')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
   ticketDetail(@Body() body: any) {
     return this.penaltiesService.getTicketDetail(Number(body?.ticketId));
   }
 
   @Post('tickets/remind')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
-  remindTicket(@Body() body: any) {
-    return this.penaltiesService.remindTicket(Number(body?.ticketId));
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
+  remindTicket(@Body() body: any, @Req() req: any) {
+    const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.penaltiesService.remindTicket(
+      Number(body?.ticketId),
+      Number.isFinite(operatorId) ? operatorId : undefined,
+    );
   }
 
   @Post('tickets/review-appeal')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
   reviewAppeal(@Body() dto: ReviewPenaltyAppealDto, @Req() req: any) {
     const reviewerId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
     return this.penaltiesService.reviewAppeal(dto, Number.isFinite(reviewerId) ? reviewerId : undefined);
@@ -105,35 +120,35 @@ export class PenaltiesController {
 
   @Post('fund/stats')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
   getFundStats() {
     return this.penaltiesService.getFundStats();
   }
 
   @Post('stats/pending')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
   getPendingStats() {
     return this.penaltiesService.getAdminPendingStats();
   }
 
   @Post('fund/flows')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
   listFundFlows(@Body() dto: ListPenaltyFundFlowsDto) {
     return this.penaltiesService.listFundFlows(dto || {});
   }
 
   @Post('ranking/list')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
   listRanking(@Body() dto: ListPenaltyRankingDto) {
     return this.penaltiesService.listPenaltyRanking(dto || {});
   }
 
   @Post('stats/rule-categories')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
   ruleCategoryStats(@Body() body: any) {
     return this.penaltiesService.getRuleCategoryStats(Number(body?.userId));
   }
