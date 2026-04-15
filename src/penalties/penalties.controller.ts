@@ -132,6 +132,13 @@ export class PenaltiesController {
     return this.penaltiesService.getAdminPendingStats();
   }
 
+  @Post('stats/overview')
+  @UseGuards(PermissionsGuard)
+  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
+  getOverview() {
+    return this.penaltiesService.getAdminOverview();
+  }
+
   @Post('fund/flows')
   @UseGuards(PermissionsGuard)
   @Permissions(PENALTIES_PAGE, LEGACY_PAGE)

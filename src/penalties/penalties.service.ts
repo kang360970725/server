@@ -7,7 +7,6 @@ import { Cron } from '@nestjs/schedule';
 import {
   NotificationType,
   PenaltyAppealStatus,
-  PenaltyFundFlow,
   PenaltyFundBizType,
   PenaltyFundDirection,
   PenaltyRuleCategory,
@@ -1022,6 +1021,104 @@ export class PenaltiesService {
     };
   }
 
+  async getAdminOverview() {
+    const now = new Date();
+    const sevenDaysAgo = new Date(now);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+    sevenDaysAgo.setHours(0, 0, 0, 0);
+
+    const [pendingStats, ticketRows, detailRows] = await Promise.all([
+      this.getAdminPendingStats(),
+      this.prisma.penaltyTicket.findMany({
+        where: { createdAt: { gte: sevenDaysAgo } },
+        select: {
+          id: true,
+          createdAt: true,
+          status: true,
+          finalAmount: true,
+          deductedAmount: true,
+          deductedAt: true,
+        },
+        orderBy: [{ createdAt: 'asc' }],
+      }),
+      this.prisma.penaltyTicketDetail.findMany({
+        where: {
+          ticket: {
+            createdAt: { gte: sevenDaysAgo },
+          },
+        },
+        select: {
+          ruleId: true,
+          ruleNameSnapshot: true,
+          amount: true,
+        },
+      }),
+    ]);
+
+    const dayBuckets: Record<string, { date: string; createdCount: number; effectiveCount: number; invalidCount: number; deductedAmount: number }> = {};
+    for (let i = 0; i < 7; i += 1) {
+      const d = new Date(sevenDaysAgo);
+      d.setDate(sevenDaysAgo.getDate() + i);
+      const key = d.toISOString().slice(0, 10);
+      dayBuckets[key] = {
+        date: key,
+        createdCount: 0,
+        effectiveCount: 0,
+        invalidCount: 0,
+        deductedAmount: 0,
+      };
+    }
+
+    let totalProcessHours = 0;
+    let processedCount = 0;
+
+    for (const row of ticketRows) {
+      const key = new Date(row.createdAt).toISOString().slice(0, 10);
+      if (!dayBuckets[key]) continue;
+      dayBuckets[key].createdCount += 1;
+      if (row.status === PenaltyTicketStatus.EFFECTIVE) dayBuckets[key].effectiveCount += 1;
+      if (row.status === PenaltyTicketStatus.INVALID) dayBuckets[key].invalidCount += 1;
+      dayBuckets[key].deductedAmount += Number(row.deductedAmount || 0);
+
+      if (row.deductedAt) {
+        const processMs = new Date(row.deductedAt).getTime() - new Date(row.createdAt).getTime();
+        if (processMs >= 0) {
+          totalProcessHours += processMs / (1000 * 60 * 60);
+          processedCount += 1;
+        }
+      }
+    }
+
+    const ruleCountMap = new Map<string, { ruleName: string; count: number; amount: number }>();
+    for (const detail of detailRows) {
+      const key = String(detail.ruleId || detail.ruleNameSnapshot || 'UNKNOWN');
+      const prev = ruleCountMap.get(key) || { ruleName: detail.ruleNameSnapshot, count: 0, amount: 0 };
+      prev.count += 1;
+      prev.amount += Number(detail.amount || 0);
+      ruleCountMap.set(key, prev);
+    }
+
+    const topRules = Array.from(ruleCountMap.values())
+      .sort((a, b) => (b.count - a.count) || (b.amount - a.amount))
+      .slice(0, 10)
+      .map((x, idx) => ({
+        rank: idx + 1,
+        ruleName: x.ruleName,
+        count: x.count,
+        amount: this.round1(x.amount),
+      }));
+
+    return {
+      pending: pendingStats,
+      process: {
+        avgProcessHours: processedCount ? this.round1(totalProcessHours / processedCount) : 0,
+        processedCount,
+      },
+      trend7d: Object.values(dayBuckets),
+      topRules,
+    };
+  }
+
   async listFundFlows(dto: ListPenaltyFundFlowsDto) {
     const { page, limit, skip } = this.normalizePaging(dto || {});
     const where: Prisma.PenaltyFundFlowWhereInput = {};
@@ -1150,14 +1247,22 @@ export class PenaltiesService {
       throw new BadRequestException('当前状态无需催办');
     }
 
-    await this.pushPenaltyStrongReminder({
-      userId: ticket.userId,
-      ticketId: ticket.id,
-      ticketNo: ticket.ticketNo,
-      amount: Number(ticket.finalAmount),
-      title: `【催办】请优先处理罚单`,
-      content: `罚单号 ${ticket.ticketNo} 仍待处理，请尽快确认或申诉。`,
-    });
+    if (ticket.status === PenaltyTicketStatus.PENDING_CONFIRM) {
+      await this.pushPenaltyStrongReminder({
+        userId: ticket.userId,
+        ticketId: ticket.id,
+        ticketNo: ticket.ticketNo,
+        amount: Number(ticket.finalAmount),
+        title: `【催办】请优先处理罚单`,
+        content: `罚单号 ${ticket.ticketNo} 仍待处理，请尽快确认或申诉。`,
+      });
+    } else {
+      await this.pushAppealReviewReminderToAdmins({
+        ticketId: ticket.id,
+        ticketNo: ticket.ticketNo,
+        userId: ticket.userId,
+      });
+    }
 
     this.remindCooldownMap.set(ticket.id, Date.now());
     if (operatorId) {
@@ -1187,6 +1292,7 @@ export class PenaltiesService {
         userId: true,
         ticketNo: true,
         finalAmount: true,
+        status: true,
       },
       orderBy: [{ id: 'desc' }],
       take: 200,
@@ -1195,27 +1301,22 @@ export class PenaltiesService {
     for (const row of rows) {
       const lastAt = Number(this.remindCooldownMap.get(row.id) || 0);
       if (now - lastAt < this.remindCooldownMs) continue;
-      const ticket = await this.prisma.penaltyTicket.findUnique({
-        where: { id: row.id },
-        select: { id: true, userId: true, ticketNo: true, finalAmount: true, status: true },
-      });
-      if (!ticket) continue;
 
       try {
-        if (ticket.status === PenaltyTicketStatus.PENDING_CONFIRM) {
+        if (row.status === PenaltyTicketStatus.PENDING_CONFIRM) {
           await this.pushPenaltyStrongReminder({
-            userId: ticket.userId,
-            ticketId: ticket.id,
-            ticketNo: ticket.ticketNo,
-            amount: Number(ticket.finalAmount),
+            userId: row.userId,
+            ticketId: row.id,
+            ticketNo: row.ticketNo,
+            amount: Number(row.finalAmount),
             title: `【强提醒】你有待处理罚单`,
-            content: `罚单号 ${ticket.ticketNo} 仍在待处理状态，请优先处理。`,
+            content: `罚单号 ${row.ticketNo} 仍在待处理状态，请优先处理。`,
           });
-        } else if (ticket.status === PenaltyTicketStatus.APPEAL_PENDING) {
+        } else if (row.status === PenaltyTicketStatus.APPEAL_PENDING) {
           await this.pushAppealReviewReminderToAdmins({
-            ticketId: ticket.id,
-            ticketNo: ticket.ticketNo,
-            userId: ticket.userId,
+            ticketId: row.id,
+            ticketNo: row.ticketNo,
+            userId: row.userId,
           });
         }
         this.remindCooldownMap.set(row.id, now);
