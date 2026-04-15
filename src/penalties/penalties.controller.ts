@@ -26,6 +26,13 @@ export class PenaltiesController {
     return this.penaltiesService.listRules(body || {});
   }
 
+  @Post('rules/options')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  listRuleOptions() {
+    return this.penaltiesService.listEnabledRulesForSelect();
+  }
+
   @Post('rules/create')
   @UseGuards(PermissionsGuard)
   @Permissions('system:role:page')
@@ -65,6 +72,13 @@ export class PenaltiesController {
     return this.penaltiesService.listTickets(body || {});
   }
 
+  @Post('tickets/detail')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  ticketDetail(@Body() body: any) {
+    return this.penaltiesService.getTicketDetail(Number(body?.ticketId));
+  }
+
   @Post('tickets/review-appeal')
   @UseGuards(PermissionsGuard)
   @Permissions('system:role:page')
@@ -96,12 +110,31 @@ export class PenaltiesController {
     return this.penaltiesService.listPenaltyRanking(dto || {});
   }
 
+  @Post('stats/rule-categories')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  ruleCategoryStats(@Body() body: any) {
+    return this.penaltiesService.getRuleCategoryStats(Number(body?.userId));
+  }
+
   // ===== 陪玩端：我的罚单 =====
 
   @Post('my/tickets/list')
   listMyTickets(@Body() body: any, @Req() req: any) {
     const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
     return this.penaltiesService.listMyTickets(userId, body || {});
+  }
+
+  @Post('my/tickets/detail')
+  myTicketDetail(@Body() body: any, @Req() req: any) {
+    const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.penaltiesService.getTicketDetail(Number(body?.ticketId), userId);
+  }
+
+  @Post('my/tickets/pending-stats')
+  myPendingStats(@Req() req: any) {
+    const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.penaltiesService.getMyPendingStats(userId);
   }
 
   @Post('my/tickets/confirm')

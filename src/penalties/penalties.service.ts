@@ -6,8 +6,10 @@ import {
 import {
   NotificationType,
   PenaltyAppealStatus,
+  PenaltyFundFlow,
   PenaltyFundBizType,
   PenaltyFundDirection,
+  PenaltyRuleCategory,
   PenaltyTicketStatus,
   Prisma,
   WalletBizType,
@@ -125,6 +127,22 @@ export class PenaltiesService {
     ]);
 
     return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+  }
+
+  async listEnabledRulesForSelect() {
+    const data = await this.prisma.penaltyRule.findMany({
+      where: { enabled: true },
+      orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        category: true,
+        amount: true,
+        description: true,
+      },
+    });
+    return { data };
   }
 
   async createRule(dto: CreatePenaltyRuleDto, operatorId?: number) {
@@ -300,21 +318,88 @@ export class PenaltiesService {
     return this.listTickets({ ...(body || {}), userId });
   }
 
+  async getTicketDetail(ticketId: number, userId?: number) {
+    const id = Number(ticketId);
+    if (!id) throw new BadRequestException('ticketId不能为空');
+
+    const row = await this.prisma.penaltyTicket.findUnique({
+      where: { id },
+      include: {
+        user: { select: { id: true, name: true, phone: true } },
+        creator: { select: { id: true, name: true } },
+        appealReviewer: { select: { id: true, name: true } },
+        details: true,
+        appeals: true,
+      },
+    });
+    if (!row) throw new NotFoundException('罚单不存在');
+    if (userId && Number(row.userId) !== Number(userId)) {
+      throw new BadRequestException('无权查看该罚单');
+    }
+    return row;
+  }
+
+  async getMyPendingStats(userId: number) {
+    const uid = Number(userId);
+    const [pendingConfirmCount, appealPendingCount] = await Promise.all([
+      this.prisma.penaltyTicket.count({
+        where: {
+          userId: uid,
+          status: PenaltyTicketStatus.PENDING_CONFIRM,
+        },
+      }),
+      this.prisma.penaltyTicket.count({
+        where: {
+          userId: uid,
+          status: PenaltyTicketStatus.APPEAL_PENDING,
+        },
+      }),
+    ]);
+
+    return {
+      pendingConfirmCount,
+      appealPendingCount,
+      forcePendingCount: pendingConfirmCount + appealPendingCount,
+    };
+  }
+
   private async applyPenaltyDeductionTx(tx: Prisma.TransactionClient, input: {
     ticketId: number;
     userId: number;
     amount: number;
     operatorId?: number | null;
   }) {
+    const ticketId = Number(input.ticketId);
+    const userId = Number(input.userId);
     const amount = this.round1(Number(input.amount || 0));
     if (amount <= 0) {
       return { deductedAmount: 0, walletTxId: null };
     }
 
-    await this.walletService.ensureWalletAccount(input.userId, tx as any);
+    // 幂等兜底：
+    // 如果同一罚单资金流已存在，说明扣款链路已经执行过，直接返回，避免重复扣减余额。
+    const existingFlow = await tx.penaltyFundFlow.findFirst({
+      where: {
+        ticketId,
+        bizType: PenaltyFundBizType.PENALTY_DEDUCT,
+      },
+      orderBy: { id: 'desc' },
+      select: {
+        amount: true,
+        walletTxId: true,
+      },
+    });
+    if (existingFlow) {
+      return {
+        deductedAmount: Number(existingFlow.amount || 0),
+        walletTxId: existingFlow.walletTxId || null,
+      };
+    }
+
+    await this.walletService.ensureWalletAccount(userId, tx as any);
 
     const account = await tx.walletAccount.findUnique({
-      where: { userId: input.userId },
+      where: { userId },
       select: { availableBalance: true, frozenBalance: true },
     });
     if (!account) throw new BadRequestException('钱包账户不存在');
@@ -328,7 +413,7 @@ export class PenaltiesService {
     const afterAvailable = this.round1(beforeAvailable - amount);
 
     await tx.walletAccount.update({
-      where: { userId: input.userId },
+      where: { userId },
       data: {
         availableBalance: { decrement: amount },
       },
@@ -343,7 +428,7 @@ export class PenaltiesService {
         amount,
         status: WalletTxStatus.AVAILABLE,
         sourceType: 'PENALTY_TICKET',
-        sourceId: input.ticketId,
+        sourceId: ticketId,
         availableAfter: afterAvailable,
         frozenAfter: beforeFrozen,
       },
@@ -376,8 +461,8 @@ export class PenaltiesService {
     await tx.penaltyFundFlow.create({
       data: {
         poolId: pool.id,
-        ticketId: input.ticketId,
-        userId: input.userId,
+        ticketId,
+        userId,
         direction: PenaltyFundDirection.IN,
         bizType: PenaltyFundBizType.PENALTY_DEDUCT,
         amount,
@@ -648,5 +733,39 @@ export class PenaltiesService {
     }));
 
     return { list, top };
+  }
+
+  async getRuleCategoryStats(userId: number) {
+    const uid = Number(userId);
+    if (!uid) throw new BadRequestException('userId不能为空');
+
+    const grouped = await this.prisma.penaltyTicketDetail.groupBy({
+      by: ['ruleCategorySnapshot'],
+      where: {
+        ticket: {
+          userId: uid,
+          status: {
+            in: [
+              PenaltyTicketStatus.PENDING_CONFIRM,
+              PenaltyTicketStatus.APPEAL_PENDING,
+              PenaltyTicketStatus.EFFECTIVE,
+            ],
+          },
+        },
+      },
+      _count: { _all: true },
+    });
+
+    const result: Record<PenaltyRuleCategory, number> = {
+      SERVICE: 0,
+      ATTENDANCE: 0,
+      DISCIPLINE: 0,
+      SAFETY: 0,
+      OTHER: 0,
+    };
+    for (const row of grouped) {
+      result[row.ruleCategorySnapshot] = Number(row._count?._all || 0);
+    }
+    return result;
   }
 }
