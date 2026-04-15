@@ -16,6 +16,7 @@ import {
   WalletBizType,
   WalletDirection,
   WalletTxStatus,
+  UserType,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
@@ -163,6 +164,51 @@ export class PenaltiesService {
         amount: input.amount,
         force: true,
       },
+    });
+  }
+
+  private async pushAppealReviewReminderToAdmins(input: {
+    ticketId: number;
+    ticketNo: string;
+    userId: number;
+  }) {
+    const admins = await this.prisma.user.findMany({
+      where: {
+        status: 'ACTIVE',
+        userType: {
+          in: [UserType.SUPER_ADMIN, UserType.ADMIN, UserType.OPERATION],
+        },
+      },
+      select: { id: true },
+    });
+    const adminIds = admins.map((x) => Number(x.id));
+    if (!adminIds.length) return;
+
+    const title = `【待审核】罚单申诉待处理`;
+    const content = `罚单号 ${input.ticketNo} 已发起申诉，请尽快审核。`;
+    const payload = {
+      ticketId: input.ticketId,
+      ticketNo: input.ticketNo,
+      userId: input.userId,
+      routeType: 'PENALTY_APPEAL_REVIEW',
+      force: true,
+    };
+
+    await this.notificationsService.pushRealtimeToUsers({
+      userIds: adminIds,
+      type: 'PENALTY_APPEAL_REVIEW',
+      title,
+      content,
+      route: '/penalties',
+      payload,
+    });
+
+    await this.notificationsService.batchCreateNotifications({
+      userIds: adminIds,
+      type: NotificationType.SYSTEM_ANNOUNCEMENT,
+      title,
+      content,
+      payload,
     });
   }
 
@@ -615,6 +661,7 @@ export class PenaltiesService {
     const content = String(dto.content || '').trim();
     if (!content) throw new BadRequestException('申诉说明不能为空');
 
+    let notifyReviewPayload: { ticketId: number; ticketNo: string; userId: number } | null = null;
     const updated = await this.prisma.$transaction(async (tx) => {
       const ticket = await tx.penaltyTicket.findUnique({
         where: { id: ticketId },
@@ -637,14 +684,24 @@ export class PenaltiesService {
         },
       });
 
-      return tx.penaltyTicket.update({
+      const updatedTicket = await tx.penaltyTicket.update({
         where: { id: ticketId },
         data: {
           status: PenaltyTicketStatus.APPEAL_PENDING,
           appealStatus: PenaltyAppealStatus.PENDING,
         },
       });
+      notifyReviewPayload = {
+        ticketId: updatedTicket.id,
+        ticketNo: ticket.ticketNo,
+        userId: ticket.userId,
+      };
+      return updatedTicket;
     });
+
+    if (notifyReviewPayload) {
+      await this.pushAppealReviewReminderToAdmins(notifyReviewPayload);
+    }
 
     return this.enrichTicketLabel(updated as any);
   }
@@ -778,6 +835,94 @@ export class PenaltiesService {
         balance: 0,
       },
       statusCountMap,
+    };
+  }
+
+  async listAppeals(body: any) {
+    const { page, limit, skip } = this.normalizePaging(body || {});
+    const where: Prisma.PenaltyAppealWhereInput = {};
+    if (body?.status) where.status = body.status;
+    if (body?.userId) where.userId = Number(body.userId);
+    if (body?.ticketId) where.ticketId = Number(body.ticketId);
+
+    const keyword = String(body?.keyword || '').trim();
+    if (keyword) {
+      where.OR = [
+        { content: { contains: keyword } },
+        { ticket: { ticketNo: { contains: keyword } } },
+        { user: { name: { contains: keyword } } },
+        { user: { phone: { contains: keyword } } },
+      ];
+    }
+
+    const [data, total] = await Promise.all([
+      this.prisma.penaltyAppeal.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: [{ id: 'desc' }],
+        include: {
+          user: { select: { id: true, name: true, phone: true } },
+          reviewer: { select: { id: true, name: true } },
+          ticket: {
+            select: {
+              id: true,
+              ticketNo: true,
+              finalAmount: true,
+              status: true,
+              appealStatus: true,
+            },
+          },
+        },
+      }),
+      this.prisma.penaltyAppeal.count({ where }),
+    ]);
+
+    return {
+      data: data.map((x) => ({
+        ...x,
+        statusLabel: this.appealStatusLabelMap[x.status] || x.status,
+        ticket: x.ticket
+          ? {
+              ...x.ticket,
+              statusLabel: this.ticketStatusLabelMap[x.ticket.status] || x.ticket.status,
+              appealStatusLabel: this.appealStatusLabelMap[x.ticket.appealStatus] || x.ticket.appealStatus,
+            }
+          : x.ticket,
+      })),
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      dict: {
+        appealStatusLabelMap: this.appealStatusLabelMap,
+        ticketStatusLabelMap: this.ticketStatusLabelMap,
+      },
+    };
+  }
+
+  async getAdminPendingStats() {
+    const [pendingConfirmCount, appealPendingCount, todayCreatedCount] = await Promise.all([
+      this.prisma.penaltyTicket.count({
+        where: { status: PenaltyTicketStatus.PENDING_CONFIRM },
+      }),
+      this.prisma.penaltyTicket.count({
+        where: { status: PenaltyTicketStatus.APPEAL_PENDING },
+      }),
+      this.prisma.penaltyTicket.count({
+        where: {
+          createdAt: {
+            gte: new Date(new Date().setHours(0, 0, 0, 0)),
+          },
+        },
+      }),
+    ]);
+
+    return {
+      pendingConfirmCount,
+      appealPendingCount,
+      todayCreatedCount,
+      totalPendingCount: pendingConfirmCount + appealPendingCount,
     };
   }
 
@@ -945,15 +1090,29 @@ export class PenaltiesService {
     for (const row of rows) {
       const lastAt = Number(this.remindCooldownMap.get(row.id) || 0);
       if (now - lastAt < this.remindCooldownMs) continue;
+      const ticket = await this.prisma.penaltyTicket.findUnique({
+        where: { id: row.id },
+        select: { id: true, userId: true, ticketNo: true, finalAmount: true, status: true },
+      });
+      if (!ticket) continue;
+
       try {
-        await this.pushPenaltyStrongReminder({
-          userId: row.userId,
-          ticketId: row.id,
-          ticketNo: row.ticketNo,
-          amount: Number(row.finalAmount),
-          title: `【强提醒】你有待处理罚单`,
-          content: `罚单号 ${row.ticketNo} 仍在待处理状态，请优先处理。`,
-        });
+        if (ticket.status === PenaltyTicketStatus.PENDING_CONFIRM) {
+          await this.pushPenaltyStrongReminder({
+            userId: ticket.userId,
+            ticketId: ticket.id,
+            ticketNo: ticket.ticketNo,
+            amount: Number(ticket.finalAmount),
+            title: `【强提醒】你有待处理罚单`,
+            content: `罚单号 ${ticket.ticketNo} 仍在待处理状态，请优先处理。`,
+          });
+        } else if (ticket.status === PenaltyTicketStatus.APPEAL_PENDING) {
+          await this.pushAppealReviewReminderToAdmins({
+            ticketId: ticket.id,
+            ticketNo: ticket.ticketNo,
+            userId: ticket.userId,
+          });
+        }
         this.remindCooldownMap.set(row.id, now);
       } catch (e) {
         // 定时任务不抛出，避免影响后续任务轮次

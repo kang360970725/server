@@ -72,6 +72,13 @@ export class PenaltiesController {
     return this.penaltiesService.listTickets(body || {});
   }
 
+  @Post('appeals/list')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  listAppeals(@Body() body: any) {
+    return this.penaltiesService.listAppeals(body || {});
+  }
+
   @Post('tickets/detail')
   @UseGuards(PermissionsGuard)
   @Permissions('system:role:page')
@@ -101,6 +108,13 @@ export class PenaltiesController {
   @Permissions('system:role:page')
   getFundStats() {
     return this.penaltiesService.getFundStats();
+  }
+
+  @Post('stats/pending')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  getPendingStats() {
+    return this.penaltiesService.getAdminPendingStats();
   }
 
   @Post('fund/flows')
