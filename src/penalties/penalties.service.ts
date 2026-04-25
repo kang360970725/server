@@ -35,6 +35,8 @@ export class PenaltiesService {
   // 进程内催办冷却（30分钟），避免同一罚单频繁强提醒造成骚扰
   private readonly remindCooldownMs = 30 * 60 * 1000;
   private readonly remindCooldownMap = new Map<number, number>();
+  private penaltySchemaCheckedAt = 0;
+  private penaltySchemaAvailable: boolean | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -113,6 +115,36 @@ export class PenaltiesService {
     const limit = Math.min(100, Math.max(1, Number(body?.limit || 20)));
     const skip = (page - 1) * limit;
     return { page, limit, skip };
+  }
+
+  // 兼容未执行罚单模块迁移的环境：识别“表不存在”错误并做降级
+  private isPenaltyTableMissingError(e: any): boolean {
+    const code = String(e?.code || '');
+    const msg = String(e?.message || '').toLowerCase();
+    if (code === 'P2021') return true;
+    return msg.includes('does not exist') && msg.includes('penalty_');
+  }
+
+  // 预检查罚单核心表是否存在，避免每次请求都触发 Prisma P2021 错误日志
+  private async hasPenaltySchemaReady(): Promise<boolean> {
+    const now = Date.now();
+    if (this.penaltySchemaAvailable !== null && now - this.penaltySchemaCheckedAt < 30_000) {
+      return this.penaltySchemaAvailable;
+    }
+    try {
+      const rows = await this.prisma.$queryRawUnsafe<Array<{ c: any }>>(
+        `SELECT COUNT(1) AS c
+         FROM information_schema.tables
+         WHERE table_schema = DATABASE()
+           AND table_name = 'penalty_tickets'`,
+      );
+      const count = Number(rows?.[0]?.c ?? 0);
+      this.penaltySchemaAvailable = count > 0;
+    } catch {
+      this.penaltySchemaAvailable = false;
+    }
+    this.penaltySchemaCheckedAt = now;
+    return this.penaltySchemaAvailable;
   }
 
   private buildTicketNo() {
@@ -468,6 +500,22 @@ export class PenaltiesService {
   }
 
   async listTickets(body: any) {
+    if (!(await this.hasPenaltySchemaReady())) {
+      const { page, limit } = this.normalizePaging(body || {});
+      return {
+        data: [],
+        total: 0,
+        page,
+        limit,
+        totalPages: 0,
+        dict: {
+          ticketStatusLabelMap: this.ticketStatusLabelMap,
+          appealStatusLabelMap: this.appealStatusLabelMap,
+          categoryLabelMap: this.categoryLabelMap,
+        },
+      };
+    }
+
     const { page, limit, skip } = this.normalizePaging(body || {});
     const where: Prisma.PenaltyTicketWhereInput = {};
 
@@ -485,22 +533,30 @@ export class PenaltiesService {
       ];
     }
 
-    const [data, total] = await Promise.all([
-      this.prisma.penaltyTicket.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy: [{ id: 'desc' }],
-        include: {
-          user: { select: { id: true, name: true, phone: true } },
-          creator: { select: { id: true, name: true } },
-          appealReviewer: { select: { id: true, name: true } },
-          details: true,
-          appeals: true,
-        },
-      }),
-      this.prisma.penaltyTicket.count({ where }),
-    ]);
+    let data: any[] = [];
+    let total = 0;
+    try {
+      [data, total] = await Promise.all([
+        this.prisma.penaltyTicket.findMany({
+          where,
+          skip,
+          take: limit,
+          orderBy: [{ id: 'desc' }],
+          include: {
+            user: { select: { id: true, name: true, phone: true } },
+            creator: { select: { id: true, name: true } },
+            appealReviewer: { select: { id: true, name: true } },
+            details: true,
+            appeals: true,
+          },
+        }),
+        this.prisma.penaltyTicket.count({ where }),
+      ]);
+    } catch (e: any) {
+      if (!this.isPenaltyTableMissingError(e)) throw e;
+      data = [];
+      total = 0;
+    }
 
     return {
       data: data.map((x) => this.enrichTicketLabel(x as any)),
@@ -521,6 +577,9 @@ export class PenaltiesService {
   }
 
   async getTicketDetail(ticketId: number, userId?: number) {
+    if (!(await this.hasPenaltySchemaReady())) {
+      throw new NotFoundException('罚单不存在');
+    }
     const id = Number(ticketId);
     if (!id) throw new BadRequestException('ticketId不能为空');
 
@@ -542,21 +601,37 @@ export class PenaltiesService {
   }
 
   async getMyPendingStats(userId: number) {
+    if (!(await this.hasPenaltySchemaReady())) {
+      return {
+        pendingConfirmCount: 0,
+        appealPendingCount: 0,
+        forcePendingCount: 0,
+      };
+    }
+
     const uid = Number(userId);
-    const [pendingConfirmCount, appealPendingCount] = await Promise.all([
-      this.prisma.penaltyTicket.count({
-        where: {
-          userId: uid,
-          status: PenaltyTicketStatus.PENDING_CONFIRM,
-        },
-      }),
-      this.prisma.penaltyTicket.count({
-        where: {
-          userId: uid,
-          status: PenaltyTicketStatus.APPEAL_PENDING,
-        },
-      }),
-    ]);
+    let pendingConfirmCount = 0;
+    let appealPendingCount = 0;
+    try {
+      [pendingConfirmCount, appealPendingCount] = await Promise.all([
+        this.prisma.penaltyTicket.count({
+          where: {
+            userId: uid,
+            status: PenaltyTicketStatus.PENDING_CONFIRM,
+          },
+        }),
+        this.prisma.penaltyTicket.count({
+          where: {
+            userId: uid,
+            status: PenaltyTicketStatus.APPEAL_PENDING,
+          },
+        }),
+      ]);
+    } catch (e: any) {
+      if (!this.isPenaltyTableMissingError(e)) throw e;
+      pendingConfirmCount = 0;
+      appealPendingCount = 0;
+    }
 
     return {
       pendingConfirmCount,
@@ -676,6 +751,239 @@ export class PenaltiesService {
     });
 
     return { deductedAmount: amount, walletTxId: walletTx.id };
+  }
+
+  /**
+   * 退款有责处罚（系统触发）：
+   * - 为每个有责打手创建一张“已生效罚单”
+   * - 立即执行扣款并落资金池流水
+   */
+  private async createSystemPenaltyTicketAndDeduct(
+    db: Prisma.TransactionClient,
+    input: {
+      userId: number;
+      amount: number;
+      operatorId?: number;
+      ticketReason: string;
+      ruleCodeSnapshot: string;
+      ruleNameSnapshot: string;
+      descriptionSnapshot?: string;
+      allowInsufficientBalance?: boolean;
+    },
+  ) {
+    const now = new Date();
+    const amount = this.round1(Number(input.amount || 0));
+    const userId = Number(input.userId);
+    const operatorId = Number(input.operatorId || 0);
+
+    const createdTicket = await db.penaltyTicket.create({
+      data: {
+        ticketNo: this.buildTicketNo(),
+        userId,
+        creatorId: Number.isFinite(operatorId) && operatorId > 0 ? operatorId : null,
+        status: PenaltyTicketStatus.EFFECTIVE,
+        appealStatus: PenaltyAppealStatus.NONE,
+        ruleAmount: amount,
+        finalAmount: amount,
+        reason: input.ticketReason,
+        confirmAt: now,
+        details: {
+          create: [
+            {
+              ruleId: null,
+              ruleCodeSnapshot: input.ruleCodeSnapshot,
+              ruleNameSnapshot: input.ruleNameSnapshot,
+              ruleCategorySnapshot: PenaltyRuleCategory.OTHER,
+              amount,
+              descriptionSnapshot: input.descriptionSnapshot || null,
+            },
+          ],
+        },
+      },
+      select: { id: true, ticketNo: true },
+    });
+
+    try {
+      const deductRes = await this.applyPenaltyDeductionTx(db, {
+        ticketId: createdTicket.id,
+        userId,
+        amount,
+        operatorId: Number.isFinite(operatorId) && operatorId > 0 ? operatorId : null,
+      });
+
+      await db.penaltyTicket.update({
+        where: { id: createdTicket.id },
+        data: {
+          deductedAmount: deductRes.deductedAmount,
+          deductWalletTxId: deductRes.walletTxId,
+          deductedAt: now,
+        },
+      });
+
+      return {
+        ticketId: createdTicket.id,
+        deductedAmount: Number(deductRes.deductedAmount || 0),
+        pendingAmount: 0,
+        pending: false,
+      };
+    } catch (e: any) {
+      const message = String(e?.message || '');
+      const isInsufficientBalance = message.includes('钱包余额不足');
+      if (!input.allowInsufficientBalance || !isInsufficientBalance) throw e;
+
+      await db.penaltyTicket.update({
+        where: { id: createdTicket.id },
+        data: {
+          status: PenaltyTicketStatus.PENDING_CONFIRM,
+          deductedAmount: 0,
+          deductWalletTxId: null,
+          deductedAt: null,
+          confirmAt: null,
+        },
+      });
+
+      return {
+        ticketId: createdTicket.id,
+        deductedAmount: 0,
+        pendingAmount: amount,
+        pending: true,
+      };
+    }
+  }
+
+  async createRefundLiabilityPenaltyBatch(
+    input: {
+      orderId: number;
+      orderAutoSerial?: string;
+      liableUserIds: number[];
+      amountPerUser: number;
+      operatorId?: number;
+      reason?: string;
+      allowInsufficientBalance?: boolean;
+    },
+    tx?: Prisma.TransactionClient,
+  ) {
+    const orderId = Number(input?.orderId);
+    const amountPerUser = this.round1(Number(input?.amountPerUser || 0));
+    const operatorId = Number(input?.operatorId || 0);
+    const liableUserIds = Array.from(
+      new Set((input?.liableUserIds || []).map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0)),
+    );
+
+    if (!orderId) throw new BadRequestException('orderId不能为空');
+    if (!liableUserIds.length) {
+      return { count: 0, ticketIds: [] as number[] };
+    }
+    if (amountPerUser <= 0) {
+      throw new BadRequestException('amountPerUser必须大于0');
+    }
+
+    const orderLabel = String(input?.orderAutoSerial || `#${orderId}`);
+    const reasonSuffix = String(input?.reason || '').trim();
+    const baseReason = `订单退款有责处罚（订单 ${orderLabel}）`;
+    const ticketReason = reasonSuffix ? `${baseReason}；${reasonSuffix}` : baseReason;
+    const allowInsufficientBalance = Boolean(input?.allowInsufficientBalance);
+
+    const runner = async (db: Prisma.TransactionClient) => {
+      const ticketIds: number[] = [];
+      let pendingCount = 0;
+      let totalPendingAmount = 0;
+
+      for (const userId of liableUserIds) {
+        const item = await this.createSystemPenaltyTicketAndDeduct(db, {
+          userId,
+          amount: amountPerUser,
+          operatorId,
+          ticketReason,
+          ruleCodeSnapshot: 'SYS_REFUND_LIABILITY',
+          ruleNameSnapshot: '订单退款有责处罚',
+          descriptionSnapshot: `按退款处罚规则扣款（${orderLabel}）`,
+          allowInsufficientBalance,
+        });
+        ticketIds.push(item.ticketId);
+        if (item.pending) {
+          pendingCount += 1;
+          totalPendingAmount = this.round1(totalPendingAmount + Number(item.pendingAmount || 0));
+        }
+      }
+
+      return {
+        count: ticketIds.length,
+        ticketIds,
+        amountPerUser,
+        pendingCount,
+        totalPendingAmount,
+      };
+    };
+
+    if (tx) return runner(tx);
+    return this.prisma.$transaction((db) => runner(db));
+  }
+
+  async createRefundCompensationPenaltyBatch(
+    input: {
+      orderId: number;
+      orderAutoSerial?: string;
+      allocations: Array<{ userId: number; amount: number }>;
+      operatorId?: number;
+      reason?: string;
+      allowInsufficientBalance?: boolean;
+    },
+    tx?: Prisma.TransactionClient,
+  ) {
+    const orderId = Number(input?.orderId);
+    const operatorId = Number(input?.operatorId || 0);
+    const allocations = Array.isArray(input?.allocations)
+      ? input.allocations
+          .map((x) => ({
+            userId: Number(x?.userId),
+            amount: this.round1(Number(x?.amount || 0)),
+          }))
+          .filter((x) => Number.isFinite(x.userId) && x.userId > 0 && x.amount > 0)
+      : [];
+
+    if (!orderId) throw new BadRequestException('orderId不能为空');
+    if (!allocations.length) return { count: 0, ticketIds: [] as number[] };
+
+    const orderLabel = String(input?.orderAutoSerial || `#${orderId}`);
+    const reasonSuffix = String(input?.reason || '').trim();
+    const baseReason = `订单退款赔付分摊（订单 ${orderLabel}）`;
+    const ticketReason = reasonSuffix ? `${baseReason}；${reasonSuffix}` : baseReason;
+    const allowInsufficientBalance = Boolean(input?.allowInsufficientBalance);
+
+    const runner = async (db: Prisma.TransactionClient) => {
+      const ticketIds: number[] = [];
+      let pendingCount = 0;
+      let totalPendingAmount = 0;
+
+      for (const row of allocations) {
+        const item = await this.createSystemPenaltyTicketAndDeduct(db, {
+          userId: row.userId,
+          amount: row.amount,
+          operatorId,
+          ticketReason,
+          ruleCodeSnapshot: 'SYS_REFUND_COMPENSATION',
+          ruleNameSnapshot: '订单退款赔付分摊',
+          descriptionSnapshot: `按退款赔付规则分摊扣款（${orderLabel}）`,
+          allowInsufficientBalance,
+        });
+        ticketIds.push(item.ticketId);
+        if (item.pending) {
+          pendingCount += 1;
+          totalPendingAmount = this.round1(totalPendingAmount + Number(item.pendingAmount || 0));
+        }
+      }
+
+      return {
+        count: ticketIds.length,
+        ticketIds,
+        pendingCount,
+        totalPendingAmount,
+      };
+    };
+
+    if (tx) return runner(tx);
+    return this.prisma.$transaction((db) => runner(db));
   }
 
   async confirmMyTicket(userId: number, dto: ConfirmPenaltyTicketDto) {
@@ -911,13 +1219,33 @@ export class PenaltiesService {
   }
 
   async getFundStats() {
-    const [pool, ticketStats] = await Promise.all([
-      this.prisma.penaltyFundPool.findUnique({ where: { id: 1 } }),
-      this.prisma.penaltyTicket.groupBy({
-        by: ['status'],
-        _count: { _all: true },
-      }),
-    ]);
+    if (!(await this.hasPenaltySchemaReady())) {
+      return {
+        pool: {
+          id: 1,
+          totalIn: 0,
+          totalOut: 0,
+          balance: 0,
+        },
+        statusCountMap: {},
+      };
+    }
+
+    let pool: any = null;
+    let ticketStats: any[] = [];
+    try {
+      [pool, ticketStats] = await Promise.all([
+        this.prisma.penaltyFundPool.findUnique({ where: { id: 1 } }),
+        this.prisma.penaltyTicket.groupBy({
+          by: ['status'],
+          _count: { _all: true },
+        }),
+      ]);
+    } catch (e: any) {
+      if (!this.isPenaltyTableMissingError(e)) throw e;
+      pool = null;
+      ticketStats = [];
+    }
 
     const statusCountMap: Record<string, number> = {};
     for (const row of ticketStats) statusCountMap[row.status] = Number(row._count?._all || 0);
@@ -934,6 +1262,21 @@ export class PenaltiesService {
   }
 
   async listAppeals(body: any) {
+    if (!(await this.hasPenaltySchemaReady())) {
+      const { page, limit } = this.normalizePaging(body || {});
+      return {
+        data: [],
+        total: 0,
+        page,
+        limit,
+        totalPages: 0,
+        dict: {
+          appealStatusLabelMap: this.appealStatusLabelMap,
+          ticketStatusLabelMap: this.ticketStatusLabelMap,
+        },
+      };
+    }
+
     const { page, limit, skip } = this.normalizePaging(body || {});
     const where: Prisma.PenaltyAppealWhereInput = {};
     if (body?.status) where.status = body.status;
@@ -950,28 +1293,36 @@ export class PenaltiesService {
       ];
     }
 
-    const [data, total] = await Promise.all([
-      this.prisma.penaltyAppeal.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy: [{ id: 'desc' }],
-        include: {
-          user: { select: { id: true, name: true, phone: true } },
-          reviewer: { select: { id: true, name: true } },
-          ticket: {
-            select: {
-              id: true,
-              ticketNo: true,
-              finalAmount: true,
-              status: true,
-              appealStatus: true,
+    let data: any[] = [];
+    let total = 0;
+    try {
+      [data, total] = await Promise.all([
+        this.prisma.penaltyAppeal.findMany({
+          where,
+          skip,
+          take: limit,
+          orderBy: [{ id: 'desc' }],
+          include: {
+            user: { select: { id: true, name: true, phone: true } },
+            reviewer: { select: { id: true, name: true } },
+            ticket: {
+              select: {
+                id: true,
+                ticketNo: true,
+                finalAmount: true,
+                status: true,
+                appealStatus: true,
+              },
             },
           },
-        },
-      }),
-      this.prisma.penaltyAppeal.count({ where }),
-    ]);
+        }),
+        this.prisma.penaltyAppeal.count({ where }),
+      ]);
+    } catch (e: any) {
+      if (!this.isPenaltyTableMissingError(e)) throw e;
+      data = [];
+      total = 0;
+    }
 
     return {
       data: data.map((x) => ({
@@ -997,21 +1348,40 @@ export class PenaltiesService {
   }
 
   async getAdminPendingStats() {
-    const [pendingConfirmCount, appealPendingCount, todayCreatedCount] = await Promise.all([
-      this.prisma.penaltyTicket.count({
-        where: { status: PenaltyTicketStatus.PENDING_CONFIRM },
-      }),
-      this.prisma.penaltyTicket.count({
-        where: { status: PenaltyTicketStatus.APPEAL_PENDING },
-      }),
-      this.prisma.penaltyTicket.count({
-        where: {
-          createdAt: {
-            gte: new Date(new Date().setHours(0, 0, 0, 0)),
+    if (!(await this.hasPenaltySchemaReady())) {
+      return {
+        pendingConfirmCount: 0,
+        appealPendingCount: 0,
+        todayCreatedCount: 0,
+        totalPendingCount: 0,
+      };
+    }
+
+    let pendingConfirmCount = 0;
+    let appealPendingCount = 0;
+    let todayCreatedCount = 0;
+    try {
+      [pendingConfirmCount, appealPendingCount, todayCreatedCount] = await Promise.all([
+        this.prisma.penaltyTicket.count({
+          where: { status: PenaltyTicketStatus.PENDING_CONFIRM },
+        }),
+        this.prisma.penaltyTicket.count({
+          where: { status: PenaltyTicketStatus.APPEAL_PENDING },
+        }),
+        this.prisma.penaltyTicket.count({
+          where: {
+            createdAt: {
+              gte: new Date(new Date().setHours(0, 0, 0, 0)),
+            },
           },
-        },
-      }),
-    ]);
+        }),
+      ]);
+    } catch (e: any) {
+      if (!this.isPenaltyTableMissingError(e)) throw e;
+      pendingConfirmCount = 0;
+      appealPendingCount = 0;
+      todayCreatedCount = 0;
+    }
 
     return {
       pendingConfirmCount,
@@ -1022,38 +1392,85 @@ export class PenaltiesService {
   }
 
   async getAdminOverview() {
+    if (!(await this.hasPenaltySchemaReady())) {
+      const now = new Date();
+      const sevenDaysAgo = new Date(now);
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+      sevenDaysAgo.setHours(0, 0, 0, 0);
+
+      const trend7d = Array.from({ length: 7 }).map((_, i) => {
+        const d = new Date(sevenDaysAgo);
+        d.setDate(sevenDaysAgo.getDate() + i);
+        return {
+          date: d.toISOString().slice(0, 10),
+          createdCount: 0,
+          effectiveCount: 0,
+          invalidCount: 0,
+          deductedAmount: 0,
+        };
+      });
+      return {
+        pending: {
+          pendingConfirmCount: 0,
+          appealPendingCount: 0,
+          todayCreatedCount: 0,
+          totalPendingCount: 0,
+        },
+        process: {
+          avgProcessHours: 0,
+          processedCount: 0,
+        },
+        trend7d,
+        topRules: [],
+      };
+    }
+
     const now = new Date();
     const sevenDaysAgo = new Date(now);
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
     sevenDaysAgo.setHours(0, 0, 0, 0);
 
-    const [pendingStats, ticketRows, detailRows] = await Promise.all([
-      this.getAdminPendingStats(),
-      this.prisma.penaltyTicket.findMany({
-        where: { createdAt: { gte: sevenDaysAgo } },
-        select: {
-          id: true,
-          createdAt: true,
-          status: true,
-          finalAmount: true,
-          deductedAmount: true,
-          deductedAt: true,
-        },
-        orderBy: [{ createdAt: 'asc' }],
-      }),
-      this.prisma.penaltyTicketDetail.findMany({
-        where: {
-          ticket: {
-            createdAt: { gte: sevenDaysAgo },
+    let pendingStats = await this.getAdminPendingStats();
+    let ticketRows: any[] = [];
+    let detailRows: any[] = [];
+    try {
+      [ticketRows, detailRows] = await Promise.all([
+        this.prisma.penaltyTicket.findMany({
+          where: { createdAt: { gte: sevenDaysAgo } },
+          select: {
+            id: true,
+            createdAt: true,
+            status: true,
+            finalAmount: true,
+            deductedAmount: true,
+            deductedAt: true,
           },
-        },
-        select: {
-          ruleId: true,
-          ruleNameSnapshot: true,
-          amount: true,
-        },
-      }),
-    ]);
+          orderBy: [{ createdAt: 'asc' }],
+        }),
+        this.prisma.penaltyTicketDetail.findMany({
+          where: {
+            ticket: {
+              createdAt: { gte: sevenDaysAgo },
+            },
+          },
+          select: {
+            ruleId: true,
+            ruleNameSnapshot: true,
+            amount: true,
+          },
+        }),
+      ]);
+    } catch (e: any) {
+      if (!this.isPenaltyTableMissingError(e)) throw e;
+      pendingStats = {
+        pendingConfirmCount: 0,
+        appealPendingCount: 0,
+        todayCreatedCount: 0,
+        totalPendingCount: 0,
+      };
+      ticketRows = [];
+      detailRows = [];
+    }
 
     const dayBuckets: Record<string, { date: string; createdCount: number; effectiveCount: number; invalidCount: number; deductedAmount: number }> = {};
     for (let i = 0; i < 7; i += 1) {
@@ -1120,25 +1537,47 @@ export class PenaltiesService {
   }
 
   async listFundFlows(dto: ListPenaltyFundFlowsDto) {
+    if (!(await this.hasPenaltySchemaReady())) {
+      const { page, limit } = this.normalizePaging(dto || {});
+      return {
+        data: [],
+        total: 0,
+        page,
+        limit,
+        totalPages: 0,
+        dict: {
+          fundBizTypeLabelMap: this.fundBizTypeLabelMap,
+        },
+      };
+    }
+
     const { page, limit, skip } = this.normalizePaging(dto || {});
     const where: Prisma.PenaltyFundFlowWhereInput = {};
 
     if (dto.direction) where.direction = dto.direction;
     if (dto.bizType) where.bizType = dto.bizType;
 
-    const [data, total] = await Promise.all([
-      this.prisma.penaltyFundFlow.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy: [{ id: 'desc' }],
-        include: {
-          user: { select: { id: true, name: true, phone: true } },
-          ticket: { select: { id: true, ticketNo: true, finalAmount: true } },
-        },
-      }),
-      this.prisma.penaltyFundFlow.count({ where }),
-    ]);
+    let data: any[] = [];
+    let total = 0;
+    try {
+      [data, total] = await Promise.all([
+        this.prisma.penaltyFundFlow.findMany({
+          where,
+          skip,
+          take: limit,
+          orderBy: [{ id: 'desc' }],
+          include: {
+            user: { select: { id: true, name: true, phone: true } },
+            ticket: { select: { id: true, ticketNo: true, finalAmount: true } },
+          },
+        }),
+        this.prisma.penaltyFundFlow.count({ where }),
+      ]);
+    } catch (e: any) {
+      if (!this.isPenaltyTableMissingError(e)) throw e;
+      data = [];
+      total = 0;
+    }
 
     return {
       data: data.map((x) => ({
@@ -1157,15 +1596,21 @@ export class PenaltiesService {
 
   async listPenaltyRanking(dto: ListPenaltyRankingDto) {
     const top = Math.min(100, Math.max(1, Number(dto?.top || 20)));
-
-    const grouped = await this.prisma.penaltyTicket.groupBy({
-      by: ['userId'],
-      where: { status: PenaltyTicketStatus.EFFECTIVE },
-      _sum: { deductedAmount: true },
-      _count: { _all: true },
-      orderBy: { _sum: { deductedAmount: 'desc' } },
-      take: top,
-    });
+    if (!(await this.hasPenaltySchemaReady())) return { list: [], top };
+    let grouped: any[] = [];
+    try {
+      grouped = await (this.prisma.penaltyTicket as any).groupBy({
+        by: ['userId'],
+        where: { status: PenaltyTicketStatus.EFFECTIVE },
+        _sum: { deductedAmount: true },
+        _count: { _all: true },
+        orderBy: { _sum: { deductedAmount: 'desc' } },
+        take: top,
+      });
+    } catch (e: any) {
+      if (!this.isPenaltyTableMissingError(e)) throw e;
+      return { list: [], top };
+    }
 
     const userIds = grouped.map((x) => Number(x.userId));
     const users = userIds.length
@@ -1190,23 +1635,48 @@ export class PenaltiesService {
   async getRuleCategoryStats(userId: number) {
     const uid = Number(userId);
     if (!uid) throw new BadRequestException('userId不能为空');
+    if (!(await this.hasPenaltySchemaReady())) {
+      const empty: Record<PenaltyRuleCategory, number> = {
+        SERVICE: 0,
+        ATTENDANCE: 0,
+        DISCIPLINE: 0,
+        SAFETY: 0,
+        OTHER: 0,
+      };
+      return {
+        value: empty,
+        labelValue: Object.fromEntries(
+          Object.keys(empty).map((k) => [
+            this.categoryLabelMap[k as PenaltyRuleCategory] || k,
+            empty[k as PenaltyRuleCategory],
+          ]),
+        ),
+        dict: { categoryLabelMap: this.categoryLabelMap },
+      };
+    }
 
-    const grouped = await this.prisma.penaltyTicketDetail.groupBy({
-      by: ['ruleCategorySnapshot'],
-      where: {
-        ticket: {
-          userId: uid,
-          status: {
-            in: [
-              PenaltyTicketStatus.PENDING_CONFIRM,
-              PenaltyTicketStatus.APPEAL_PENDING,
-              PenaltyTicketStatus.EFFECTIVE,
-            ],
+    let grouped: any[] = [];
+    try {
+      grouped = await (this.prisma.penaltyTicketDetail as any).groupBy({
+        by: ['ruleCategorySnapshot'],
+        where: {
+          ticket: {
+            userId: uid,
+            status: {
+              in: [
+                PenaltyTicketStatus.PENDING_CONFIRM,
+                PenaltyTicketStatus.APPEAL_PENDING,
+                PenaltyTicketStatus.EFFECTIVE,
+              ],
+            },
           },
         },
-      },
-      _count: { _all: true },
-    });
+        _count: { _all: true },
+      });
+    } catch (e: any) {
+      if (!this.isPenaltyTableMissingError(e)) throw e;
+      grouped = [];
+    }
 
     const result: Record<PenaltyRuleCategory, number> = {
       SERVICE: 0,
@@ -1234,17 +1704,38 @@ export class PenaltiesService {
 
   // 手动催办：管理端可对指定罚单再次触发强提醒
   async remindTicket(ticketId: number, operatorId?: number) {
+    if (!(await this.hasPenaltySchemaReady())) {
+      return {
+        success: true,
+        skipped: true,
+        message: '罚单模块未初始化，已跳过催办',
+      };
+    }
     const id = Number(ticketId);
     if (!id) throw new BadRequestException('ticketId不能为空');
 
-    const ticket = await this.prisma.penaltyTicket.findUnique({ where: { id } });
+    let ticket: any = null;
+    try {
+      ticket = await this.prisma.penaltyTicket.findUnique({ where: { id } });
+    } catch (e: any) {
+      if (!this.isPenaltyTableMissingError(e)) throw e;
+      return {
+        success: true,
+        skipped: true,
+        message: '罚单模块未初始化，已跳过催办',
+      };
+    }
     if (!ticket) throw new NotFoundException('罚单不存在');
     const pendingStatuses: PenaltyTicketStatus[] = [
       PenaltyTicketStatus.PENDING_CONFIRM,
       PenaltyTicketStatus.APPEAL_PENDING,
     ];
     if (!pendingStatuses.includes(ticket.status)) {
-      throw new BadRequestException('当前状态无需催办');
+      return {
+        success: true,
+        skipped: true,
+        message: '当前状态无需催办',
+      };
     }
 
     if (ticket.status === PenaltyTicketStatus.PENDING_CONFIRM) {
@@ -1280,23 +1771,30 @@ export class PenaltiesService {
   // 自动催办：每10分钟扫描待处理罚单，并按冷却策略推送，减少遗漏
   @Cron('0 */10 * * * *', { timeZone: 'Asia/Shanghai' })
   async autoRemindPendingTickets() {
+    if (!(await this.hasPenaltySchemaReady())) return;
     const now = Date.now();
-    const rows = await this.prisma.penaltyTicket.findMany({
-      where: {
-        status: {
-          in: [PenaltyTicketStatus.PENDING_CONFIRM, PenaltyTicketStatus.APPEAL_PENDING],
+    let rows: Array<{ id: number; userId: number; ticketNo: string; finalAmount: any; status: PenaltyTicketStatus }> = [];
+    try {
+      rows = await this.prisma.penaltyTicket.findMany({
+        where: {
+          status: {
+            in: [PenaltyTicketStatus.PENDING_CONFIRM, PenaltyTicketStatus.APPEAL_PENDING],
+          },
         },
-      },
-      select: {
-        id: true,
-        userId: true,
-        ticketNo: true,
-        finalAmount: true,
-        status: true,
-      },
-      orderBy: [{ id: 'desc' }],
-      take: 200,
-    });
+        select: {
+          id: true,
+          userId: true,
+          ticketNo: true,
+          finalAmount: true,
+          status: true,
+        },
+        orderBy: [{ id: 'desc' }],
+        take: 200,
+      });
+    } catch (e: any) {
+      if (this.isPenaltyTableMissingError(e)) return;
+      throw e;
+    }
 
     for (const row of rows) {
       const lastAt = Number(this.remindCooldownMap.get(row.id) || 0);

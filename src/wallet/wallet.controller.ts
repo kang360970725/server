@@ -5,6 +5,10 @@ import { QueryWalletTransactionsDto } from './dto/query-wallet-transactions.dto'
 import { QueryWalletHoldsDto } from './dto/query-wallet-holds.dto';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {WalletDepositService} from "./wallet.deposit.service";
+import { PermissionsGuard } from '../auth/guards/permissions.guard';
+import { Permissions } from '../auth/decorators/permissions.decorator';
+
+const WITHDRAWALS_PAGE = 'wallet:withdrawals:page';
 
 /**
  * Wallet Controller（V0.2）
@@ -40,6 +44,24 @@ export class WalletController {
         const userId = query.userId ? Number(query.userId) : loginUserId;
 
         return this.walletService.listMyTransactions(userId, query);
+    }
+
+    /**
+     * 单用户钱包重放预核算（只读）
+     * GET /wallet/replay-preview?userId=123&startAt=2026-01-01&endAt=2026-04-20
+     */
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE)
+    @Get('replay-preview')
+    async replayPreview(@Query() query: any, @Request() req: any) {
+        const loginUserId = Number(req?.user?.userId ?? req?.user?.id ?? req?.user?.sub);
+        const userId = Number(query?.userId || loginUserId);
+        return this.walletService.previewReplayByUser({
+            userId,
+            startAt: query?.startAt,
+            endAt: query?.endAt,
+            limitMismatches: query?.limitMismatches ? Number(query.limitMismatches) : undefined,
+        });
     }
     /**
      * 查询当前用户冻结单

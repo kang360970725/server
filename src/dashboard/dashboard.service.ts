@@ -49,7 +49,9 @@ export class DashboardService {
         const walletWhereBase: any = {
             createdAt: { gte: startAt, lte: endAt },
             direction: 'IN',
-            bizType: 'SETTLEMENT_EARNING',
+            bizType: {
+                in: ['SETTLEMENT_EARNING', 'SETTLEMENT_EARNING_BASE', 'SETTLEMENT_EARNING_CARRY', 'SETTLEMENT_EARNING_CS'],
+            },
             status: { not: 'REVERSED' },
         };
 

@@ -1,4 +1,4 @@
-import { IsIn, IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Min } from 'class-validator';
 import { Transform } from 'class-transformer';
 
 /**
@@ -25,6 +25,22 @@ export class QueryWalletTransactionsDto {
     @IsOptional()
     @IsString()
     bizType?: string;
+
+    /**
+     * 是否包含解冻流水（RELEASE_FROZEN）
+     * - 默认 false（不传即排除）
+     * - 仅在未指定 bizType 时生效
+     */
+    @IsOptional()
+    @Transform(({ value }) => {
+        if (value === true || value === false) return value;
+        const v = String(value ?? '').trim().toLowerCase();
+        if (v === 'true' || v === '1' || v === 'yes') return true;
+        if (v === 'false' || v === '0' || v === 'no') return false;
+        return false;
+    })
+    @IsBoolean()
+    includeReleaseFrozen?: boolean;
 
     @IsOptional()
     @IsIn(['IN', 'OUT'])

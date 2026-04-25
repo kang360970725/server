@@ -818,13 +818,22 @@ export class WalletService {
             where: {
                 orderId: params.orderId,
                 sourceType: 'ORDER_SETTLEMENT',
-                bizType: WalletBizType.SETTLEMENT_EARNING,
+                bizType: {
+                    in: [
+                        WalletBizType.SETTLEMENT_EARNING,
+                        WalletBizType.SETTLEMENT_EARNING_BASE,
+                        WalletBizType.SETTLEMENT_EARNING_CARRY,
+                        WalletBizType.SETTLEMENT_EARNING_CS,
+                        WalletBizType.SETTLEMENT_BOMB_LOSS,
+                    ],
+                },
             },
             select: {
                 id: true,
                 userId: true,
                 amount: true,
                 status: true,
+                direction: true,
             },
         });
 
@@ -868,14 +877,22 @@ export class WalletService {
                 });
 
                 const amount = Math.round(Number(earningTx.amount) * 100) / 100;
+                const isOut = earningTx.direction === WalletDirection.OUT;
 
                 // 情况 1：收益还在冻结中（典型：未到 unlockAt 就退款）
                 if (earningTx.status === WalletTxStatus.FROZEN) {
-                    // 1.1 回退 frozenBalance
-                    await t.walletAccount.update({
-                        where: { userId: earningTx.userId },
-                        data: { frozenBalance: { decrement: amount } },
-                    });
+                    // 1.1 回退 frozenBalance（方向反向）
+                    if (isOut) {
+                        await t.walletAccount.update({
+                            where: { userId: earningTx.userId },
+                            data: { frozenBalance: { increment: amount } },
+                        });
+                    } else {
+                        await t.walletAccount.update({
+                            where: { userId: earningTx.userId },
+                            data: { frozenBalance: { decrement: amount } },
+                        });
+                    }
 
                     // 1.2 取消冻结单（若存在且仍 FROZEN）
                     if (hold && hold.status === WalletHoldStatus.FROZEN) {
@@ -901,11 +918,13 @@ export class WalletService {
 
                 // 情况 2：收益已可用（已经解冻到 availableBalance）
                 if (earningTx.status === WalletTxStatus.AVAILABLE) {
+                    const reversalDirection = isOut ? WalletDirection.IN : WalletDirection.OUT;
+
                     // 2.1 生成冲正流水（OUT）
                     await t.walletTransaction.create({
                         data: {
                             userId: earningTx.userId,
-                            direction: WalletDirection.OUT,
+                            direction: reversalDirection,
                             bizType: WalletBizType.REFUND_REVERSAL,
                             amount,
                             status: WalletTxStatus.AVAILABLE, // 冲正立即生效
@@ -916,11 +935,18 @@ export class WalletService {
                         },
                     });
 
-                    // 2.2 回退 availableBalance
-                    await t.walletAccount.update({
-                        where: { userId: earningTx.userId },
-                        data: { availableBalance: { decrement: amount } },
-                    });
+                    // 2.2 回退 availableBalance（方向反向）
+                    if (reversalDirection === WalletDirection.OUT) {
+                        await t.walletAccount.update({
+                            where: { userId: earningTx.userId },
+                            data: { availableBalance: { decrement: amount } },
+                        });
+                    } else {
+                        await t.walletAccount.update({
+                            where: { userId: earningTx.userId },
+                            data: { availableBalance: { increment: amount } },
+                        });
+                    }
 
                     // 2.3 标记原收益流水为已冲正
                     await t.walletTransaction.update({
@@ -1049,14 +1075,13 @@ export class WalletService {
                             },
                         });
 
-                        // 4) 同步把原收益流水标记为 AVAILABLE（可选但建议）
-                        //    同时把它的快照补齐（便于对账）
+                        // 4) 同步把原收益流水标记为 AVAILABLE
+                        // ⚠️ 不要覆盖原收益流水的 availableAfter/frozenAfter：
+                        //    这些快照对应“冻结入账时点”的历史状态，覆盖会污染历史账面基数。
                         await tx.walletTransaction.update({
                             where: { id: hold.earningTxId },
                             data: {
                                 status: 'AVAILABLE',
-                                availableAfter: round2(Number((accountAfter as any).availableBalance ?? 0)),
-                                frozenAfter: round2(Number((accountAfter as any).frozenBalance ?? 0)),
                             },
                         });
                     }
@@ -1136,9 +1161,11 @@ export class WalletService {
 
         // 1) 组 where（WalletTransaction）
         const where: any = { userId };
+        const includeReleaseFrozen =
+            query?.includeReleaseFrozen === true ||
+            String((query as any)?.includeReleaseFrozen ?? '').toLowerCase() === 'true';
 
         if (query.direction) where.direction = query.direction;
-        if (query.bizType) where.bizType = query.bizType;
         if (query.status) where.status = query.status;
 
         if (query.orderId) where.orderId = Number(query.orderId);
@@ -1184,6 +1211,18 @@ export class WalletService {
             if (query.startAt) where.createdAt.gte = new Date(query.startAt);
             if (query.endAt) where.createdAt.lte = new Date(query.endAt);
         }
+
+        // 默认排除解冻流水；如指定 bizType 则按显式筛选
+        if (query.bizType) {
+            where.bizType = query.bizType;
+        } else if (!includeReleaseFrozen) {
+            where.bizType = { not: 'RELEASE_FROZEN' };
+        }
+
+        // 用于返回“默认隐藏的解冻流水汇总”
+        const releaseHiddenWhere: any = { ...where };
+        delete releaseHiddenWhere.bizType;
+        releaseHiddenWhere.bizType = 'RELEASE_FROZEN';
 
         // ✅ 2) 先查当前账户余额（作为“本页最新余额锚点”）
         await this.ensureWalletAccount(userId, this.prisma as any);
@@ -1242,6 +1281,50 @@ export class WalletService {
             );
         }
 
+        // 为结算主流水补冻结单状态，替代直接展示 RELEASE_FROZEN 明细
+        const settlementTxIds = Array.from(
+            new Set(
+                (rows || [])
+                    .filter((r: any) =>
+                        [
+                            'SETTLEMENT_EARNING',
+                            'SETTLEMENT_EARNING_BASE',
+                            'SETTLEMENT_EARNING_CARRY',
+                            'SETTLEMENT_EARNING_CS',
+                        ].includes(String(r?.bizType || '')),
+                    )
+                    .map((r: any) => Number(r?.id))
+                    .filter((n: number) => Number.isFinite(n) && n > 0),
+            ),
+        );
+
+        let holdMap = new Map<number, { status: string; unlockAt: Date; releasedAt: Date | null }>();
+        if (settlementTxIds.length > 0) {
+            const holds = await this.prisma.walletHold.findMany({
+                where: { earningTxId: { in: settlementTxIds } },
+                select: { earningTxId: true, status: true, unlockAt: true, releasedAt: true },
+            });
+            holdMap = new Map(
+                holds.map((h: any) => [
+                    Number(h.earningTxId),
+                    { status: String(h.status), unlockAt: h.unlockAt, releasedAt: h.releasedAt ?? null },
+                ]),
+            );
+        }
+
+        let hiddenReleaseSummary = { count: 0, amount: 0 };
+        if (!query.bizType && !includeReleaseFrozen) {
+            const releaseAgg = await this.prisma.walletTransaction.aggregate({
+                where: releaseHiddenWhere,
+                _count: { _all: true },
+                _sum: { amount: true },
+            });
+            hiddenReleaseSummary = {
+                count: Number(releaseAgg?._count?._all ?? 0),
+                amount: round2(Number((releaseAgg?._sum?.amount as any) ?? 0)),
+            };
+        }
+
         // ✅ 3) 计算每条流水对 “available / frozen” 的影响（用 bizType，不用 status）
         const toNum = (v: any) => {
             const n = Number(v ?? 0);
@@ -1265,7 +1348,8 @@ export class WalletService {
                 biz === 'SETTLEMENT_EARNING_CARRY' ||
                 biz === 'SETTLEMENT_EARNING_CS'
             ) {
-                if (tx.direction === 'IN' && amt > 0) deltaFrozen += amt;
+                // 仅冻结态收益影响 frozen；若已 AVAILABLE/REVERSED 不应再计入 frozen 变化
+                if (tx.status === 'FROZEN' && tx.direction === 'IN' && amt > 0) deltaFrozen += amt;
                 return { deltaAvailable, deltaFrozen };
             }
 
@@ -1313,6 +1397,27 @@ export class WalletService {
                 return { deltaAvailable, deltaFrozen };
             }
 
+            if (biz === 'SETTLEMENT_RECALC' || biz === 'SETTLEMENT_REVERSAL') {
+                if (amt > 0) {
+                    if (tx.status === 'FROZEN') {
+                        if (tx.direction === 'IN') deltaFrozen += amt;
+                        if (tx.direction === 'OUT') deltaFrozen -= amt;
+                    } else if (tx.status === 'AVAILABLE') {
+                        if (tx.direction === 'IN') deltaAvailable += amt;
+                        if (tx.direction === 'OUT') deltaAvailable -= amt;
+                    }
+                }
+                return { deltaAvailable, deltaFrozen };
+            }
+
+            if (biz === 'OFFLINE_FEE_PAYMENT' || biz === 'DEPOSIT_ADD' || biz === 'DEPOSIT_DEDUCT') {
+                if (amt > 0) {
+                    if (tx.direction === 'IN') deltaAvailable += amt;
+                    if (tx.direction === 'OUT') deltaAvailable -= amt;
+                }
+                return { deltaAvailable, deltaFrozen };
+            }
+
             return { deltaAvailable, deltaFrozen };
         };
 
@@ -1340,10 +1445,14 @@ export class WalletService {
             const oid = Number(r?.orderId);
             const orderAutoSerial =
                 Number.isFinite(oid) && oid > 0 ? (orderSerialMap.get(oid) || null) : null;
+            const hold = holdMap.get(Number(r.id));
 
             return {
                 ...r,
                 orderAutoSerial,
+                holdStatus: hold?.status ?? null,
+                holdUnlockAt: hold?.unlockAt ?? null,
+                holdReleasedAt: hold?.releasedAt ?? null,
                 deltaAvailable,
                 deltaFrozen,
                 availableBefore,
@@ -1364,6 +1473,11 @@ export class WalletService {
                 availableBalance: toNum(accountNow?.availableBalance),
                 frozenBalance: toNum(accountNow?.frozenBalance),
                 balance: Number((toNum(accountNow?.availableBalance) + toNum(accountNow?.frozenBalance)).toFixed(2)),
+            },
+            filters: {
+                includeReleaseFrozen,
+                releaseHiddenByDefault: !query.bizType && !includeReleaseFrozen,
+                hiddenReleaseSummary,
             },
         };
     }
@@ -1664,6 +1778,283 @@ export class WalletService {
             totalAvailableBalance: available,
             totalFrozenBalance: frozen,
             totalBalance: Number((available + frozen).toFixed(2)),
+        };
+    }
+
+    /**
+     * 单用户钱包流水重放预核算（只读，不修改任何余额）
+     * - 按 createdAt ASC, id ASC 重放
+     * - 默认包含全量历史；可按 startAt/endAt 限定范围
+     * - 业务约束（按当前紧急排查策略）：
+     *   WITHDRAW_PAYOUT / WITHDRAW_RESERVE / WITHDRAW_RELEASE / RELEASE_FROZEN 均不改余额（仅统计）
+     */
+    async previewReplayByUser(params: {
+        userId: number;
+        startAt?: string;
+        endAt?: string;
+        limitMismatches?: number;
+    }) {
+        const userId = Number(params?.userId || 0);
+        if (!userId) throw new BadRequestException('userId 必填');
+
+        await this.ensureWalletAccount(userId, this.prisma as any);
+
+        const toNum = (v: any) => {
+            const n = Number(v ?? 0);
+            return Number.isFinite(n) ? n : 0;
+        };
+        const r2 = (n: any) => round2(toNum(n));
+        const mismatchLimit = Math.min(500, Math.max(20, Number(params?.limitMismatches ?? 100)));
+
+        const noBalanceBizSet = new Set<string>([
+            'WITHDRAW_PAYOUT',
+            'WITHDRAW_RESERVE',
+            'WITHDRAW_RELEASE',
+            'RELEASE_FROZEN',
+        ]);
+        const settlementBizSet = new Set<string>([
+            'SETTLEMENT_EARNING',
+            'SETTLEMENT_EARNING_BASE',
+            'SETTLEMENT_EARNING_CARRY',
+            'SETTLEMENT_EARNING_CS',
+        ]);
+
+        const applyDelta = (
+            row: {
+                bizType?: string | null;
+                status?: string | null;
+                direction?: string | null;
+                amount?: number | null;
+            },
+        ) => {
+            const biz = String(row?.bizType || '');
+            const status = String(row?.status || '');
+            const direction = String(row?.direction || '');
+            const amount = r2(row?.amount);
+
+            // 指定类型仅做“范围统计”，不改余额
+            if (noBalanceBizSet.has(biz)) {
+                return { deltaAvailable: 0, deltaFrozen: 0, ignored: true, ignoredReason: 'BIZ_NO_BALANCE' as const };
+            }
+
+            if (status === 'REVERSED') {
+                return { deltaAvailable: 0, deltaFrozen: 0, ignored: true, ignoredReason: 'REVERSED' as const };
+            }
+
+            const sign = direction === 'OUT' ? -1 : 1;
+
+            if (status === 'FROZEN') {
+                return { deltaAvailable: 0, deltaFrozen: r2(sign * amount), ignored: false as const };
+            }
+
+            if (status === 'AVAILABLE') {
+                return { deltaAvailable: r2(sign * amount), deltaFrozen: 0, ignored: false as const };
+            }
+
+            // 未知状态：不动余额，只计入忽略
+            return { deltaAvailable: 0, deltaFrozen: 0, ignored: true, ignoredReason: 'UNKNOWN_STATUS' as const };
+        };
+
+        const where: any = { userId };
+        if (params?.startAt || params?.endAt) {
+            where.createdAt = {};
+            if (params?.startAt) where.createdAt.gte = new Date(params.startAt);
+            if (params?.endAt) where.createdAt.lte = new Date(params.endAt);
+        }
+
+        // 若传了 startAt，先回放 startAt 前流水，得到区间起始余额
+        let openingAvailable = 0;
+        let openingFrozen = 0;
+        if (params?.startAt) {
+            const beforeRows = await this.prisma.walletTransaction.findMany({
+                where: {
+                    userId,
+                    createdAt: { lt: new Date(params.startAt) },
+                },
+                orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+                select: {
+                    bizType: true,
+                    status: true,
+                    direction: true,
+                    amount: true,
+                },
+            });
+
+            for (const row of beforeRows) {
+                const { deltaAvailable, deltaFrozen } = applyDelta(row as any);
+                openingAvailable = r2(openingAvailable + deltaAvailable);
+                openingFrozen = r2(openingFrozen + deltaFrozen);
+            }
+        }
+
+        const rows = await this.prisma.walletTransaction.findMany({
+            where,
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+            select: {
+                id: true,
+                createdAt: true,
+                bizType: true,
+                status: true,
+                direction: true,
+                amount: true,
+                sourceType: true,
+                sourceId: true,
+                orderId: true,
+                dispatchId: true,
+                settlementId: true,
+                availableAfter: true,
+                frozenAfter: true,
+            },
+        });
+
+        let replayAvailable = openingAvailable;
+        let replayFrozen = openingFrozen;
+        let ignoredCount = 0;
+        let negativeMoments = 0;
+        const ignoredBizBreakdown: Record<string, number> = {};
+        const bizBreakdown: Record<string, number> = {};
+        const mismatchRows: any[] = [];
+        let replaySettlementTotal = 0;
+        let historySettlementTotal = 0;
+        let replayWithdrawalTotal = 0;
+        let historyWithdrawalTotal = 0;
+
+        for (const row of rows) {
+            const biz = String(row.bizType || 'UNKNOWN');
+            bizBreakdown[biz] = (bizBreakdown[biz] || 0) + 1;
+
+            const result = applyDelta(row as any);
+            if ((result as any).ignored) {
+                ignoredCount++;
+                ignoredBizBreakdown[biz] = (ignoredBizBreakdown[biz] || 0) + 1;
+            }
+
+            replayAvailable = r2(replayAvailable + result.deltaAvailable);
+            replayFrozen = r2(replayFrozen + result.deltaFrozen);
+
+            if (replayAvailable < 0 || replayFrozen < 0) negativeMoments++;
+
+            // ===== 统计：结算收益（重放/历史）=====
+            if (settlementBizSet.has(biz)) {
+                const amt = r2(row.amount);
+                const sign = row.direction === 'OUT' ? -1 : 1;
+
+                // 历史：按流水现状统计（排除 REVERSED）
+                if (row.status !== 'REVERSED') {
+                    historySettlementTotal = r2(historySettlementTotal + sign * amt);
+                }
+                // 重放：按当前重放规则统计
+                if (!(result as any).ignored) {
+                    replaySettlementTotal = r2(replaySettlementTotal + sign * amt);
+                }
+            }
+
+            // ===== 统计：提现总和（重放/历史）=====
+            if (biz === 'WITHDRAW_PAYOUT') {
+                const amt = r2(row.amount);
+                // 历史提现：排除 REVERSED，记为正向“提现总额”
+                if (row.status !== 'REVERSED') {
+                    historyWithdrawalTotal = r2(historyWithdrawalTotal + amt);
+                }
+                // 重放提现：当前策略下提现不影响余额，按 0 计（保留字段便于对比）
+                // replayWithdrawalTotal 保持不变
+            }
+
+            const sa = row.availableAfter === null || row.availableAfter === undefined ? null : r2(row.availableAfter);
+            const sf = row.frozenAfter === null || row.frozenAfter === undefined ? null : r2(row.frozenAfter);
+            if (sa !== null && sf !== null) {
+                const da = r2(replayAvailable - sa);
+                const df = r2(replayFrozen - sf);
+                if (Math.abs(da) > 0.009 || Math.abs(df) > 0.009) {
+                    if (mismatchRows.length < mismatchLimit) {
+                        mismatchRows.push({
+                            id: row.id,
+                            createdAt: row.createdAt,
+                            bizType: row.bizType,
+                            status: row.status,
+                            direction: row.direction,
+                            amount: r2(row.amount),
+                            sourceType: row.sourceType,
+                            sourceId: row.sourceId,
+                            orderId: row.orderId,
+                            settlementId: row.settlementId,
+                            dispatchId: row.dispatchId,
+                            storedAvailableAfter: sa,
+                            storedFrozenAfter: sf,
+                            replayAvailableAfter: replayAvailable,
+                            replayFrozenAfter: replayFrozen,
+                            deltaAvailable: da,
+                            deltaFrozen: df,
+                        });
+                    }
+                }
+            }
+        }
+
+        const accountNow = await this.prisma.walletAccount.findUnique({
+            where: { userId },
+            select: { availableBalance: true, frozenBalance: true },
+        });
+
+        const currentAvailable = r2(accountNow?.availableBalance);
+        const currentFrozen = r2(accountNow?.frozenBalance);
+        const currentTotal = r2(currentAvailable + currentFrozen);
+        const replayTotal = r2(replayAvailable + replayFrozen);
+
+        const diffAvailable = r2(replayAvailable - currentAvailable);
+        const diffFrozen = r2(replayFrozen - currentFrozen);
+        const diffTotal = r2(replayTotal - currentTotal);
+        const settlementDiff = r2(replaySettlementTotal - historySettlementTotal);
+        const withdrawalDiff = r2(replayWithdrawalTotal - historyWithdrawalTotal);
+
+        return {
+            userId,
+            range: {
+                startAt: params?.startAt ?? null,
+                endAt: params?.endAt ?? null,
+            },
+            openingBalance: {
+                available: openingAvailable,
+                frozen: openingFrozen,
+                total: r2(openingAvailable + openingFrozen),
+            },
+            currentBalance: {
+                available: currentAvailable,
+                frozen: currentFrozen,
+                total: currentTotal,
+            },
+            replayBalance: {
+                available: replayAvailable,
+                frozen: replayFrozen,
+                total: replayTotal,
+            },
+            diff: {
+                available: diffAvailable,
+                frozen: diffFrozen,
+                total: diffTotal,
+            },
+            settlementSummary: {
+                replayTotal: replaySettlementTotal,
+                historyTotal: historySettlementTotal,
+                diff: settlementDiff, // 负数=历史多结算；正数=历史少结算
+                signRule: 'diff = replay - history; diff < 0 表示历史多结算，diff > 0 表示历史少结算',
+            },
+            withdrawalSummary: {
+                replayTotal: replayWithdrawalTotal,
+                historyTotal: historyWithdrawalTotal,
+                diff: withdrawalDiff, // 负数=历史提现记账更多；正数=历史提现记账更少
+                signRule: 'diff = replay - history',
+            },
+            stats: {
+                txCount: rows.length,
+                ignoredCount,
+                mismatchCount: mismatchRows.length,
+                negativeMoments,
+                ignoredBizBreakdown,
+                bizBreakdown,
+                noBalanceBizTypes: Array.from(noBalanceBizSet),
+            },
+            mismatchRows,
         };
     }
 

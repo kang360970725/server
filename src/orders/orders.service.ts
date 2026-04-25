@@ -27,6 +27,7 @@ import {
 import {compareSettlementsToPlan} from "../utils/finance/generateRepairPlan";
 import {computeSettlementFreezeTime} from "../utils/orderDispatches/settlement-freeze.rule";
 import { NotificationsService } from '../notifications/notifications.service';
+import { PenaltiesService } from '../penalties/penalties.service';
 
 @Injectable()
 export class OrdersService {
@@ -34,6 +35,7 @@ export class OrdersService {
         private prisma: PrismaService,
         private wallet: WalletService,
         private notificationsService: NotificationsService,
+        private penaltiesService: PenaltiesService,
     ) {
     }
 
@@ -73,6 +75,25 @@ export class OrdersService {
      */
     private toAmount2(value: number) {
         return Number(Number(value || 0).toFixed(2));
+    }
+
+    // 按 0.1 元精度均摊金额（对齐钱包余额精度），保证分摊和等于总额
+    private splitSharedAmountByUsers(totalAmount: number, userIds: number[]) {
+        const uniqueUserIds = Array.from(new Set((userIds || []).map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0)));
+        if (!uniqueUserIds.length) return [] as Array<{ userId: number; amount: number }>;
+
+        const totalTenths = Math.max(0, Math.round(Number(totalAmount || 0) * 10));
+        const base = Math.floor(totalTenths / uniqueUserIds.length);
+        let remainder = totalTenths - base * uniqueUserIds.length;
+
+        return uniqueUserIds.map((userId) => {
+            const extra = remainder > 0 ? 1 : 0;
+            remainder = Math.max(0, remainder - extra);
+            return {
+                userId,
+                amount: (base + extra) / 10,
+            };
+        });
     }
 
     /**
@@ -1458,17 +1479,41 @@ export class OrdersService {
      * 退款功能
      * todo 1-24需确认是否将所有生成流水都处理退款。无论什么状态
      * -----------------------------*/
-    async refundOrder(orderId: number, operatorId: number, remark?: string) {
+    async refundOrder(
+        orderId: number,
+        operatorId: number,
+        remark?: string,
+        options?: {
+            staffLiable?: boolean;
+            liableUserIds?: number[];
+            hasCompensation?: boolean;
+            compensationAmount?: number;
+        },
+    ) {
         orderId = Number(orderId);
         operatorId = Number(operatorId);
         if (!orderId) throw new BadRequestException('orderId 必填');
         if (!operatorId) throw new BadRequestException('未登录或无权限操作');
+        const staffLiable = Boolean(options?.staffLiable);
+        const hasCompensation = Boolean(options?.hasCompensation);
 
         const order = await this.prisma.order.findUnique({
             where: {id: orderId},
             include: {
-                dispatches: {select: {id: true, status: true}},
-                settlements: {select: {id: true, paymentStatus: true, calculatedEarnings: true, finalEarnings: true}},
+                dispatches: {
+                    select: {
+                        id: true,
+                        status: true,
+                        participants: {
+                            select: {
+                                userId: true,
+                                acceptedAt: true,
+                                rejectedAt: true,
+                            },
+                        },
+                    },
+                },
+                settlements: {select: {id: true, userId: true, paymentStatus: true, calculatedEarnings: true, finalEarnings: true}},
             },
         });
         if (!order) throw new NotFoundException('订单不存在');
@@ -1480,7 +1525,72 @@ export class OrdersService {
         const hasPaid = order.settlements?.some((s) => s.paymentStatus === PaymentStatus.PAID);
         if (hasPaid) throw new BadRequestException('存在已打款结算记录，禁止退款（请先走财务冲正流程）');
 
+        const settlementUserIds = Array.from(
+            new Set(
+                (order.settlements || [])
+                    .map((x) => Number((x as any).userId))
+                    .filter((n) => Number.isFinite(n) && n > 0),
+            ),
+        );
+        const participantUserIds = Array.from(
+            new Set(
+                (order.dispatches || [])
+                    .flatMap((d: any) => d?.participants || [])
+                    .filter((p: any) => p?.acceptedAt && !p?.rejectedAt)
+                    .map((p: any) => Number(p?.userId))
+                    .filter((n: number) => Number.isFinite(n) && n > 0),
+            ),
+        );
+        const defaultLiableUserIds = settlementUserIds.length ? settlementUserIds : participantUserIds;
+        const customLiableUserIds = Array.isArray(options?.liableUserIds)
+            ? Array.from(
+                new Set(
+                    options.liableUserIds
+                        .map((x) => Number(x))
+                        .filter((n) => Number.isFinite(n) && n > 0),
+                ),
+            )
+            : [];
+
+        const liableUserIds = customLiableUserIds.length
+            ? customLiableUserIds.filter((id) => defaultLiableUserIds.includes(id))
+            : defaultLiableUserIds;
+
+        if (staffLiable && liableUserIds.length === 0) {
+            throw new BadRequestException('当前订单未找到可处罚打手，请指定 liableUserIds 或检查结算参与人');
+        }
+
+        if (staffLiable && customLiableUserIds.length > 0 && liableUserIds.length !== customLiableUserIds.length) {
+            throw new BadRequestException('liableUserIds 存在非本订单参与打手');
+        }
+
+        const compensationAmount = hasCompensation ? this.toAmount2(Number(options?.compensationAmount || 0)) : 0;
+        if (hasCompensation && compensationAmount <= 0) {
+            throw new BadRequestException('勾选赔付时，赔付金额必须大于0');
+        }
+        if (hasCompensation && defaultLiableUserIds.length === 0) {
+            throw new BadRequestException('当前订单未找到可分摊赔付的打手');
+        }
+
+        const orderAmountBase = this.toAmount2(
+            Math.max(
+                Number(order.paidAmount || 0),
+                Number(order.receivableAmount || 0),
+                Number((order as any).finalPayableAmount || 0),
+            ),
+        );
+        const liabilityPenaltyPerUser = this.toAmount2(Math.max(20, orderAmountBase * 0.1));
+        const compensationAllocations = hasCompensation
+            ? this.splitSharedAmountByUsers(compensationAmount, defaultLiableUserIds)
+            : [];
+        if (hasCompensation && compensationAllocations.length === 0) {
+            throw new BadRequestException('赔付分摊失败，请检查本单打手信息');
+        }
+
         const now = new Date();
+        let liabilityPenaltyResult: any = null;
+        let compensationPenaltyResult: any = null;
+        const penaltyWarnings: string[] = [];
 
         await this.prisma.$transaction(async (tx) => {
             // 1) 订单状态置 REFUNDED（要“结单状态并标记退款”：这里用 REFUNDED 即“已结单且已退款”）
@@ -1530,10 +1640,60 @@ export class OrdersService {
                 await this.wallet.reverseOrderSettlementEarnings({orderId}, tx);
             }
         });
+
+        // 5) 退款后处罚（不阻断退款主流程）
+        if (staffLiable && liableUserIds.length > 0) {
+            try {
+                liabilityPenaltyResult = await this.penaltiesService.createRefundLiabilityPenaltyBatch({
+                    orderId,
+                    orderAutoSerial: String((order as any).autoSerial || `#${orderId}`),
+                    liableUserIds,
+                    amountPerUser: liabilityPenaltyPerUser,
+                    operatorId,
+                    reason: remark,
+                    allowInsufficientBalance: true,
+                });
+            } catch (e: any) {
+                penaltyWarnings.push(`有责处罚执行失败：${e?.message || 'unknown error'}`);
+            }
+        }
+
+        if (hasCompensation && compensationAllocations.length > 0) {
+            try {
+                compensationPenaltyResult = await this.penaltiesService.createRefundCompensationPenaltyBatch({
+                    orderId,
+                    orderAutoSerial: String((order as any).autoSerial || `#${orderId}`),
+                    allocations: compensationAllocations,
+                    operatorId,
+                    reason: remark,
+                    allowInsufficientBalance: true,
+                });
+            } catch (e: any) {
+                penaltyWarnings.push(`赔付分摊扣款执行失败：${e?.message || 'unknown error'}`);
+            }
+        }
+
         await this.logOrderAction(operatorId, orderId, 'REFUND_ORDER', {
             remark: remark ?? null,
             clearedSettlements: (order.settlements?.length ?? 0) > 0,
             clearedCount: order.settlements?.length ?? 0,
+            staffLiable,
+            liabilityPenaltyPerUser: staffLiable ? liabilityPenaltyPerUser : 0,
+            liabilityPenaltyUserIds: staffLiable ? liableUserIds : [],
+            liabilityPenaltyCount: Number(liabilityPenaltyResult?.count || 0),
+            liabilityPenaltyTicketIds: Array.isArray(liabilityPenaltyResult?.ticketIds)
+                ? liabilityPenaltyResult.ticketIds
+                : [],
+            liabilityPendingCount: Number(liabilityPenaltyResult?.pendingCount || 0),
+            hasCompensation,
+            compensationAmount: hasCompensation ? compensationAmount : 0,
+            compensationAllocations: hasCompensation ? compensationAllocations : [],
+            compensationPenaltyCount: Number(compensationPenaltyResult?.count || 0),
+            compensationPenaltyTicketIds: Array.isArray(compensationPenaltyResult?.ticketIds)
+                ? compensationPenaltyResult.ticketIds
+                : [],
+            compensationPendingCount: Number(compensationPenaltyResult?.pendingCount || 0),
+            penaltyWarnings,
         });
 
         return this.getOrderDetail(orderId);

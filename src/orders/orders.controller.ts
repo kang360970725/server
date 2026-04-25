@@ -192,9 +192,30 @@ export class OrdersController {
     @Post('refund')
     @UseGuards(PermissionsGuard)
     @Permissions('orders:list:page')
-    refund(@Body() body: { id: number; remark?: string }, @Req() req: any) {
+    refund(
+        @Body()
+        body: {
+            id: number;
+            remark?: string;
+            staffLiable?: boolean;
+            liableUserIds?: number[];
+            hasCompensation?: boolean;
+            compensationAmount?: number;
+        },
+        @Req() req: any,
+    ) {
         const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
-        return this.ordersService.refundOrder(Number(body.id), operatorId, body.remark);
+        return this.ordersService.refundOrder(Number(body.id), operatorId, body.remark, {
+            staffLiable: Boolean(body?.staffLiable),
+            liableUserIds: Array.isArray(body?.liableUserIds)
+                ? body.liableUserIds.map((x: any) => Number(x)).filter((n: number) => Number.isFinite(n) && n > 0)
+                : undefined,
+            hasCompensation: Boolean(body?.hasCompensation),
+            compensationAmount:
+                body?.compensationAmount === undefined || body?.compensationAmount === null
+                    ? undefined
+                    : Number(body.compensationAmount),
+        });
     }
 
     /** 订单编辑（管理端） */

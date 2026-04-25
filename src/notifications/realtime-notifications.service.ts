@@ -15,6 +15,7 @@ export type RealtimeNotificationItem = {
 export class RealtimeNotificationsService {
   // 每个用户仅保留最近 N 条实时消息（内存缓存，不持久化）
   private readonly maxCachePerUser = 200;
+  private readonly maxPayloadBytes = 32 * 1024;
 
   // userId -> 消息列表
   private readonly cache = new Map<number, RealtimeNotificationItem[]>();
@@ -24,6 +25,51 @@ export class RealtimeNotificationsService {
 
   private nextId(userId: number) {
     return `${userId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  // 防止循环引用/BigInt/超大 payload 造成 JSON 序列化失败或响应异常
+  private normalizePayload(payload: any) {
+    if (payload === undefined) return undefined;
+    try {
+      const seen = new WeakSet<object>();
+      const json = JSON.stringify(payload, (_key, value) => {
+        if (typeof value === 'bigint') return String(value);
+        if (typeof value === 'function' || typeof value === 'symbol') return undefined;
+        if (value && typeof value === 'object') {
+          if (seen.has(value)) return '[Circular]';
+          seen.add(value);
+        }
+        return value;
+      });
+      if (!json) return undefined;
+
+      // 限制体积，避免单条消息 payload 过大导致响应抖动
+      const byteLen = Buffer.byteLength(json, 'utf8');
+      if (byteLen > this.maxPayloadBytes) {
+        return {
+          truncated: true,
+          bytes: byteLen,
+        };
+      }
+      return JSON.parse(json);
+    } catch {
+      return {
+        invalidPayload: true,
+      };
+    }
+  }
+
+  private normalizeItem(item: RealtimeNotificationItem): RealtimeNotificationItem {
+    const createdAtMs = new Date(item?.createdAt || '').getTime();
+    return {
+      id: String(item?.id || ''),
+      type: String(item?.type || 'CUSTOM'),
+      title: String(item?.title || '消息通知'),
+      content: String(item?.content || ''),
+      route: item?.route ? String(item.route) : undefined,
+      payload: this.normalizePayload(item?.payload),
+      createdAt: Number.isFinite(createdAtMs) ? new Date(createdAtMs).toISOString() : new Date().toISOString(),
+    };
   }
 
   subscribe(userId: number): Observable<any> {
@@ -50,7 +96,16 @@ export class RealtimeNotificationsService {
   }
 
   list(userId: number) {
-    return [...(this.cache.get(Number(userId)) || [])].sort((a, b) => (
+    const uid = Number(userId);
+    const raw = Array.isArray(this.cache.get(uid)) ? this.cache.get(uid)! : [];
+    const normalized = raw
+      .filter((x) => Boolean(x))
+      .map((x) => this.normalizeItem(x as RealtimeNotificationItem));
+
+    // 清理脏数据，避免后续重复触发异常
+    this.cache.set(uid, normalized.slice(0, this.maxCachePerUser));
+
+    return [...normalized].sort((a, b) => (
       new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     ));
   }
@@ -89,7 +144,7 @@ export class RealtimeNotificationsService {
         title: String(input.title || '消息通知'),
         content: String(input.content || ''),
         route: input.route || undefined,
-        payload: input.payload,
+        payload: this.normalizePayload(input.payload),
         createdAt: new Date().toISOString(),
       };
 

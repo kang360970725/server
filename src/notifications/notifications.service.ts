@@ -887,8 +887,14 @@ export class NotificationsService {
   }
 
   listMyRealtimeNotifications(userId: number) {
-    const list = this.realtimeNotificationsService.list(userId);
-    return { list, unreadCount: list.length };
+    try {
+      const list = this.realtimeNotificationsService.list(userId);
+      return { list, unreadCount: list.length };
+    } catch (e) {
+      // 实时消息列表是非核心能力：兜底返回空列表，避免偶发异常放大成网关 502
+      console.error('[notifications][my/realtime/list] failed:', Number(userId), e?.message || e);
+      return { list: [], unreadCount: 0 };
+    }
   }
 
   clearMyRealtimeNotification(userId: number, id: string) {
