@@ -66,6 +66,7 @@ async function bootstrap() {
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
+    exposedHeaders: ['x-access-token'],
   });
 
   // ✅ 端口占用时给出更清晰的提示

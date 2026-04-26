@@ -71,6 +71,26 @@ export class AppVersionService implements OnModuleInit {
     return `b${version.replace(/[^\d.]/g, '')}-${isoCompact}${ms}`;
   }
 
+  private stripTrailingTimeText(note: string): string {
+    const raw = String(note || '').trim();
+    if (!raw) return '';
+    return raw
+      .replace(
+        /\s*[（(]?\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}(?:日)?(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?[)）]?\s*$/g,
+        '',
+      )
+      .trim();
+  }
+
+  private normalizeNotes(notes?: any[]): string[] {
+    const raw = Array.isArray(notes) ? notes : [];
+    const cleaned = raw
+      .map((x) => this.stripTrailingTimeText(String(x || '')))
+      .map((x) => x.trim())
+      .filter(Boolean);
+    return Array.from(new Set(cleaned));
+  }
+
   private normalizeItem(input: any): AppVersionItem | null {
     const version = String(input?.version || '').trim();
     const buildId = String(input?.buildId || '').trim();
@@ -188,6 +208,9 @@ export class AppVersionService implements OnModuleInit {
       throw new BadRequestException('版本号或 Build ID 生成失败');
     }
 
+    const inputNotes = this.normalizeNotes(Array.isArray(dto.notes) ? dto.notes : []);
+    const mergePreviousNotes = Boolean(dto.mergePreviousNotes ?? true);
+
     const next: AppVersionItem = {
       id: 0,
       version,
@@ -195,7 +218,7 @@ export class AppVersionService implements OnModuleInit {
       releasedAt: dto.releasedAt ? new Date(dto.releasedAt).toISOString() : now,
       forceRefresh: Boolean(dto.forceRefresh ?? true),
       title: String(dto.title || '版本更新说明').trim() || '版本更新说明',
-      notes: Array.isArray(dto.notes) ? dto.notes.map((x) => String(x || '').trim()).filter(Boolean) : [],
+      notes: inputNotes,
       enabled: Boolean(dto.enabled ?? true),
       createdAt: now,
       createdBy: operatorId ? Number(operatorId) : null,
@@ -210,6 +233,9 @@ export class AppVersionService implements OnModuleInit {
     } else {
       const maxId = list.reduce((m, x) => Math.max(m, Number(x.id || 0)), 0);
       next.id = maxId + 1;
+      if (mergePreviousNotes && latest?.notes?.length) {
+        next.notes = Array.from(new Set([...next.notes, ...this.normalizeNotes(latest.notes)]));
+      }
       list.unshift(next);
     }
 

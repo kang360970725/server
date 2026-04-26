@@ -35,5 +35,9 @@ export class UpsertAppVersionDto {
 
   @IsOptional()
   @IsBoolean()
+  mergePreviousNotes?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
   enabled?: boolean;
 }

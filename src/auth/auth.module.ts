@@ -9,10 +9,11 @@ import { PrismaService } from '../prisma.service'; // 正确路径
   imports: [
     JwtModule.register({
       secret: process.env.JWT_SECRET || 'your-secret-key',
-      signOptions: { expiresIn: '7d' },
+      signOptions: { expiresIn: '2h' },
     }),
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy, PrismaService], // 确保 PrismaService 在这里提供
+  exports: [JwtModule],
 })
 export class AuthModule {}
