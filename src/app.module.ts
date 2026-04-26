@@ -26,6 +26,7 @@ import { OfflineFeeModule } from './offline-fee/offline-fee.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { CouponsModule } from './coupons/coupons.module';
 import { PenaltiesModule } from './penalties/penalties.module';
+import { AppVersionModule } from './app-version/app-version.module';
 
 
 @Module({
@@ -50,6 +51,7 @@ import { PenaltiesModule } from './penalties/penalties.module';
         NotificationsModule,
         CouponsModule,
         PenaltiesModule,
+        AppVersionModule,
     ],
     controllers: [AppController],
     providers: [AppService, PrismaService,
