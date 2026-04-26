@@ -2,14 +2,11 @@ import { ExecutionContext, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { AuthGuard } from '@nestjs/passport';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
-import { JwtService } from '@nestjs/jwt';
+import * as jwt from 'jsonwebtoken';
 
 @Injectable()
 export class JwtAuthGuard extends AuthGuard('jwt') {
-    constructor(
-        private readonly reflector: Reflector,
-        private readonly jwtService: JwtService,
-    ) {
+    constructor(private readonly reflector: Reflector) {
         super();
     }
 
@@ -35,7 +32,9 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
             name: String(user?.name || '').trim(),
         };
         if (payload.sub) {
-            const refreshedToken = this.jwtService.sign(payload, { expiresIn: '2h' });
+            const refreshedToken = jwt.sign(payload, process.env.JWT_SECRET || 'your-secret-key', {
+                expiresIn: '2h',
+            });
             const res = context.switchToHttp().getResponse();
             if (res?.setHeader) {
                 res.setHeader('x-access-token', refreshedToken);
