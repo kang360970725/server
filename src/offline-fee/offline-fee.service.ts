@@ -93,6 +93,16 @@ export class OfflineFeeService {
     return this.toFixed2(Math.min(Math.max(raw, floor), cap));
   }
 
+  // 人工录入/人工编辑后，会将 generatedAt 更新为当前时间；
+  // 自动任务不会改 generatedAt。由此可识别“该账单曾被人工干预”。
+  private isManualAdjustedBill(existing?: {
+    createdAt?: Date | null;
+    generatedAt?: Date | null;
+  } | null) {
+    if (!existing?.createdAt || !existing?.generatedAt) return false;
+    return existing.generatedAt.getTime() - existing.createdAt.getTime() > 1000;
+  }
+
   async generateBillsForMonth(month: string) {
     return this.prisma.$transaction(async (tx) => this.generateBillsForMonthTx(tx as any, month));
   }
@@ -126,43 +136,60 @@ export class OfflineFeeService {
       const gross = Number(perfAgg?._sum?.grossPerformanceAmount || 0);
       const ratio = this.calcJoinedRatio(user.offlineJoinedAt, start, end);
       const baseAmount = this.toFixed2(gross * ratio);
-      const shouldPay = this.calcShouldPay(baseAmount, cfg.rate, cfg.minAmount, cfg.capAmount);
 
       const existing = await (db as any).offlineFeeBill.findUnique({
         where: { userId_billMonth: { userId: user.id, billMonth: month } },
-        select: { id: true, paidAmount: true, enforceFullPayment: true, lastRemindAt: true },
+        select: {
+          id: true,
+          paidAmount: true,
+          performanceBaseAmount: true,
+          rate: true,
+          minAmount: true,
+          capAmount: true,
+          enforceFullPayment: true,
+          lastRemindAt: true,
+          createdAt: true,
+          generatedAt: true,
+        },
       });
 
+      const existingBaseAmount = this.toFixed2(Number(existing?.performanceBaseAmount || 0));
+      const keepManualBase = this.isManualAdjustedBill(existing) && existingBaseAmount > baseAmount;
+      const finalBaseAmount = keepManualBase ? existingBaseAmount : baseAmount;
+      const finalRate = this.toFixed2(Number(existing?.rate ?? cfg.rate));
+      const finalMinAmount = this.toFixed2(Number(existing?.minAmount ?? cfg.minAmount));
+      const finalCapAmount = this.toFixed2(Number(existing?.capAmount ?? cfg.capAmount));
       const paid = Number(existing?.paidAmount || 0);
-      const remaining = this.toFixed2(Math.max(0, shouldPay - paid));
-      const status = remaining <= 0 ? 'PAID' : paid > 0 ? 'PARTIAL' : 'UNPAID';
+      const finalShouldPay = this.calcShouldPay(finalBaseAmount, finalRate, finalMinAmount, finalCapAmount);
+      const finalRemaining = this.toFixed2(Math.max(0, finalShouldPay - paid));
+      const finalStatus = finalRemaining <= 0 ? 'PAID' : paid > 0 ? 'PARTIAL' : 'UNPAID';
 
       await (db as any).offlineFeeBill.upsert({
         where: { userId_billMonth: { userId: user.id, billMonth: month } },
         update: {
           periodStart: start,
           periodEnd: end,
-          performanceBaseAmount: baseAmount,
-          rate: cfg.rate,
-          minAmount: cfg.minAmount,
-          capAmount: cfg.capAmount,
-          shouldPayAmount: shouldPay,
-          remainingAmount: remaining,
-          status,
+          performanceBaseAmount: finalBaseAmount,
+          rate: finalRate,
+          minAmount: finalMinAmount,
+          capAmount: finalCapAmount,
+          shouldPayAmount: finalShouldPay,
+          remainingAmount: finalRemaining,
+          status: finalStatus,
         },
         create: {
           userId: user.id,
           billMonth: month,
           periodStart: start,
           periodEnd: end,
-          performanceBaseAmount: baseAmount,
+          performanceBaseAmount: finalBaseAmount,
           rate: cfg.rate,
           minAmount: cfg.minAmount,
           capAmount: cfg.capAmount,
-          shouldPayAmount: shouldPay,
+          shouldPayAmount: finalShouldPay,
           paidAmount: 0,
-          remainingAmount: shouldPay,
-          status: shouldPay > 0 ? 'UNPAID' : 'PAID',
+          remainingAmount: finalShouldPay,
+          status: finalShouldPay > 0 ? 'UNPAID' : 'PAID',
           generatedAt: new Date(),
         },
       });
@@ -362,12 +389,13 @@ export class OfflineFeeService {
       const bill = await (tx as any).offlineFeeBill.findUnique({ where: { id: billId } });
       if (!bill) throw new NotFoundException('线下费用账单不存在');
 
-      // 账单编辑沿用账单生成时固化的费率与上下限，确保历史口径一致
+      // 手动编辑业绩时，按“最新基础配置”重算（满足运营口径调整诉求）
+      const cfg = await this.getFeeConfig(tx as any);
       const shouldPay = this.calcShouldPay(
         performanceBaseAmount,
-        Number(bill.rate || 0),
-        Number(bill.minAmount || 0),
-        Number(bill.capAmount || 0),
+        cfg.rate,
+        cfg.minAmount,
+        cfg.capAmount,
       );
 
       const paid = this.toFixed2(Number(bill.paidAmount || 0));
@@ -378,9 +406,13 @@ export class OfflineFeeService {
         where: { id: billId },
         data: {
           performanceBaseAmount,
+          rate: cfg.rate,
+          minAmount: cfg.minAmount,
+          capAmount: cfg.capAmount,
           shouldPayAmount: shouldPay,
           remainingAmount: remaining,
           status,
+          generatedAt: new Date(),
         },
       });
     });
