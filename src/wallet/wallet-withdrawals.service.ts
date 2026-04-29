@@ -41,6 +41,29 @@ export class WalletWithdrawalsService {
         return `WD${y}${m}${d}${rand}`;
     }
 
+    private buildReviewedAtRange(createdAtFrom?: string, createdAtTo?: string) {
+        const now = new Date();
+
+        let fromDate: Date | null = null;
+        let toDate: Date | null = null;
+
+        if (createdAtFrom || createdAtTo) {
+            if (createdAtFrom) fromDate = new Date(createdAtFrom);
+            if (createdAtTo) toDate = new Date(createdAtTo);
+        } else {
+            // 默认本月（北京时间）
+            const year = now.getFullYear();
+            const month = now.getMonth();
+            fromDate = new Date(year, month, 1, 0, 0, 0);
+            toDate = new Date(year, month + 1, 0, 23, 59, 59);
+        }
+
+        const reviewedAt: any = {};
+        if (fromDate) reviewedAt.gte = fromDate;
+        if (toDate) reviewedAt.lte = toDate;
+        return { reviewedAt, fromDate, toDate };
+    }
+
     /**
      * ✅ 获取提现相关信息
      * 用于前端提现弹窗计算押金
@@ -538,10 +561,14 @@ export class WalletWithdrawalsService {
 
     /** 打手端：我的提现记录 */
     async listMine(userId: number) {
-        return this.prisma.walletWithdrawalRequest.findMany({
+        const list = await this.prisma.walletWithdrawalRequest.findMany({
             where: { userId },
             orderBy: { id: 'desc' },
         });
+        return list.map((row: any) => ({
+            ...row,
+            reviewTime: row.reviewedAt ?? null,
+        }));
     }
 
     /** 管理端：待审核列表（带用户昵称 + 钱包余额 + 收款码临时URL） */
@@ -646,28 +673,8 @@ export class WalletWithdrawalsService {
         // 默认本月（北京时间）
         // ===============================
 
-        const now = new Date();
-
-        let fromDate: Date | null = null;
-        let toDate: Date | null = null;
-
-        if (createdAtFrom || createdAtTo) {
-            if (createdAtFrom) fromDate = new Date(createdAtFrom);
-            if (createdAtTo) toDate = new Date(createdAtTo);
-        } else {
-            // 默认本月（北京时间）
-            const year = now.getFullYear();
-            const month = now.getMonth();
-
-            fromDate = new Date(year, month, 1, 0, 0, 0);
-            toDate = new Date(year, month + 1, 0, 23, 59, 59);
-        }
-
-        if (fromDate || toDate) {
-            where.reviewedAt = {};
-            if (fromDate) where.reviewedAt.gte = fromDate;
-            if (toDate) where.reviewedAt.lte = toDate;
-        }
+        const { reviewedAt } = this.buildReviewedAtRange(createdAtFrom, createdAtTo);
+        where.reviewedAt = reviewedAt;
 
         // ===============================
         // 主查询
@@ -712,7 +719,10 @@ export class WalletWithdrawalsService {
 
         return {
             total,
-            list,
+            list: (list as any[]).map((row: any) => ({
+                ...row,
+                reviewTime: row.reviewedAt ?? null,
+            })),
             page: Math.max(1, Number(page) || 1),
             pageSize: take,
             summary: {
@@ -721,6 +731,117 @@ export class WalletWithdrawalsService {
                 paidAmount: paidAgg._sum.amount || 0,
                 paidCount: paidAgg._count || 0,
             },
+        };
+    }
+
+    /**
+     * ✅ 提现对账汇总（按审批时间范围）
+     * 输出“谁提了多少”用于与线下转账流水做人工核对。
+     */
+    async reconcileSummary(params: {
+        status?: string;
+        channel?: string;
+        userId?: number;
+        requestNo?: string;
+        createdAtFrom?: string;
+        createdAtTo?: string;
+    }) {
+        const { status, channel, userId, requestNo, createdAtFrom, createdAtTo } = params || ({} as any);
+
+        const baseWhere: any = {};
+        if (status) baseWhere.status = status;
+        if (channel) baseWhere.channel = channel;
+        if (userId) baseWhere.userId = Number(userId);
+        if (requestNo && String(requestNo).trim()) {
+            baseWhere.requestNo = { contains: String(requestNo).trim() };
+        }
+
+        const { reviewedAt, fromDate, toDate } = this.buildReviewedAtRange(createdAtFrom, createdAtTo);
+        baseWhere.reviewedAt = reviewedAt;
+
+        const approvedStatusList = ['APPROVED', 'PAYING', 'PAID', 'FAILED'] as const;
+
+        const rows = await this.prisma.walletWithdrawalRequest.findMany({
+            where: {
+                ...baseWhere,
+                status: { in: [...approvedStatusList] as any },
+            },
+            select: {
+                userId: true,
+                amount: true,
+                status: true,
+            },
+        });
+
+        const approvedMap = new Map<number, { approvedAmount: number; approvedCount: number }>();
+        const paidMap = new Map<number, { paidAmount: number; paidCount: number }>();
+        for (const row of rows as any[]) {
+            const uid = Number(row.userId);
+            const amount = Number(row.amount || 0);
+            const a = approvedMap.get(uid) || { approvedAmount: 0, approvedCount: 0 };
+            a.approvedAmount += amount;
+            a.approvedCount += 1;
+            approvedMap.set(uid, a);
+
+            if (String(row.status) === 'PAID') {
+                const p = paidMap.get(uid) || { paidAmount: 0, paidCount: 0 };
+                p.paidAmount += amount;
+                p.paidCount += 1;
+                paidMap.set(uid, p);
+            }
+        }
+
+        const userIds = Array.from(new Set<number>([...approvedMap.keys(), ...paidMap.keys()]));
+
+        const users = userIds.length
+            ? await this.prisma.user.findMany({
+                  where: { id: { in: userIds } },
+                  select: { id: true, name: true, realName: true, phone: true },
+              })
+            : [];
+        const userMap = new Map<number, any>(users.map((u) => [Number(u.id), u]));
+        const byUser = Array.from(approvedMap.entries())
+            .map(([uid, approved]) => {
+                const userInfo = userMap.get(uid);
+                const paid = paidMap.get(uid);
+                const approvedAmount = Number(approved?.approvedAmount || 0);
+                const paidAmount = Number(paid?.paidAmount || 0);
+                return {
+                    userId: uid,
+                    name: userInfo?.name || null,
+                    realName: userInfo?.realName || null,
+                    phone: userInfo?.phone || null,
+                    approvedAmount,
+                    approvedCount: Number(approved?.approvedCount || 0),
+                    paidAmount,
+                    paidCount: Number(paid?.paidCount || 0),
+                    transferGap: Number((approvedAmount - paidAmount).toFixed(2)),
+                };
+            })
+            .sort((a, b) => b.approvedAmount - a.approvedAmount || b.approvedCount - a.approvedCount);
+
+        const total = byUser.reduce(
+            (acc, row) => {
+                acc.approvedAmount += Number(row.approvedAmount || 0);
+                acc.approvedCount += Number(row.approvedCount || 0);
+                acc.paidAmount += Number(row.paidAmount || 0);
+                acc.paidCount += Number(row.paidCount || 0);
+                return acc;
+            },
+            { approvedAmount: 0, approvedCount: 0, paidAmount: 0, paidCount: 0 },
+        );
+
+        return {
+            range: {
+                reviewedAtFrom: fromDate ? fromDate.toISOString() : null,
+                reviewedAtTo: toDate ? toDate.toISOString() : null,
+            },
+            total: {
+                ...total,
+                transferGap: Number((total.approvedAmount - total.paidAmount).toFixed(2)),
+                userCount: byUser.length,
+            },
+            byUser,
         };
     }
 
