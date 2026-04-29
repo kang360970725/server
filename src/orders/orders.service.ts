@@ -480,13 +480,28 @@ export class OrdersService {
                 skip,
                 take: limit,
                 orderBy: { createdAt: 'desc' },
-                include: {
-                    project: true,
+                select: {
+                    id: true,
+                    autoSerial: true,
+                    status: true,
+                    isPaid: true,
+                    isGifted: true,
+                    paidAmount: true,
+                    customerGameId: true,
+                    createdAt: true,
+                    project: {
+                        select: { id: true, name: true },
+                    },
                     dispatcher: { select: { id: true, name: true, phone: true } },
                     currentDispatch: {
-                        include: {
+                        select: {
+                            id: true,
+                            status: true,
                             participants: {
-                                include: { user: { select: { id: true, name: true, phone: true } } },
+                                select: {
+                                    id: true,
+                                    user: { select: { id: true, name: true, phone: true } },
+                                },
                             },
                         },
                     },
@@ -1536,7 +1551,9 @@ export class OrdersService {
             new Set(
                 (order.dispatches || [])
                     .flatMap((d: any) => d?.participants || [])
-                    .filter((p: any) => p?.acceptedAt && !p?.rejectedAt)
+                    // 退款有责处罚：以“本单参与且未拒单”为准，不依赖 acceptedAt，
+                    // 避免在“等待客服确认结单”阶段因历史数据 acceptedAt 为空被误过滤
+                    .filter((p: any) => !p?.rejectedAt)
                     .map((p: any) => Number(p?.userId))
                     .filter((n: number) => Number.isFinite(n) && n > 0),
             ),

@@ -13,6 +13,7 @@ import { ListPenaltyFundFlowsDto } from './dto/list-penalty-fund-flows.dto';
 import { ListPenaltyRankingDto } from './dto/list-penalty-ranking.dto';
 
 const PENALTIES_PAGE = 'penalties:page';
+const PENALTIES_TICKET_CREATE = 'penalties:ticket:create';
 const LEGACY_PAGE = 'system:role:page';
 
 @Controller('penalties')
@@ -24,21 +25,21 @@ export class PenaltiesController {
 
   @Post('rules/list')
   @UseGuards(PermissionsGuard)
-  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
+  @Permissions(PENALTIES_PAGE, PENALTIES_TICKET_CREATE, LEGACY_PAGE)
   listRules(@Body() body: any) {
     return this.penaltiesService.listRules(body || {});
   }
 
   @Post('rules/options')
   @UseGuards(PermissionsGuard)
-  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
+  @Permissions(PENALTIES_PAGE, PENALTIES_TICKET_CREATE, LEGACY_PAGE)
   listRuleOptions() {
     return this.penaltiesService.listEnabledRulesForSelect();
   }
 
   @Post('dict')
   @UseGuards(PermissionsGuard)
-  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
+  @Permissions(PENALTIES_PAGE, PENALTIES_TICKET_CREATE, LEGACY_PAGE)
   dict() {
     return this.penaltiesService.getDict();
   }
@@ -63,14 +64,14 @@ export class PenaltiesController {
 
   @Post('tickets/context')
   @UseGuards(PermissionsGuard)
-  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
+  @Permissions(PENALTIES_PAGE, PENALTIES_TICKET_CREATE, LEGACY_PAGE)
   getCreateTicketContext(@Body() body: any) {
     return this.penaltiesService.getCreateTicketContext(Number(body?.userId), body?.ruleIds || []);
   }
 
   @Post('tickets/create')
   @UseGuards(PermissionsGuard)
-  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
+  @Permissions(PENALTIES_PAGE, PENALTIES_TICKET_CREATE, LEGACY_PAGE)
   createTicket(@Body() dto: CreatePenaltyTicketDto, @Req() req: any) {
     const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
     return this.penaltiesService.createTicket(dto, Number.isFinite(operatorId) ? operatorId : undefined);
@@ -78,7 +79,7 @@ export class PenaltiesController {
 
   @Post('tickets/list')
   @UseGuards(PermissionsGuard)
-  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
+  @Permissions(PENALTIES_PAGE, PENALTIES_TICKET_CREATE, LEGACY_PAGE)
   listTickets(@Body() body: any) {
     return this.penaltiesService.listTickets(body || {});
   }
@@ -92,7 +93,7 @@ export class PenaltiesController {
 
   @Post('tickets/detail')
   @UseGuards(PermissionsGuard)
-  @Permissions(PENALTIES_PAGE, LEGACY_PAGE)
+  @Permissions(PENALTIES_PAGE, PENALTIES_TICKET_CREATE, LEGACY_PAGE)
   ticketDetail(@Body() body: any) {
     return this.penaltiesService.getTicketDetail(Number(body?.ticketId));
   }

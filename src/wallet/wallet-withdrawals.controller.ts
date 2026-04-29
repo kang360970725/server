@@ -77,6 +77,24 @@ export class WalletWithdrawalsController {
         return this.service.listAll(body);
     }
 
+    // ✅ 管理端：提现对账汇总（按审批时间范围，按人统计）
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE)
+    @Post('reconcile-summary')
+    async reconcileSummary(
+        @Body()
+            body: {
+            status?: string;
+            channel?: string;
+            userId?: number;
+            requestNo?: string;
+            createdAtFrom?: string;
+            createdAtTo?: string;
+        },
+    ) {
+        return this.service.reconcileSummary(body || {});
+    }
+
     // ✅ 管理端：审批提现（登录 + 权限）
     @UseGuards(PermissionsGuard)
     @Permissions(WITHDRAWALS_PAGE)
