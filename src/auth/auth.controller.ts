@@ -26,4 +26,10 @@ export class AuthController {
     // 这里你原来多调用了一次 validateUser，但最终返回的是 getUserWithPermissions
     return await this.authService.getUserWithPermissions(req.user.userId);
   }
+
+  @UseGuards(JwtAuthGuard)
+  @Post('refresh')
+  refresh(@Request() req) {
+    return this.authService.refreshAccessToken(req.user);
+  }
 }

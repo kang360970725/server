@@ -177,4 +177,20 @@ export class AuthService {
     };
   }
 
+  refreshAccessToken(user: { id?: number; userId?: number; phone?: string; name?: string }) {
+    const uid = Number(user?.id || user?.userId || 0);
+    if (!uid) throw new UnauthorizedException('无效用户');
+
+    const payload = {
+      phone: String(user?.phone || '').trim(),
+      sub: uid,
+      name: String(user?.name || '').trim(),
+    };
+    const access_token = this.jwtService.sign(payload);
+    return {
+      access_token,
+      expiresInSeconds: 2 * 60 * 60,
+    };
+  }
+
 }

@@ -1630,6 +1630,22 @@ export class OrdersService {
                 },
             });
 
+            // 2.1) 退款后释放本单参与打手工作状态，避免“已接单但退款后仍卡 WORKING”
+            const refundParticipantUserIds = Array.from(
+                new Set(
+                    (order.dispatches || [])
+                        .flatMap((d: any) => d?.participants || [])
+                        .map((p: any) => Number(p?.userId || 0))
+                        .filter((n: number) => Number.isFinite(n) && n > 0),
+                ),
+            );
+            if (refundParticipantUserIds.length > 0) {
+                await tx.user.updateMany({
+                    where: { id: { in: refundParticipantUserIds } },
+                    data: { workStatus: PlayerWorkStatus.IDLE as any },
+                });
+            }
+
             // 3) 若已经结单产生 settlements：清零陪玩收益（finalEarnings=0，manualAdjustment = -calculatedEarnings）
             //    这样“清零”且保留 calculatedEarnings 便于追溯
             if (order.settlements && order.settlements.length > 0) {
