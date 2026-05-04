@@ -4,6 +4,10 @@ export class CreateGameProjectDto {
     name: string;
     price: number;
     type: string;
+    gameType?: string;
+    projectType?: string;
+    category?: string;
+    richContent?: string;
 
     billingMode?: BillingMode; // ✅ 新增：小时/保底，允许不传（后端会给默认）
 
@@ -16,6 +20,10 @@ export class CreateGameProjectDto {
 export class UpdateGameProjectDto {
     price?: number;
     type?: OrderType;
+    gameType?: string;
+    projectType?: string;
+    category?: string;
+    richContent?: string;
 
     billingMode?: BillingMode; // ✅ 新增
 

@@ -12,6 +12,10 @@ model GameProject {
   name        String
   price       Float
   type        OrderType
+  gameType    String?       @db.VarChar(64)
+  projectType String?       @db.VarChar(64)
+  category    String?       @db.VarChar(64)
+  richContent String?       @db.LongText
   /// 计费模式：小时单 / 保底单/ 玩法单（你已落地）
   billingMode BillingMode   @default(GUARANTEED)
   baseAmount  Float?

@@ -1,0 +1,5 @@
+ALTER TABLE `GameProject`
+  ADD COLUMN `gameType` VARCHAR(64) NULL,
+  ADD COLUMN `projectType` VARCHAR(64) NULL,
+  ADD COLUMN `category` VARCHAR(64) NULL,
+  ADD COLUMN `richContent` LONGTEXT NULL;

@@ -15,6 +15,7 @@ import { CreateGameProjectDto, UpdateGameProjectDto } from './dto/game-project.d
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { Permissions } from '../auth/decorators/permissions.decorator';
+import { Public } from '../auth/decorators/public.decorator';
 
 @Controller('game-project')
 @UseGuards(JwtAuthGuard)
@@ -75,5 +76,17 @@ export class GameProjectController {
     @Permissions('system:game-project:page')
     remove(@Param('id', ParseIntPipe) id: number) {
         return this.gameProjectService.remove(id);
+    }
+
+    @Public()
+    @Post('public/menu/list')
+    publicMenuList(@Body() body: any) {
+        return this.gameProjectService.publicMenuList(body || {});
+    }
+
+    @Public()
+    @Get('public/menu/:id')
+    publicMenuDetail(@Param('id', ParseIntPipe) id: number) {
+        return this.gameProjectService.publicMenuDetail(id);
     }
 }

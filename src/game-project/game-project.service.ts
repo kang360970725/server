@@ -72,4 +72,79 @@ export class GameProjectService {
             take: 50,
         });
     }
+
+    async publicMenuList(params: {
+        keyword?: string;
+        gameType?: string;
+        projectType?: string;
+        category?: string;
+    }) {
+        const where: any = { status: 'ACTIVE' };
+        if (params?.keyword) {
+            where.name = { contains: String(params.keyword).trim() };
+        }
+        if (params?.gameType) where.gameType = String(params.gameType).trim();
+        if (params?.projectType) where.projectType = String(params.projectType).trim();
+        if (params?.category) where.category = String(params.category).trim();
+
+        const list = await this.prisma.gameProject.findMany({
+            where,
+            orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+            select: {
+                id: true,
+                name: true,
+                price: true,
+                type: true,
+                billingMode: true,
+                baseAmount: true,
+                clubRate: true,
+                coverImage: true,
+                description: true,
+                gameType: true,
+                projectType: true,
+                category: true,
+            },
+        });
+
+        const pickTags = (rows: any[], key: 'gameType' | 'projectType' | 'category') =>
+            Array.from(
+                new Set(
+                    rows
+                        .map((x) => (x?.[key] || '').trim())
+                        .filter((x) => !!x),
+                ),
+            );
+
+        return {
+            list,
+            filters: {
+                gameTypes: pickTags(list, 'gameType'),
+                projectTypes: pickTags(list, 'projectType'),
+                categories: pickTags(list, 'category'),
+            },
+        };
+    }
+
+    async publicMenuDetail(id: number) {
+        return this.prisma.gameProject.findFirst({
+            where: { id, status: 'ACTIVE' },
+            select: {
+                id: true,
+                name: true,
+                price: true,
+                type: true,
+                billingMode: true,
+                baseAmount: true,
+                clubRate: true,
+                coverImage: true,
+                description: true,
+                gameType: true,
+                projectType: true,
+                category: true,
+                richContent: true,
+                createdAt: true,
+                updatedAt: true,
+            },
+        });
+    }
 }
