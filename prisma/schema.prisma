@@ -114,12 +114,108 @@ model User {
   reviewedPenaltyAppeals   PenaltyAppeal[]           @relation("PenaltyAppealReviewer")
   penaltyFundFlows         PenaltyFundFlow[]
   userCoupons              UserCoupon[]
+  chestRedeemedCodes       ChestRedeemCode[] @relation("ChestRedeemByUser")
+  chestAccount             ChestUserAccount?
+  chestOpenRecords         ChestOpenRecord[]
 
   @@index([workStatus])
   @@index([workMode, offlineJoinedAt])
   @@index([rating], map: "users_rating_fkey")
   @@index([roleId], map: "users_roleId_fkey")
   @@map("users")
+}
+
+model ChestActivityConfig {
+  id              Int      @id @default(autoincrement())
+  activityKey     String   @unique @db.VarChar(64)
+  title           String   @db.VarChar(120)
+  enabled         Boolean  @default(false)
+  defaultKeyCount Int      @default(1)
+  launchAt        DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  rewardItems     ChestRewardItem[]
+
+  @@map("chest_activity_configs")
+}
+
+model ChestRewardItem {
+  id           Int      @id @default(autoincrement())
+  activityKey  String   @db.VarChar(64)
+  name         String   @db.VarChar(120)
+  type         String   @db.VarChar(32)
+  quantity     Int      @default(1)
+  weight       Int      @default(1)
+  stock        Int?
+  enabled      Boolean  @default(true)
+  sortOrder    Int      @default(100)
+  minDrawCount Int      @default(0)
+  blockBeforeDays Int?
+  rampEveryDays Int?
+  rampStep Int?
+  rampMaxExtra Int?
+  dynamicMode  String?  @db.VarChar(64)
+  publicRuleText String? @db.VarChar(255)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  activity     ChestActivityConfig @relation(fields: [activityKey], references: [activityKey], onDelete: Cascade)
+
+  @@index([activityKey, enabled], map: "idx_chest_reward_item_activity_enabled")
+  @@index([activityKey, sortOrder], map: "idx_chest_reward_item_activity_sort")
+  @@map("chest_reward_items")
+}
+
+model ChestRedeemCode {
+  id           Int       @id @default(autoincrement())
+  code         String    @unique @db.VarChar(64)
+  keyCount     Int       @default(1)
+  redeemedCount Int      @default(0)
+  active       Boolean   @default(true)
+  expireAt     DateTime?
+  createdBy    Int?
+  redeemedBy   Int?
+  redeemedAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  redeemedUser User?     @relation("ChestRedeemByUser", fields: [redeemedBy], references: [id], onDelete: SetNull)
+  openRecords  ChestOpenRecord[]
+  lastRedeemByAccounts ChestUserAccount[] @relation("ChestAccountLastRedeemCode")
+
+  @@index([active, expireAt], map: "idx_chest_redeem_code_active_expire")
+  @@index([redeemedBy], map: "idx_chest_redeem_code_redeemed_by")
+  @@map("chest_redeem_codes")
+}
+
+model ChestUserAccount {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @unique
+  keyCount  Int      @default(0)
+  lastRedeemCodeId Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lastRedeemCode ChestRedeemCode? @relation("ChestAccountLastRedeemCode", fields: [lastRedeemCodeId], references: [id], onDelete: SetNull)
+
+  @@map("chest_user_accounts")
+}
+
+model ChestOpenRecord {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  costKeys   Int      @default(1)
+  redeemCodeId Int?
+  redeemCode   String?  @db.VarChar(64)
+  verifiedAt DateTime?
+  verifiedBy Int?
+  verifyRemark String? @db.VarChar(255)
+  rewardJson Json?
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  redeemCodeRef ChestRedeemCode? @relation(fields: [redeemCodeId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt], map: "idx_chest_open_record_user_time")
+  @@index([redeemCodeId], map: "idx_chest_open_record_redeem_code")
+  @@map("chest_open_records")
 }
 
 model SystemConfig {

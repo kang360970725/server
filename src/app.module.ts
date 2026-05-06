@@ -27,6 +27,7 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { CouponsModule } from './coupons/coupons.module';
 import { PenaltiesModule } from './penalties/penalties.module';
 import { AppVersionModule } from './app-version/app-version.module';
+import { ChestModule } from './chest/chest.module';
 
 
 @Module({
@@ -51,8 +52,9 @@ import { AppVersionModule } from './app-version/app-version.module';
         NotificationsModule,
         CouponsModule,
         PenaltiesModule,
-        AppVersionModule,
-    ],
+    AppVersionModule,
+    ChestModule,
+  ],
     controllers: [AppController],
     providers: [AppService, PrismaService,
         { provide: APP_GUARD, useClass: JwtAuthGuard },      // 1) 先验 token，挂 req.user
