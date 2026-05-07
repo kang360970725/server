@@ -5,6 +5,9 @@ import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import { Public } from '../auth/decorators/public.decorator';
 
+const CHEST_PAGE = 'chest:page';
+const LEGACY_ADMIN_PAGE = 'system:role:page';
+
 @Controller('chest')
 @UseGuards(JwtAuthGuard)
 export class ChestController {
@@ -105,49 +108,49 @@ export class ChestController {
 
   @Get('admin/config')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminGetConfig() {
     return this.service.getConfig();
   }
 
   @Post('admin/config')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminUpdateConfig(@Body() body: { enabled?: boolean; title?: string; defaultKeyCount?: number }) {
     return this.service.updateConfig(body || {});
   }
 
   @Post('admin/codes/generate')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminGenerateCodes(@Req() req: any, @Body() body: { count: number; keyCount?: number; prefix?: string; expireAt?: string | null }) {
     return this.service.generateCodes(body || ({} as any), Number(req?.user?.userId || 0));
   }
 
   @Post('admin/codes/list')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminListCodes(@Body() body: { page?: number; pageSize?: number; status?: 'UNUSED' | 'USED' | 'ALL'; code?: string; phone?: string }) {
     return this.service.listCodes(body || {});
   }
 
   @Post('admin/codes/redeem')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminRedeemCode(@Body() body: { code: string; userId?: number; phone?: string }) {
     return this.service.redeemCodeByAdmin(body || ({} as any));
   }
 
   @Post('admin/codes/history')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminCodeHistory(@Body() body: { code: string; page?: number; pageSize?: number }) {
     return this.service.getCodeOpenHistory(body || ({} as any));
   }
 
   @Post('admin/codes/history/verify')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminVerifyCodeHistory(
     @Req() req: any,
     @Body() body: { recordId: number; verified: boolean; remark?: string },
@@ -157,14 +160,14 @@ export class ChestController {
 
   @Get('admin/rewards')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminListRewards() {
     return this.service.listRewardItems();
   }
 
   @Post('admin/rewards/save')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminSaveReward(
     @Body()
     body: {
@@ -183,7 +186,7 @@ export class ChestController {
 
   @Post('admin/rewards/delete')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminDeleteReward(@Body() body: { id: number }) {
     return this.service.deleteRewardItem(Number(body?.id || 0));
   }
