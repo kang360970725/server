@@ -683,10 +683,8 @@ export class PenaltiesService {
 
     const beforeAvailable = Number(account.availableBalance || 0);
     const beforeFrozen = Number(account.frozenBalance || 0);
-    if (beforeAvailable < amount) {
-      throw new BadRequestException(`钱包余额不足，当前可用余额 ${beforeAvailable}，罚单金额 ${amount}`);
-    }
-
+    // 业务要求：罚单确认不受“可用余额不足/余额冻结”限制。
+    // 允许可用余额扣减为负数，后续入账/解冻会自然回补。
     const afterAvailable = this.round1(beforeAvailable - amount);
 
     await tx.walletAccount.update({
