@@ -44,6 +44,7 @@ async function main() {
 
         { key: 'settlements:experience:page', name: '结算-体验单页', module: 'settlements', type: PermissionType.PAGE },
         { key: 'settlements:monthly:page', name: '结算-月结页', module: 'settlements', type: PermissionType.PAGE },
+        { key: 'ops:promotion:page', name: '推广运营页', module: 'ops', type: PermissionType.PAGE },
 
         // ====== 你原来的 BUTTON 权限（先保留，避免历史功能/按钮权限丢失）======
         // 项目管理

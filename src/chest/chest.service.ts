@@ -925,6 +925,9 @@ export class ChestService {
       const row = await tx.chestRedeemCode.findUnique({ where: { code } });
       if (!row || !row.active) throw new BadRequestException('兑换码无效');
       if (row.expireAt && row.expireAt.getTime() < Date.now()) throw new BadRequestException('兑换码已过期');
+      if (row.redeemedBy && Number(row.redeemedBy) !== Number(userId)) {
+        throw new BadRequestException('来晚了，没抢到');
+      }
       const total = Number(row?.keyCount || 0);
       const used = Number((row as any)?.redeemedCount || 0);
       const remaining = Math.max(total - used, 0);

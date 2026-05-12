@@ -6,6 +6,7 @@ import { Permissions } from '../auth/decorators/permissions.decorator';
 import { Public } from '../auth/decorators/public.decorator';
 
 const CHEST_PAGE = 'chest:page';
+const OPS_PROMOTION_PAGE = 'ops:promotion:page';
 const LEGACY_ADMIN_PAGE = 'system:role:page';
 
 @Controller('chest')
@@ -134,35 +135,35 @@ export class ChestController {
 
   @Get('admin/config')
   @UseGuards(PermissionsGuard)
-  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
+  @Permissions(OPS_PROMOTION_PAGE, CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminGetConfig() {
     return this.service.getConfig();
   }
 
   @Post('admin/config')
   @UseGuards(PermissionsGuard)
-  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
+  @Permissions(OPS_PROMOTION_PAGE, CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminUpdateConfig(@Body() body: { enabled?: boolean; title?: string; defaultKeyCount?: number }) {
     return this.service.updateConfig(body || {});
   }
 
   @Post('admin/codes/generate')
   @UseGuards(PermissionsGuard)
-  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
+  @Permissions(OPS_PROMOTION_PAGE, CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminGenerateCodes(@Req() req: any, @Body() body: { count: number; keyCount?: number; prefix?: string; expireAt?: string | null }) {
     return this.service.generateCodes(body || ({} as any), Number(req?.user?.userId || 0));
   }
 
   @Post('admin/codes/list')
   @UseGuards(PermissionsGuard)
-  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
+  @Permissions(OPS_PROMOTION_PAGE, CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminListCodes(@Body() body: { page?: number; pageSize?: number; status?: 'UNUSED' | 'USED' | 'ALL'; code?: string; phone?: string }) {
     return this.service.listCodes(body || {});
   }
 
   @Post('admin/promotions/generate')
   @UseGuards(PermissionsGuard)
-  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
+  @Permissions(OPS_PROMOTION_PAGE, CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminGeneratePromo(
     @Req() req: any,
     @Body() body: { codeCount: number; totalKeys: number; prefix?: string; promoPrefix?: string; expireAt?: string | null },
@@ -172,28 +173,28 @@ export class ChestController {
 
   @Post('admin/promotions/list')
   @UseGuards(PermissionsGuard)
-  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
+  @Permissions(OPS_PROMOTION_PAGE, CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminListPromos(@Body() body: { page?: number; pageSize?: number; promoCode?: string }) {
     return this.service.listPromoBundles(body || {});
   }
 
   @Post('admin/codes/redeem')
   @UseGuards(PermissionsGuard)
-  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
+  @Permissions(OPS_PROMOTION_PAGE, CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminRedeemCode(@Body() body: { code: string; userId?: number; phone?: string }) {
     return this.service.redeemCodeByAdmin(body || ({} as any));
   }
 
   @Post('admin/codes/history')
   @UseGuards(PermissionsGuard)
-  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
+  @Permissions(OPS_PROMOTION_PAGE, CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminCodeHistory(@Body() body: { code: string; page?: number; pageSize?: number }) {
     return this.service.getCodeOpenHistory(body || ({} as any));
   }
 
   @Post('admin/codes/history/verify')
   @UseGuards(PermissionsGuard)
-  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
+  @Permissions(OPS_PROMOTION_PAGE, CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminVerifyCodeHistory(
     @Req() req: any,
     @Body() body: { recordId: number; verified: boolean; remark?: string },
@@ -203,14 +204,14 @@ export class ChestController {
 
   @Get('admin/rewards')
   @UseGuards(PermissionsGuard)
-  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
+  @Permissions(OPS_PROMOTION_PAGE, CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminListRewards() {
     return this.service.listRewardItems();
   }
 
   @Post('admin/rewards/save')
   @UseGuards(PermissionsGuard)
-  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
+  @Permissions(OPS_PROMOTION_PAGE, CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminSaveReward(
     @Body()
     body: {
@@ -229,7 +230,7 @@ export class ChestController {
 
   @Post('admin/rewards/delete')
   @UseGuards(PermissionsGuard)
-  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
+  @Permissions(OPS_PROMOTION_PAGE, CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminDeleteReward(@Body() body: { id: number }) {
     return this.service.deleteRewardItem(Number(body?.id || 0));
   }
