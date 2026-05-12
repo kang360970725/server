@@ -106,6 +106,32 @@ export class ChestController {
       .catch((e: any) => this.fail(e?.message || '查询失败'));
   }
 
+  @Public()
+  @Post('public/promo/status')
+  publicPromoStatus(@Body() body: { deviceId: string; promoCode: string; phone?: string }) {
+    return this.service
+      .publicPromoStatus(
+        String(body?.deviceId || ''),
+        String(body?.promoCode || ''),
+        body?.phone ? String(body.phone) : undefined,
+      )
+      .then((data) => this.ok(data))
+      .catch((e: any) => this.fail(e?.message || '查询失败'));
+  }
+
+  @Public()
+  @Post('public/promo/claim')
+  publicPromoClaim(@Body() body: { deviceId: string; promoCode: string; phone?: string }) {
+    return this.service
+      .publicPromoClaim(
+        String(body?.deviceId || ''),
+        String(body?.promoCode || ''),
+        body?.phone ? String(body.phone) : undefined,
+      )
+      .then((data) => this.ok(data))
+      .catch((e: any) => this.fail(e?.message || '来晚了，没抢到'));
+  }
+
   @Get('admin/config')
   @UseGuards(PermissionsGuard)
   @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
@@ -132,6 +158,23 @@ export class ChestController {
   @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
   adminListCodes(@Body() body: { page?: number; pageSize?: number; status?: 'UNUSED' | 'USED' | 'ALL'; code?: string; phone?: string }) {
     return this.service.listCodes(body || {});
+  }
+
+  @Post('admin/promotions/generate')
+  @UseGuards(PermissionsGuard)
+  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
+  adminGeneratePromo(
+    @Req() req: any,
+    @Body() body: { codeCount: number; totalKeys: number; prefix?: string; promoPrefix?: string; expireAt?: string | null },
+  ) {
+    return this.service.generatePromoBundle(body || ({} as any), Number(req?.user?.userId || 0));
+  }
+
+  @Post('admin/promotions/list')
+  @UseGuards(PermissionsGuard)
+  @Permissions(CHEST_PAGE, LEGACY_ADMIN_PAGE)
+  adminListPromos(@Body() body: { page?: number; pageSize?: number; promoCode?: string }) {
+    return this.service.listPromoBundles(body || {});
   }
 
   @Post('admin/codes/redeem')

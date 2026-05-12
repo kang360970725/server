@@ -5,6 +5,8 @@ import * as crypto from 'crypto';
 const CHEST_ACTIVITY_KEY = 'treasure_box_demo';
 const CHEST_TEST_CODE = 'CHEST8888';
 const CHEST_TEST_CODE_ADD_KEYS = 10;
+const CHEST_PROMO_TYPE = 'CHEST_PROMO';
+const CHEST_PROMO_SOLD_OUT_TEXT = '来晚了，没抢到';
 
 @Injectable()
 export class ChestService {
@@ -165,6 +167,46 @@ export class ChestService {
     return s;
   }
 
+  private getDayBounds(now = new Date()) {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(now);
+    end.setHours(23, 59, 59, 999);
+    return { start, end };
+  }
+
+  private normalizeExpireAt(expireAtRaw?: string | null) {
+    if (expireAtRaw) {
+      const d = new Date(expireAtRaw);
+      if (Number.isNaN(d.getTime())) throw new BadRequestException('过期时间无效');
+      d.setHours(23, 59, 59, 999);
+      return d;
+    }
+    const { end } = this.getDayBounds();
+    return end;
+  }
+
+  private distributeKeys(totalKeys: number, codeCount: number) {
+    if (totalKeys < codeCount) throw new BadRequestException('总钥匙数不能小于抽奖码数量');
+    const out = new Array(codeCount).fill(1);
+    let left = totalKeys - codeCount;
+    while (left > 0) {
+      const idx = Math.floor(Math.random() * codeCount);
+      out[idx] += 1;
+      left -= 1;
+    }
+    return out;
+  }
+
+  private isPromoTableMissingError(error: any) {
+    const msg = String(error?.message || '').toLowerCase();
+    return msg.includes('chest_promo_bundles') || msg.includes('chest_promo_bundle_items') || msg.includes('does not exist');
+  }
+
+  private throwPromoTableMissing() {
+    throw new BadRequestException('推广码功能未初始化，请先执行数据库迁移（创建 chest_promo_bundles / chest_promo_bundle_items）');
+  }
+
   async generateCodes(params: { count: number; keyCount?: number; prefix?: string; expireAt?: string | null }, creatorId: number) {
     const count = Math.max(1, Math.min(500, Math.floor(Number(params?.count || 0))));
     const keyCount = Math.max(1, Math.min(999, Math.floor(Number(params?.keyCount || 1))));
@@ -192,6 +234,145 @@ export class ChestService {
       created.push(row);
     }
     return { count: created.length, keyCount, list: created };
+  }
+
+  async generatePromoBundle(
+    params: { codeCount: number; totalKeys: number; prefix?: string; promoPrefix?: string; expireAt?: string | null },
+    creatorId: number,
+  ) {
+    const codeCount = Math.max(1, Math.min(1000, Math.floor(Number(params?.codeCount || 0))));
+    const totalKeys = Math.max(1, Math.min(200000, Math.floor(Number(params?.totalKeys || 0))));
+    if (!codeCount) throw new BadRequestException('codeCount 必填');
+    if (!totalKeys) throw new BadRequestException('totalKeys 必填');
+    if (totalKeys < codeCount) throw new BadRequestException('总钥匙数不能小于抽奖码数量');
+
+    const codePrefix = String(params?.prefix || 'BX').trim().slice(0, 6).toUpperCase();
+    const promoPrefix = String(params?.promoPrefix || 'TG').trim().slice(0, 6).toUpperCase();
+    const expireAt = this.normalizeExpireAt(params?.expireAt);
+    const keyAllocation = this.distributeKeys(totalKeys, codeCount);
+
+    try {
+      return this.prisma.$transaction(async (tx) => {
+      let promoCode = '';
+      let safe = 0;
+      while (!promoCode && safe < 80) {
+        safe += 1;
+        const tryCode = this.randomCode(promoPrefix, 10);
+        // eslint-disable-next-line no-await-in-loop
+        const existed = await tx.chestPromoBundle.findUnique({ where: { promoCode: tryCode }, select: { id: true } });
+        if (!existed?.id) promoCode = tryCode;
+      }
+      if (!promoCode) throw new BadRequestException('推广码生成失败，请重试');
+
+      const bundle = await tx.chestPromoBundle.create({
+        data: {
+          promoCode,
+          promoType: CHEST_PROMO_TYPE,
+          codeCount,
+          totalKeys,
+          expireAt,
+          createdBy: creatorId || null,
+        },
+      });
+
+      const itemList: any[] = [];
+      let createdCodes = 0;
+      let codeTry = 0;
+      while (createdCodes < codeCount && codeTry < codeCount * 50) {
+        codeTry += 1;
+        const code = this.randomCode(codePrefix, 10);
+        // eslint-disable-next-line no-await-in-loop
+        const existed = await tx.chestRedeemCode.findUnique({ where: { code }, select: { id: true } });
+        if (existed?.id) continue;
+        // eslint-disable-next-line no-await-in-loop
+        const redeemCode = await tx.chestRedeemCode.create({
+          data: {
+            code,
+            keyCount: keyAllocation[createdCodes],
+            createdBy: creatorId || null,
+            expireAt,
+          },
+        });
+        itemList.push({
+          bundleId: bundle.id,
+          redeemCodeId: redeemCode.id,
+          redeemCode: redeemCode.code,
+          keyCount: Number(redeemCode.keyCount || 1),
+        });
+        createdCodes += 1;
+      }
+      if (createdCodes !== codeCount) throw new BadRequestException('抽奖码生成失败，请重试');
+      await tx.chestPromoBundleItem.createMany({ data: itemList });
+
+        return {
+          promoCode: bundle.promoCode,
+          promoType: bundle.promoType,
+          codeCount,
+          totalKeys,
+          expireAt: bundle.expireAt,
+        };
+      });
+    } catch (e: any) {
+      if (this.isPromoTableMissingError(e)) this.throwPromoTableMissing();
+      throw e;
+    }
+  }
+
+  async listPromoBundles(params: { page?: number; pageSize?: number; promoCode?: string }) {
+    const page = Math.max(1, Number(params?.page || 1));
+    const pageSize = Math.max(1, Math.min(100, Number(params?.pageSize || 20)));
+    const skip = (page - 1) * pageSize;
+    const promoCode = String(params?.promoCode || '').trim().toUpperCase();
+    const where: any = {};
+    if (promoCode) where.promoCode = { contains: promoCode };
+
+    let total = 0;
+    let list: any[] = [];
+    try {
+      [total, list] = await this.prisma.$transaction([
+        this.prisma.chestPromoBundle.count({ where }),
+        this.prisma.chestPromoBundle.findMany({
+          where,
+          orderBy: { id: 'desc' },
+          skip,
+          take: pageSize,
+          include: { _count: { select: { items: true } } },
+        }),
+      ]);
+    } catch (e: any) {
+      if (this.isPromoTableMissingError(e)) this.throwPromoTableMissing();
+      throw e;
+    }
+    const ids = list.map((i: any) => Number(i.id)).filter(Boolean);
+    const assignedRows = ids.length
+      ? await this.prisma.chestPromoBundleItem.groupBy({
+        by: ['bundleId'],
+        where: { bundleId: { in: ids }, assignedAt: { not: null } },
+        _count: { _all: true },
+      })
+      : [];
+    const assignedMap = new Map<number, number>(
+      assignedRows.map((r: any) => [Number(r.bundleId), Number(r?._count?._all || 0)]),
+    );
+    const now = Date.now();
+    const mapped = list.map((row: any) => {
+      const assignedCount = Number(assignedMap.get(Number(row.id)) || 0);
+      const leftCodes = Math.max(Number(row.codeCount || 0) - assignedCount, 0);
+      return {
+        id: row.id,
+        promoCode: row.promoCode,
+        promoType: row.promoType,
+        codeCount: row.codeCount,
+        totalKeys: row.totalKeys,
+        assignedCount,
+        leftCodes,
+        active: row.active,
+        expireAt: row.expireAt,
+        isExpired: new Date(row.expireAt).getTime() < now,
+        createdAt: row.createdAt,
+      };
+    });
+    return { total, page, pageSize, list: mapped };
   }
 
   async listCodes(params: { page?: number; pageSize?: number; status?: 'UNUSED' | 'USED' | 'ALL'; code?: string; phone?: string }) {
@@ -563,16 +744,25 @@ export class ChestService {
     const phone = this.guestPhoneByDevice(deviceId);
     const existed = await this.prisma.user.findUnique({ where: { phone }, select: { id: true } });
     if (existed?.id) return Number(existed.id);
-    const created = await this.prisma.user.create({
-      data: {
-        phone,
-        password: 'guest-no-login',
-        name: `访客${phone.slice(-4)}`,
-        userType: 'REGISTERED_USER' as any,
-      },
-      select: { id: true },
-    });
-    return Number(created.id);
+    try {
+      const created = await this.prisma.user.create({
+        data: {
+          phone,
+          password: 'guest-no-login',
+          name: `访客${phone.slice(-4)}`,
+          userType: 'REGISTERED_USER' as any,
+        },
+        select: { id: true },
+      });
+      return Number(created.id);
+    } catch (e: any) {
+      const msg = String(e?.message || '').toLowerCase();
+      const isPhoneUniqueConflict = msg.includes('users_phone_key') || msg.includes('unique constraint');
+      if (!isPhoneUniqueConflict) throw e;
+      const row = await this.prisma.user.findUnique({ where: { phone }, select: { id: true } });
+      if (row?.id) return Number(row.id);
+      throw e;
+    }
   }
 
   private async ensureUserByDeviceOrPhone(deviceId: string, phoneRaw?: string) {
@@ -808,5 +998,112 @@ export class ChestService {
         rampMaxExtra: i.rampMaxExtra ?? null,
       })),
     };
+  }
+
+  async publicPromoStatus(deviceId: string, promoCodeRaw: string, phone?: string) {
+    const promoCode = String(promoCodeRaw || '').trim().toUpperCase();
+    if (!promoCode) throw new BadRequestException('推广码不能为空');
+    await this.ensureUserByDeviceOrPhone(deviceId, phone);
+    let bundle: any = null;
+    try {
+      bundle = await this.prisma.chestPromoBundle.findUnique({
+        where: { promoCode },
+        select: { id: true, promoCode: true, active: true, expireAt: true, codeCount: true },
+      });
+    } catch (e: any) {
+      if (this.isPromoTableMissingError(e)) this.throwPromoTableMissing();
+      throw e;
+    }
+    if (!bundle?.id) return { promoCode, status: 'SOLD_OUT', message: CHEST_PROMO_SOLD_OUT_TEXT, leftCodes: 0 };
+    const now = Date.now();
+    if (!bundle.active || new Date(bundle.expireAt).getTime() < now) {
+      return { promoCode, status: 'SOLD_OUT', message: CHEST_PROMO_SOLD_OUT_TEXT, leftCodes: 0 };
+    }
+    const assignedCount = await this.prisma.chestPromoBundleItem.count({
+      where: { bundleId: bundle.id, assignedAt: { not: null } },
+    });
+    const leftCodes = Math.max(Number(bundle.codeCount || 0) - assignedCount, 0);
+    if (leftCodes <= 0) return { promoCode, status: 'SOLD_OUT', message: CHEST_PROMO_SOLD_OUT_TEXT, leftCodes: 0 };
+    return { promoCode, status: 'AVAILABLE', message: 'ok', leftCodes };
+  }
+
+  async publicPromoClaim(deviceId: string, promoCodeRaw: string, phone?: string) {
+    const promoCode = String(promoCodeRaw || '').trim().toUpperCase();
+    const normalizedDeviceId = String(deviceId || '').trim();
+    if (!normalizedDeviceId) throw new BadRequestException('deviceId 不能为空');
+    if (!promoCode) throw new BadRequestException('推广码不能为空');
+    const userId = await this.ensureUserByDeviceOrPhone(normalizedDeviceId, phone);
+
+    try {
+      return this.prisma.$transaction(async (tx) => {
+      const bundle = await tx.chestPromoBundle.findUnique({
+        where: { promoCode },
+        select: { id: true, promoCode: true, promoType: true, active: true, expireAt: true },
+      });
+      if (!bundle?.id) throw new BadRequestException(CHEST_PROMO_SOLD_OUT_TEXT);
+      if (!bundle.active || new Date(bundle.expireAt).getTime() < Date.now()) {
+        throw new BadRequestException(CHEST_PROMO_SOLD_OUT_TEXT);
+      }
+
+      const alreadyInBundle = await tx.chestPromoBundleItem.findFirst({
+        where: {
+          bundleId: bundle.id,
+          assignedAt: { not: null },
+          OR: [{ assignedUserId: userId }, { assignedDeviceId: normalizedDeviceId }],
+        },
+        select: { id: true, redeemCode: true, keyCount: true },
+      });
+      if (alreadyInBundle?.id) {
+        return {
+          promoCode: bundle.promoCode,
+          redeemCode: alreadyInBundle.redeemCode,
+          keyCount: alreadyInBundle.keyCount,
+          message: 'ok',
+        };
+      }
+
+      const { start, end } = this.getDayBounds();
+      const sameDayClaim = await tx.chestPromoBundleItem.findFirst({
+        where: {
+          assignedAt: { gte: start, lte: end },
+          bundle: { promoType: bundle.promoType },
+          OR: [{ assignedUserId: userId }, { assignedDeviceId: normalizedDeviceId }],
+        },
+        select: { id: true },
+      });
+      if (sameDayClaim?.id) throw new BadRequestException(CHEST_PROMO_SOLD_OUT_TEXT);
+
+      let assigned: any = null;
+      for (let i = 0; i < 20; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const row = await tx.chestPromoBundleItem.findFirst({
+          where: { bundleId: bundle.id, assignedAt: null },
+          orderBy: { id: 'asc' },
+          select: { id: true, redeemCode: true, keyCount: true },
+        });
+        if (!row?.id) break;
+        // eslint-disable-next-line no-await-in-loop
+        const updated = await tx.chestPromoBundleItem.updateMany({
+          where: { id: row.id, assignedAt: null },
+          data: { assignedAt: new Date(), assignedUserId: userId, assignedDeviceId: normalizedDeviceId },
+        });
+        if (updated.count > 0) {
+          assigned = row;
+          break;
+        }
+      }
+      if (!assigned?.id) throw new BadRequestException(CHEST_PROMO_SOLD_OUT_TEXT);
+
+        return {
+          promoCode: bundle.promoCode,
+          redeemCode: assigned.redeemCode,
+          keyCount: assigned.keyCount,
+          message: 'ok',
+        };
+      });
+    } catch (e: any) {
+      if (this.isPromoTableMissingError(e)) this.throwPromoTableMissing();
+      throw e;
+    }
   }
 }

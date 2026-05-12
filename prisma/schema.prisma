@@ -117,12 +117,52 @@ model User {
   chestRedeemedCodes       ChestRedeemCode[] @relation("ChestRedeemByUser")
   chestAccount             ChestUserAccount?
   chestOpenRecords         ChestOpenRecord[]
+  chestPromoClaims         ChestPromoBundleItem[] @relation("ChestPromoClaimUser")
 
   @@index([workStatus])
   @@index([workMode, offlineJoinedAt])
   @@index([rating], map: "users_rating_fkey")
   @@index([roleId], map: "users_roleId_fkey")
   @@map("users")
+}
+
+model ChestPromoBundle {
+  id         Int      @id @default(autoincrement())
+  promoCode  String   @unique @db.VarChar(64)
+  promoType  String   @default("CHEST_PROMO") @db.VarChar(32)
+  codeCount  Int
+  totalKeys  Int
+  active     Boolean  @default(true)
+  expireAt   DateTime
+  createdBy  Int?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  items      ChestPromoBundleItem[]
+
+  @@index([promoType, active, expireAt], map: "idx_chest_promo_bundle_type_status")
+  @@map("chest_promo_bundles")
+}
+
+model ChestPromoBundleItem {
+  id               Int      @id @default(autoincrement())
+  bundleId         Int
+  redeemCodeId     Int
+  redeemCode       String   @db.VarChar(64)
+  keyCount         Int      @default(1)
+  assignedUserId   Int?
+  assignedDeviceId String?  @db.VarChar(128)
+  assignedAt       DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  bundle           ChestPromoBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  redeemCodeRef    ChestRedeemCode  @relation(fields: [redeemCodeId], references: [id], onDelete: Cascade)
+  assignedUser     User?            @relation("ChestPromoClaimUser", fields: [assignedUserId], references: [id], onDelete: SetNull)
+
+  @@index([bundleId, assignedAt], map: "idx_chest_promo_item_bundle_assigned")
+  @@index([assignedUserId, assignedAt], map: "idx_chest_promo_item_user_day")
+  @@index([assignedDeviceId, assignedAt], map: "idx_chest_promo_item_device_day")
+  @@index([redeemCode], map: "idx_chest_promo_item_redeem_code")
+  @@map("chest_promo_bundle_items")
 }
 
 model ChestActivityConfig {
@@ -180,6 +220,7 @@ model ChestRedeemCode {
   redeemedUser User?     @relation("ChestRedeemByUser", fields: [redeemedBy], references: [id], onDelete: SetNull)
   openRecords  ChestOpenRecord[]
   lastRedeemByAccounts ChestUserAccount[] @relation("ChestAccountLastRedeemCode")
+  promoBundleItems ChestPromoBundleItem[]
 
   @@index([active, expireAt], map: "idx_chest_redeem_code_active_expire")
   @@index([redeemedBy], map: "idx_chest_redeem_code_redeemed_by")
