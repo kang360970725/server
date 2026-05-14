@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>单局赏金赛面板</title>
+  <style>
+    :root {
+      --bg: transparent;
+      --panel: rgba(22, 20, 18, 0.96);
+      --line: rgba(255, 193, 66, 0.86);
+      --accent: #ff3a35;
+      --danger: #ff3b5f;
+      --warn: #ffb020;
+      --ok: #3cff9f;
+      --text: #f3f7ff;
+      --muted: #9ab0d0;
+    }
+
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      height: 100%;
+      overflow: hidden;
+    }
+
+    .stage {
+      position: fixed;
+      right: 18px;
+      top: 18px;
+      width: 500px;
+      max-width: calc(100vw - 20px);
+      border: 1px solid var(--line);
+      border-radius: 30px;
+      background: var(--panel);
+      box-shadow:
+        0 20px 48px rgba(0, 0, 0, 0.55),
+        0 0 22px rgba(255, 193, 66, 0.34),
+        inset 0 0 24px rgba(255, 193, 66, 0.08);
+      backdrop-filter: blur(6px);
+      padding: 14px;
+    }
+
+    .head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .title {
+      font-size: 40px;
+      font-weight: 800;
+      letter-spacing: 1px;
+      text-shadow: 0 0 16px rgba(255, 199, 83, 0.5);
+    }
+    .status { display: none; }
+
+    .card {
+      border-radius: 18px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+      background: rgba(8, 14, 30, 0.6);
+    }
+    .combo-card {
+      padding-top: 16px;
+      padding-bottom: 20px;
+      background: rgba(8, 14, 30, 0.78);
+      box-shadow: inset 0 0 20px rgba(255, 196, 67, 0.08);
+    }
+    .label {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    .main-label {
+      font-size: 38px;
+      color: #fff7da;
+      margin-bottom: 8px;
+      text-align: center;
+      font-weight: 800;
+      letter-spacing: 2px;
+      text-shadow: 0 0 12px rgba(255, 208, 99, 0.34);
+    }
+
+    .time {
+      font-size: 94px;
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: 2px;
+      color: var(--accent);
+      text-shadow: 0 0 30px rgba(255, 58, 53, 0.55);
+      text-align: center;
+    }
+
+    .bounty-wrap {
+      position: relative;
+      overflow: hidden;
+      margin-top: 12px;
+      border-radius: 12px;
+    }
+    .bounty {
+      font-size: 112px;
+      font-weight: 900;
+      color: #ffdc00;
+      text-shadow: 0 0 28px rgba(255, 220, 0, 0.62);
+      text-align: center;
+      transition: transform 0.18s ease, color 0.25s ease;
+    }
+    .bounty.hit {
+      transform: scale(1.08);
+      color: #ff9e2c;
+      text-shadow: 0 0 26px rgba(255, 59, 95, 0.55);
+    }
+    .minus-fx {
+      position: absolute;
+      left: 50%;
+      top: 52%;
+      color: #ff2a4d;
+      font-size: 46px;
+      font-weight: 800;
+      opacity: 0;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      text-shadow: 0 0 18px rgba(255, 42, 77, 0.82);
+      animation: drop 0.9s cubic-bezier(.18,.75,.36,.98) forwards;
+    }
+    @keyframes drop {
+      0% { opacity: 1; transform: translate(-50%, -50%) scale(0.75); }
+      20% { opacity: 1; transform: translate(-50%, -40%) scale(1.12); }
+      100% { opacity: 0; transform: translate(-50%, 95px) scale(1); }
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .row-3 {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    input {
+      width: 100%;
+      height: 34px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: rgba(6, 11, 24, 0.7);
+      color: var(--text);
+      padding: 0 10px;
+      font-weight: 600;
+    }
+    button {
+      height: 36px;
+      border: 0;
+      border-radius: 9px;
+      cursor: pointer;
+      font-weight: 800;
+      color: #0a1020;
+      background: linear-gradient(135deg, #00e0ff, #5ec7ff);
+    }
+    button.secondary {
+      background: linear-gradient(135deg, #ffc14d, #ffe17f);
+    }
+    button.danger {
+      background: linear-gradient(135deg, #ff5075, #ff7f65);
+      color: #fff;
+    }
+
+    .tips {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 4px;
+      line-height: 1.5;
+    }
+
+    .zero {
+      animation: zeroPulse 0.8s infinite alternate;
+      border-color: rgba(255, 59, 95, 0.55);
+      box-shadow: inset 0 0 32px rgba(255, 59, 95, 0.22), 0 0 26px rgba(255, 59, 95, 0.28);
+    }
+    .zero .bounty {
+      color: #ff3b5f;
+      text-shadow: 0 0 18px rgba(255, 59, 95, 0.65);
+    }
+    .zero-banner {
+      margin-top: 8px;
+      font-size: 26px;
+      font-weight: 900;
+      color: #ff3b5f;
+      text-align: center;
+      letter-spacing: 2px;
+      text-shadow: 0 0 20px rgba(255, 59, 95, 0.6);
+      display: none;
+    }
+    .zero .zero-banner { display: block; }
+    @keyframes zeroPulse {
+      from { transform: scale(1); }
+      to { transform: scale(1.01); }
+    }
+  </style>
+</head>
+<body>
+  <section class="stage" id="stage">
+    <div class="head">
+      <div class="title"></div>
+      <div class="status" id="statusText">等待开始</div>
+    </div>
+
+    <div class="card combo-card" id="timerCard">
+      <div class="main-label">挑战倒计时</div>
+      <div class="time" id="timeText">12:00</div>
+      <div class="bounty-wrap" id="bountyWrap">
+        <div class="main-label">当前赏金</div>
+        <div class="bounty" id="bountyText">¥ 1000</div>
+        <div class="zero-banner">赏金归零</div>
+      </div>
+    </div>
+
+    <div class="card" id="configCard">
+      <div class="label">参数设置</div>
+      <div class="row-3">
+        <input id="minuteInput" type="number" min="0" value="12" placeholder="分钟">
+        <input id="secondInput" type="number" min="0" max="59" value="0" placeholder="秒">
+        <button id="applyTimeBtn" class="secondary">设定时间</button>
+      </div>
+      <div class="row">
+        <input id="startBountyInput" type="number" min="0" value="5000" placeholder="起始赏金">
+        <input id="tickDownInput" type="number" min="0" value="8" step="0.1" placeholder="每秒减少">
+      </div>
+      <div class="row">
+        <input id="hotkeyCutInput" type="number" min="0" value="2000" step="1" placeholder="空格扣除">
+        <button id="resetAllBtn" class="danger">重置全局</button>
+      </div>
+      <div class="controls">
+        <button id="startBtn">开始</button>
+        <button id="pauseBtn" class="secondary">暂停</button>
+      </div>
+      <div class="tips">
+        快捷键：按 <b>空格</b> 一次性扣除固定赏金。<br />
+        <b>S</b> 开始 / 继续，<b>Ctrl</b> 暂停，<b>R</b> 重置全局。<br />
+      </div>
+    </div>
+  </section>
+
+  <script>
+    (function () {
+      var timerSec = 12 * 60;
+      var running = false;
+      var bounty = 5000;
+      var timerId = null;
+
+      var statusText = document.getElementById('statusText');
+      var timeText = document.getElementById('timeText');
+      var bountyText = document.getElementById('bountyText');
+      var bountyWrap = document.getElementById('bountyWrap');
+      var configCard = document.getElementById('configCard');
+      var timerCard = document.getElementById('timerCard');
+
+      var minuteInput = document.getElementById('minuteInput');
+      var secondInput = document.getElementById('secondInput');
+      var startBountyInput = document.getElementById('startBountyInput');
+      var tickDownInput = document.getElementById('tickDownInput');
+      var hotkeyCutInput = document.getElementById('hotkeyCutInput');
+
+      function clampNumber(v, d) {
+        var n = Number(v);
+        return Number.isFinite(n) ? n : d;
+      }
+
+      function formatTime(sec) {
+        var s = Math.max(0, Math.floor(sec));
+        var m = Math.floor(s / 60);
+        var rs = s % 60;
+        return String(m).padStart(2, '0') + ':' + String(rs).padStart(2, '0');
+      }
+
+      function formatMoney(v) {
+        return '¥ ' + Number(Math.max(0, v)).toFixed(1).replace(/\.0$/, '');
+      }
+
+      function refreshUI() {
+        timeText.textContent = formatTime(timerSec);
+        bountyText.textContent = formatMoney(bounty);
+        statusText.textContent = running ? '进行中' : '已暂停';
+        if (timerCard) timerCard.style.display = 'block';
+        if (bountyWrap) bountyWrap.style.display = 'block';
+        if (configCard) configCard.style.display = 'block';
+        if (bounty <= 0) {
+          bountyWrap.classList.add('zero');
+          statusText.textContent = '赏金归零';
+        } else {
+          bountyWrap.classList.remove('zero');
+        }
+      }
+
+      function hitFx(cutAmount) {
+        bountyText.classList.add('hit');
+        setTimeout(function () { bountyText.classList.remove('hit'); }, 150);
+
+        var fx = document.createElement('div');
+        fx.className = 'minus-fx';
+        fx.textContent = '- ' + Number(cutAmount).toFixed(1).replace(/\.0$/, '');
+        bountyWrap.appendChild(fx);
+        setTimeout(function () { fx.remove(); }, 900);
+      }
+
+      function cutBounty(amount) {
+        if (bounty <= 0) return;
+        var cut = Math.max(0, clampNumber(amount, 0));
+        if (!cut) return;
+        bounty = Math.max(0, Number((bounty - cut).toFixed(2)));
+        hitFx(cut);
+        refreshUI();
+      }
+
+      function tick() {
+        if (!running) return;
+        if (timerSec > 0) timerSec -= 1;
+        var tickDown = Math.max(0, clampNumber(tickDownInput.value, 0));
+        cutBounty(tickDown);
+        if (timerSec <= 0) {
+          running = false;
+          statusText.textContent = '时间到';
+        }
+        refreshUI();
+      }
+
+      function startLoop() {
+        if (timerId) clearInterval(timerId);
+        timerId = setInterval(tick, 1000);
+      }
+
+      document.getElementById('applyTimeBtn').addEventListener('click', function () {
+        var m = Math.max(0, Math.floor(clampNumber(minuteInput.value, 0)));
+        var s = Math.max(0, Math.min(59, Math.floor(clampNumber(secondInput.value, 0))));
+        timerSec = m * 60 + s;
+        refreshUI();
+      });
+
+      document.getElementById('resetAllBtn').addEventListener('click', function () {
+        var m = Math.max(0, Math.floor(clampNumber(minuteInput.value, 12)));
+        var s = Math.max(0, Math.min(59, Math.floor(clampNumber(secondInput.value, 0))));
+        timerSec = m * 60 + s;
+        bounty = Math.max(0, clampNumber(startBountyInput.value, 5000));
+        running = false;
+        refreshUI();
+      });
+
+      document.getElementById('startBtn').addEventListener('click', function () {
+        if (timerSec <= 0) return;
+        if (bounty <= 0) return;
+        running = true;
+        refreshUI();
+      });
+
+      document.getElementById('pauseBtn').addEventListener('click', function () {
+        running = false;
+        refreshUI();
+      });
+
+      document.addEventListener('keydown', function (e) {
+        var tag = (document.activeElement && document.activeElement.tagName) || '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+        if (e.key === 's' || e.key === 'S') {
+          e.preventDefault();
+          if (timerSec > 0 && bounty > 0) {
+            running = true;
+            refreshUI();
+          }
+          return;
+        }
+
+        if (e.key === 'r' || e.key === 'R') {
+          e.preventDefault();
+          var m = Math.max(0, Math.floor(clampNumber(minuteInput.value, 12)));
+          var s = Math.max(0, Math.min(59, Math.floor(clampNumber(secondInput.value, 0))));
+          timerSec = m * 60 + s;
+          bounty = Math.max(0, clampNumber(startBountyInput.value, 5000));
+          running = false;
+          refreshUI();
+          return;
+        }
+
+        if (e.key === 'Control') {
+          e.preventDefault();
+          running = false;
+          refreshUI();
+          return;
+        }
+
+        if (e.code !== 'Space') return;
+        e.preventDefault();
+        var hotCut = Math.max(0, clampNumber(hotkeyCutInput.value, 0));
+        cutBounty(hotCut);
+      });
+
+      refreshUI();
+      startLoop();
+    })();
+  </script>
+</body>
+</html>
