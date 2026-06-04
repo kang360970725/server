@@ -1,0 +1,703 @@
+import { BadRequestException, Body, Controller, Get, Param, ParseIntPipe, Post, Query, Req } from '@nestjs/common';
+import { OrderStatus } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import { OrdersService } from '../orders/orders.service';
+import { miniOk } from './mini.response';
+import { ApiBearerAuth, ApiBody, ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { Public } from '../auth/decorators/public.decorator';
+import { WechatPayService } from './wechat-pay.service';
+import { getWechatOrderNotifyUrlFromConfig } from './wechat-callback.util';
+import { SystemConfigService } from '../system-config/system-config.service';
+import { MemberService } from '../member/member.service';
+
+@ApiTags('mini-orders')
+@ApiBearerAuth()
+@Controller('mini/orders')
+export class MiniOrdersController {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly ordersService: OrdersService,
+    private readonly wechatPayService: WechatPayService,
+    private readonly systemConfigService: SystemConfigService,
+    private readonly memberService: MemberService,
+  ) {}
+
+  private ownOrderWhere(uid: number, id?: number) {
+    return {
+      ...(id ? { id } : {}),
+      OR: [
+        { customerUserId: uid },
+        { dispatcherId: uid },
+      ],
+    } as any;
+  }
+
+  private buildPaymentNo(prefix: string, orderId: number) {
+    const ts = Date.now();
+    return `${prefix}_${orderId}_${ts}`;
+  }
+
+  private buildWechatPaymentNo(orderId: number) {
+    const ts = Date.now();
+    const suffix = Math.random().toString(36).slice(2, 8).toUpperCase();
+    return `WX_${orderId}_${ts}_${suffix}`;
+  }
+
+  private async applyWechatPaymentSuccess(
+    orderId: number,
+    paymentRef: { id: number | null; orderId: number },
+    decrypted: any,
+  ) {
+    const paidFen = Number(decrypted?.amount?.payer_total ?? 0);
+    return this.prisma.$transaction(async (tx) => {
+      const payment = paymentRef.id
+        ? await tx.orderPayment.update({
+            where: { id: paymentRef.id },
+            data: {
+              status: 'SUCCESS',
+              amount: paidFen > 0 ? Number((paidFen / 100).toFixed(2)) : 0,
+              prepayId: String(decrypted?.prepay_id || ''),
+              transactionId: String(decrypted?.transaction_id || ''),
+              payerOpenid: String(decrypted?.payer?.openid || ''),
+              notifyRaw: decrypted,
+              paidAt: new Date(),
+            },
+            select: { id: true },
+          })
+        : await tx.orderPayment.upsert({
+            where: { paymentNo: String(decrypted?.out_trade_no || '') },
+            create: {
+              orderId,
+              paymentNo: String(decrypted?.out_trade_no || ''),
+              channel: 'WECHAT',
+              status: 'SUCCESS',
+              amount: paidFen > 0 ? Number((paidFen / 100).toFixed(2)) : 0,
+              prepayId: String(decrypted?.prepay_id || ''),
+              transactionId: String(decrypted?.transaction_id || ''),
+              payerOpenid: String(decrypted?.payer?.openid || ''),
+              notifyRaw: decrypted,
+              paidAt: new Date(),
+            },
+            update: {
+              status: 'SUCCESS',
+              amount: paidFen > 0 ? Number((paidFen / 100).toFixed(2)) : 0,
+              prepayId: String(decrypted?.prepay_id || ''),
+              transactionId: String(decrypted?.transaction_id || ''),
+              payerOpenid: String(decrypted?.payer?.openid || ''),
+              notifyRaw: decrypted,
+              paidAt: new Date(),
+            },
+            select: { id: true },
+          });
+
+      return tx.order.update({
+        where: { id: orderId },
+        data: {
+          isPaid: true,
+          payStatus: 'SUCCESS',
+          paymentTime: new Date(),
+          paidAmount: paidFen > 0 ? Number((paidFen / 100).toFixed(2)) : undefined,
+          latestPaymentId: payment.id,
+        },
+        select: {
+          id: true,
+          isPaid: true,
+          payStatus: true,
+          paidAmount: true,
+          latestPaymentId: true,
+        },
+      });
+    });
+  }
+
+  @Get()
+  @ApiOperation({ summary: '订单列表（当前用户）' })
+  @ApiQuery({ name: 'page', required: false, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, example: 20 })
+  @ApiQuery({ name: 'status', required: false, enum: OrderStatus })
+  @ApiOkResponse({
+    schema: {
+      example: {
+        code: 0,
+        message: 'ok',
+        data: {
+          list: [
+            {
+              id: 1001,
+              autoSerial: 'PW202605101024',
+              status: 'WAIT_ASSIGN',
+              paidAmount: '128.00',
+              createdAt: '2026-05-14T01:00:00.000Z',
+              project: { id: 1, name: '王者荣耀陪玩' },
+            },
+          ],
+          total: 1,
+          page: 1,
+          limit: 20,
+          totalPages: 1,
+        },
+      },
+    },
+  })
+  async list(
+    @Req() req: any,
+    @Query('page') pageRaw?: string,
+    @Query('limit') limitRaw?: string,
+    @Query('status') status?: OrderStatus,
+  ) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    const page = Math.max(1, Number(pageRaw ?? 1));
+    const limit = Math.min(50, Math.max(1, Number(limitRaw ?? 20)));
+
+    const where: any = this.ownOrderWhere(uid);
+    if (status) where.status = status;
+
+    const [list, total] = await Promise.all([
+      this.prisma.order.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        select: {
+          id: true,
+          autoSerial: true,
+          status: true,
+          payStatus: true,
+          isPaid: true,
+          receivableAmount: true,
+          paidAmount: true,
+          createdAt: true,
+          paymentTime: true,
+          latestPayment: {
+            select: {
+              amount: true,
+              status: true,
+            },
+          },
+          project: { select: { id: true, name: true } },
+        },
+      }),
+      this.prisma.order.count({ where }),
+    ]);
+
+    return miniOk({
+      list,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    });
+  }
+
+  @Get(':id')
+  @ApiOperation({ summary: '订单详情（当前用户）' })
+  @ApiParam({ name: 'id', example: 1001 })
+  @ApiOkResponse({
+    schema: {
+      example: { code: 0, message: 'ok', data: { id: 1001, autoSerial: 'PW202605101024' } },
+    },
+  })
+  async detail(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    const own = await this.prisma.order.findFirst({
+      where: this.ownOrderWhere(uid, id),
+      select: {
+        id: true,
+        isPaid: true,
+        latestPayment: { select: { channel: true, status: true } },
+      },
+    });
+    if (!own) throw new BadRequestException('订单不存在或无权限访问');
+
+    const detail = await this.ordersService.getOrderDetail(id);
+    return miniOk(detail);
+  }
+
+  @Post('create')
+  @ApiOperation({ summary: '创建订单' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['projectId', 'paidAmount'],
+      properties: {
+        projectId: { type: 'number', example: 1 },
+        paidAmount: { type: 'number', example: 128 },
+        receivableAmount: { type: 'number', example: 128 },
+        orderQuantity: { type: 'number', example: 1 },
+        customerGameId: { type: 'string', example: '猫猫玩家' },
+        inviter: { type: 'string', example: '邀请码' },
+        customClubRate: { type: 'number', example: 0.1 },
+        isGifted: { type: 'boolean', example: false },
+        isPaid: { type: 'boolean', example: false },
+        userCouponId: { type: 'number', example: 12 },
+      },
+    },
+  })
+  @ApiOkResponse({
+    schema: {
+      example: { code: 0, message: '下单成功', data: { id: 1001, autoSerial: 'PW202605101024' } },
+    },
+  })
+  async create(@Req() req: any, @Body() body: any) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    await this.memberService.assertMiniPhoneBound(uid);
+    const payload = {
+      projectId: Number(body?.projectId),
+      receivableAmount: Number(body?.receivableAmount ?? body?.paidAmount ?? 0),
+      paidAmount: Number(body?.paidAmount ?? 0),
+      orderQuantity: Number(body?.orderQuantity ?? 1),
+      customerGameId: body?.customerGameId ? String(body.customerGameId) : undefined,
+      inviter: body?.inviter ? String(body.inviter) : undefined,
+      customClubRate: body?.customClubRate == null ? undefined : Number(body.customClubRate),
+      isGifted: Boolean(body?.isGifted),
+      isPaid: Boolean(body?.isPaid),
+      userCouponId: body?.userCouponId == null ? undefined : Number(body.userCouponId),
+    };
+
+    if (!payload.projectId) throw new BadRequestException('projectId 必填');
+    if (payload.paidAmount < 0) throw new BadRequestException('paidAmount 不能小于0');
+    if (payload.orderQuantity < 1) throw new BadRequestException('orderQuantity 最小为1');
+
+    const order = await this.ordersService.createOrder(payload as any, uid, {
+      scene: 'MINIAPP',
+      dispatcherId: null,
+      customerUserId: uid,
+    });
+    return miniOk(order, '下单成功');
+  }
+
+  @Post(':id/cancel')
+  @ApiOperation({ summary: '取消订单' })
+  @ApiParam({ name: 'id', example: 1001 })
+  @ApiOkResponse({
+    schema: {
+      example: { code: 0, message: '订单已取消', data: { success: true } },
+    },
+  })
+  async cancel(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: any) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    const own = await this.prisma.order.findFirst({
+      where: this.ownOrderWhere(uid, id),
+      select: {
+        id: true,
+        isPaid: true,
+        latestPayment: { select: { channel: true, status: true } },
+      },
+    });
+    if (!own) throw new BadRequestException('订单不存在或无权限操作');
+    const data = await this.ordersService.cancelOrder(id, uid, body?.remark ? String(body.remark) : undefined);
+    return miniOk(data, '订单已取消');
+  }
+
+  @Post(':id/pay-confirm')
+  @ApiOperation({ summary: '确认支付（业务确认）' })
+  @ApiParam({ name: 'id', example: 1001 })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['paidAmount'],
+      properties: {
+        paidAmount: { type: 'number', example: 128 },
+      },
+    },
+  })
+  @ApiOkResponse({
+    schema: {
+      example: {
+        code: 0,
+        message: '支付确认成功',
+        data: {
+          id: 1001,
+          autoSerial: 'PW202605101024',
+          isPaid: true,
+          paidAmount: '128.00',
+          paymentTime: '2026-05-14T03:00:00.000Z',
+        },
+      },
+    },
+  })
+  async payConfirm(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: any) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    const own = await this.prisma.order.findFirst({
+      where: this.ownOrderWhere(uid, id),
+      select: { id: true, isPaid: true },
+    });
+    if (!own) throw new BadRequestException('订单不存在或无权限操作');
+
+    const paidAmount = Number(body?.paidAmount ?? 0);
+    if (!Number.isFinite(paidAmount) || paidAmount < 0) {
+      throw new BadRequestException('paidAmount 非法');
+    }
+
+    const data = await this.prisma.$transaction(async (tx) => {
+      const payment = await tx.orderPayment.create({
+        data: {
+          orderId: id,
+          paymentNo: this.buildPaymentNo('BAL', id),
+          channel: 'BALANCE',
+          status: 'SUCCESS',
+          amount: paidAmount,
+          paidAt: new Date(),
+        },
+        select: { id: true },
+      });
+      return tx.order.update({
+        where: { id },
+        data: {
+          isPaid: true,
+          payStatus: 'SUCCESS',
+          paidAmount,
+          paymentTime: new Date(),
+          latestPaymentId: payment.id,
+        },
+        select: {
+          id: true,
+          autoSerial: true,
+          isPaid: true,
+          payStatus: true,
+          paidAmount: true,
+          paymentTime: true,
+        },
+      });
+    });
+    return miniOk(data, '支付确认成功');
+  }
+
+  @Post(':id/wechat-prepay')
+  @ApiOperation({ summary: '微信支付预下单（JSAPI）' })
+  async wechatPrepay(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: any) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    const order = await this.prisma.order.findFirst({
+      where: this.ownOrderWhere(uid, id),
+      select: {
+        id: true,
+        autoSerial: true,
+        paidAmount: true,
+        isPaid: true,
+        status: true,
+        project: { select: { name: true } },
+        latestPayment: {
+          select: {
+            id: true,
+            paymentNo: true,
+            status: true,
+            amount: true,
+            payerOpenid: true,
+            prepayId: true,
+          },
+        },
+      },
+    });
+    if (!order) throw new BadRequestException('订单不存在或无权限操作');
+    if (order.isPaid) {
+      return miniOk({
+        orderId: id,
+        alreadyPaid: true,
+        isPaid: true,
+      }, '该订单已支付');
+    }
+    const latestPayment = order.latestPayment;
+    const payerOpenid = String(body?.payerOpenid || latestPayment?.payerOpenid || '').trim();
+    const notifyUrl = body?.notifyUrl
+      ? String(body.notifyUrl).trim()
+      : await getWechatOrderNotifyUrlFromConfig(this.systemConfigService);
+    const isReusablePayment = !!latestPayment && ['PENDING', 'FAILED', 'CLOSED'].includes(String(latestPayment.status || '').toUpperCase());
+    const paymentNo = isReusablePayment ? String(latestPayment?.paymentNo || '') : this.buildWechatPaymentNo(id);
+    const orderAmountFen = Math.max(1, Math.round(Number(order.paidAmount || 0) * 100));
+    const latestPaymentFen = Math.max(1, Math.round(Number(latestPayment?.amount || 0) * 100));
+    const totalFeeFen = isReusablePayment ? latestPaymentFen : orderAmountFen;
+    const shouldUseTestAmount = isReusablePayment
+      ? latestPaymentFen !== orderAmountFen
+      : (Boolean(body?.testMode) && await this.memberService.canUseMiniPaymentTestMode(uid));
+    const prepay = await this.wechatPayService.createJsapiPrepay({
+      orderNo: paymentNo,
+      description: String(order?.project?.name || `订单${id}`),
+      totalFeeFen,
+      payerOpenid,
+      notifyUrl,
+      useTestAmount: shouldUseTestAmount,
+    });
+    const payableFen = Number(prepay?.mock ? prepay?.mockAmountFen ?? totalFeeFen : totalFeeFen);
+    const amountYuan = Number((payableFen / 100).toFixed(2));
+    const payment = isReusablePayment
+      ? await this.prisma.orderPayment.update({
+          where: { id: Number(latestPayment?.id) },
+          data: {
+            status: 'PENDING',
+            amount: amountYuan,
+            payerOpenid,
+            prepayId: prepay?.mock ? String(prepay?.params?.package || '') : String(prepay?.params?.package || '').replace(/^prepay_id=/, ''),
+          },
+          select: { id: true },
+        })
+      : await this.prisma.orderPayment.create({
+          data: {
+            orderId: id,
+            paymentNo,
+            channel: 'WECHAT',
+            status: 'PENDING',
+            amount: amountYuan,
+            payerOpenid,
+            prepayId: prepay?.mock ? String(prepay?.params?.package || '') : String(prepay?.params?.package || '').replace(/^prepay_id=/, ''),
+          },
+          select: { id: true },
+        });
+    await this.prisma.order.update({
+      where: { id },
+      data: {
+        payStatus: 'PENDING',
+        latestPaymentId: payment.id,
+      },
+    });
+    return miniOk({
+      orderId: id,
+      paymentNo,
+      ...prepay,
+    });
+  }
+
+  @Get('wechat/debug/config')
+  @ApiOperation({ summary: '微信支付配置自检（开发联调）' })
+  async wechatDebugConfig() {
+    const orderNotifyUrl = await getWechatOrderNotifyUrlFromConfig(this.systemConfigService);
+    return miniOk({
+      ...(await this.wechatPayService.getConfigStatus()),
+      orderNotifyUrl,
+    });
+  }
+
+  private async resolveNotifyPayment(outTradeNo: string) {
+    const payment = await this.prisma.orderPayment.findUnique({
+      where: { paymentNo: outTradeNo },
+      select: { id: true, orderId: true },
+    });
+    if (payment) return payment;
+
+    const legacyOrder = await this.prisma.order.findFirst({
+      where: { autoSerial: outTradeNo },
+      select: { id: true },
+    });
+    if (!legacyOrder) return null;
+
+    return {
+      id: null as number | null,
+      orderId: legacyOrder.id,
+    };
+  }
+
+  @Post(':id/wechat-sync')
+  @ApiOperation({ summary: '主动同步微信支付状态' })
+  async wechatSync(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    const order = await this.prisma.order.findFirst({
+      where: this.ownOrderWhere(uid, id),
+      select: {
+        id: true,
+        isPaid: true,
+        latestPayment: {
+          select: {
+            id: true,
+            paymentNo: true,
+            status: true,
+          },
+        },
+      },
+    });
+    if (!order) throw new BadRequestException('订单不存在或无权限操作');
+    if (order.isPaid) {
+      return miniOk({ orderId: id, isPaid: true, synced: true }, '订单已支付');
+    }
+    const paymentNo = String(order.latestPayment?.paymentNo || '').trim();
+    if (!paymentNo) {
+      return miniOk({ orderId: id, isPaid: false, synced: false }, '暂无支付单');
+    }
+    const trade = await this.wechatPayService.queryTransactionByOutTradeNo(paymentNo);
+    const tradeState = String(trade?.trade_state || '').toUpperCase();
+    if (tradeState === 'SUCCESS') {
+      await this.applyWechatPaymentSuccess(id, { id: order.latestPayment?.id ?? null, orderId: id }, {
+        ...trade,
+        out_trade_no: paymentNo,
+      });
+      return miniOk({ orderId: id, isPaid: true, synced: true, tradeState }, '支付状态已同步');
+    }
+    return miniOk({ orderId: id, isPaid: false, synced: false, tradeState }, '支付结果待确认');
+  }
+
+  @Public()
+  @Post('wechat/notify')
+  @ApiOperation({ summary: '微信支付回调通知' })
+  async wechatNotify(@Body() body: any) {
+    try {
+      const resource = body?.resource;
+      if (!resource) return { code: 'FAIL', message: 'resource missing' };
+      const decrypted = await this.wechatPayService.decryptNotifyResource(resource);
+      const tradeState = String(decrypted?.trade_state || '').toUpperCase();
+      const outTradeNo = String(decrypted?.out_trade_no || '').trim();
+      if (!outTradeNo) return { code: 'FAIL', message: 'out_trade_no missing' };
+      if (tradeState === 'SUCCESS') {
+        const paymentRef = await this.resolveNotifyPayment(outTradeNo);
+        if (paymentRef) {
+          const order = await this.prisma.order.findUnique({
+            where: { id: paymentRef.orderId },
+            select: { id: true, isPaid: true },
+          });
+          if (order && !order.isPaid) {
+            await this.applyWechatPaymentSuccess(order.id, paymentRef, decrypted);
+          }
+        }
+      }
+      return { code: 'SUCCESS', message: '成功' };
+    } catch (e: any) {
+      return { code: 'FAIL', message: e?.message || 'notify handle failed' };
+    }
+  }
+
+  @Post(':id/review')
+  @ApiOperation({ summary: '提交订单评价' })
+  @ApiParam({ name: 'id', example: 1001 })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        score: { type: 'number', example: 5 },
+        tags: { type: 'array', items: { type: 'string' }, example: ['指挥专业', '沟通愉快'] },
+        content: { type: 'string', example: '服务专业，体验很好' },
+        anonymous: { type: 'boolean', example: true },
+      },
+    },
+  })
+  @ApiOkResponse({
+    schema: {
+      example: { code: 0, message: '评价提交成功', data: { success: true, status: 'REVIEWED' } },
+    },
+  })
+  async review(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: any) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    const own = await this.prisma.order.findFirst({
+      where: this.ownOrderWhere(uid, id),
+      select: { id: true, status: true },
+    });
+    if (!own) throw new BadRequestException('订单不存在或无权限操作');
+
+    const score = Number(body?.score ?? 5);
+    if (!Number.isFinite(score) || score < 1 || score > 5) throw new BadRequestException('score 范围为 1-5');
+
+    await this.prisma.$transaction(async (tx) => {
+      const order = await tx.order.findUnique({
+        where: { id },
+        select: { id: true, projectId: true, dispatcherId: true },
+      });
+      if (!order) throw new BadRequestException('订单不存在');
+
+      await tx.order.update({
+        where: { id },
+        data: { status: OrderStatus.REVIEWED },
+      });
+      await tx.productReview.upsert({
+        where: { orderId: id },
+        update: {
+          score,
+          tags: Array.isArray(body?.tags) ? (body.tags as any) : [],
+          content: body?.content ? String(body.content) : '',
+          anonymous: Boolean(body?.anonymous),
+          isHidden: false,
+          hiddenReason: null,
+          hiddenBy: null,
+          hiddenAt: null,
+        },
+        create: {
+          projectId: Number(order.projectId),
+          orderId: id,
+          userId: uid,
+          score,
+          tags: Array.isArray(body?.tags) ? (body.tags as any) : [],
+          content: body?.content ? String(body.content) : '',
+          anonymous: Boolean(body?.anonymous),
+        },
+      });
+      await tx.userLog.create({
+        data: {
+          userId: uid,
+          action: 'MINI_ORDER_REVIEW',
+          targetType: 'ORDER',
+          targetId: id,
+          newData: {
+            score,
+            tags: Array.isArray(body?.tags) ? body.tags : [],
+            content: body?.content ? String(body.content) : '',
+            anonymous: Boolean(body?.anonymous),
+          } as any,
+          remark: 'miniapp review submit',
+        },
+      });
+    });
+
+    return miniOk({ success: true, status: OrderStatus.REVIEWED }, '评价提交成功');
+  }
+
+  @Post(':id/after-sales')
+  @ApiOperation({ summary: '提交售后申请' })
+  @ApiParam({ name: 'id', example: 1001 })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['reason'],
+      properties: {
+        reason: { type: 'string', example: '实际水平与描述不符' },
+        description: { type: 'string', example: '中途频繁掉线，沟通效果差' },
+      },
+    },
+  })
+  @ApiOkResponse({
+    schema: {
+      example: { code: 0, message: '售后申请已提交', data: { success: true, status: 'WAIT_AFTERSALE' } },
+    },
+  })
+  async afterSales(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: any) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    const own = await this.prisma.order.findFirst({
+      where: this.ownOrderWhere(uid, id),
+      select: {
+        id: true,
+        isPaid: true,
+        latestPayment: { select: { channel: true, status: true } },
+      },
+    });
+    if (!own) throw new BadRequestException('订单不存在或无权限操作');
+
+    const reason = body?.reason ? String(body.reason).trim() : '';
+    if (!reason) throw new BadRequestException('reason 必填');
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.order.update({
+        where: { id },
+        data: { status: OrderStatus.WAIT_AFTERSALE },
+      });
+      await tx.userLog.create({
+        data: {
+          userId: uid,
+          action: 'MINI_ORDER_AFTER_SALES',
+          targetType: 'ORDER',
+          targetId: id,
+          newData: {
+            reason,
+            description: body?.description ? String(body.description) : '',
+          } as any,
+          remark: 'miniapp after-sales submit',
+        },
+      });
+    });
+
+    const channel = String(own?.latestPayment?.channel || '').trim().toUpperCase();
+    const manualRefundRequired = Boolean(own?.isPaid) && (!channel || (channel !== 'WECHAT' && channel !== 'BALANCE'));
+    return miniOk(
+      {
+        success: true,
+        status: OrderStatus.WAIT_AFTERSALE,
+        manualRefundRequired,
+        refundHint: manualRefundRequired ? '支付渠道不正确，需要人工手动退款' : null,
+      },
+      manualRefundRequired ? '售后申请已提交（该订单需人工退款处理）' : '售后申请已提交',
+    );
+  }
+}

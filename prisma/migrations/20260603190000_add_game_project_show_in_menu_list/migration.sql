@@ -1,0 +1,2 @@
+ALTER TABLE `GameProject`
+ADD COLUMN `showInMenuList` BOOLEAN NOT NULL DEFAULT TRUE AFTER `richContent`;
