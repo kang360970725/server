@@ -106,6 +106,63 @@ export class WalletService {
         throw new Error('Failed to create wallet account with unique walletUid');
     }
 
+    async creditAvailableBalance(
+        params: {
+            userId: number;
+            amount: number;
+            bizType: WalletBizType;
+            sourceType: string;
+            sourceId: number;
+            remark?: string;
+        },
+        tx?: PrismaTx,
+    ) {
+        const amount = round2(Number(params.amount || 0));
+        if (amount <= 0) throw new BadRequestException('入账金额必须大于 0');
+
+        const runner = async (db: any) => {
+            await this.ensureWalletAccount(params.userId, db);
+
+            const existing = await db.walletTransaction.findUnique({
+                where: {
+                    sourceType_sourceId: {
+                        sourceType: params.sourceType,
+                        sourceId: params.sourceId,
+                    },
+                },
+            });
+            if (existing) return existing;
+
+            const accountAfter = await db.walletAccount.update({
+                where: { userId: params.userId },
+                data: {
+                    availableBalance: { increment: amount },
+                },
+                select: {
+                    availableBalance: true,
+                    frozenBalance: true,
+                },
+            });
+
+            return db.walletTransaction.create({
+                data: {
+                    userId: params.userId,
+                    direction: WalletDirection.IN,
+                    bizType: params.bizType,
+                    amount,
+                    status: WalletTxStatus.AVAILABLE,
+                    sourceType: params.sourceType,
+                    sourceId: params.sourceId,
+                    availableAfter: round2(Number(accountAfter?.availableBalance ?? 0)),
+                    frozenAfter: round2(Number(accountAfter?.frozenBalance ?? 0)),
+                } as any,
+            });
+        };
+
+        if (tx) return runner(tx);
+        return this.prisma.$transaction(async (db) => runner(db as any));
+    }
+
 
     /**
      * 创建“结算收益入账（冻结）”

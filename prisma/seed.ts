@@ -31,7 +31,9 @@ async function main() {
         { key: 'system:permission:page', name: '权限管理页', module: 'system', type: PermissionType.PAGE },
         { key: 'system:game-project:page', name: '项目管理页', module: 'system', type: PermissionType.PAGE },
 
-        { key: 'users:page', name: '用户管理页', module: 'users', type: PermissionType.PAGE },
+        { key: 'users:member:page', name: '会员管理页', module: 'users', type: PermissionType.PAGE },
+        { key: 'users:staff:page', name: '打手管理页', module: 'users', type: PermissionType.PAGE },
+        { key: 'users:internal:page', name: '后台人员管理页', module: 'users', type: PermissionType.PAGE },
         { key: 'staff-ratings:page', name: '评级管理页', module: 'staff-ratings', type: PermissionType.PAGE },
 
         { key: 'orders:list:page', name: '订单管理页', module: 'orders', type: PermissionType.PAGE },

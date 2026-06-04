@@ -14,6 +14,6 @@ import { PrismaService } from '../prisma.service'; // 正确路径
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy, PrismaService], // 确保 PrismaService 在这里提供
-  exports: [JwtModule],
+  exports: [JwtModule, AuthService],
 })
 export class AuthModule {}

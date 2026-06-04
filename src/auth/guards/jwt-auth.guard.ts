@@ -3,6 +3,7 @@ import { Reflector } from '@nestjs/core';
 import { AuthGuard } from '@nestjs/passport';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import * as jwt from 'jsonwebtoken';
+import { AuthService } from '../auth.service';
 
 @Injectable()
 export class JwtAuthGuard extends AuthGuard('jwt') {
@@ -32,8 +33,13 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
             name: String(user?.name || '').trim(),
         };
         if (payload.sub) {
+            const req = context.switchToHttp().getRequest();
+            const path = String(req?.route?.path || req?.url || '').trim();
+            const isMiniRoute = path.startsWith('/mini/') || String(req?.originalUrl || '').startsWith('/mini/');
             const refreshedToken = jwt.sign(payload, process.env.JWT_SECRET || 'your-secret-key', {
-                expiresIn: '2h',
+                expiresIn: isMiniRoute
+                    ? AuthService.MINI_ACCESS_TOKEN_EXPIRES_IN
+                    : AuthService.DEFAULT_ACCESS_TOKEN_EXPIRES_IN,
             });
             const res = context.switchToHttp().getResponse();
             if (res?.setHeader) {

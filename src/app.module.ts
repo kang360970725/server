@@ -28,6 +28,10 @@ import { CouponsModule } from './coupons/coupons.module';
 import { PenaltiesModule } from './penalties/penalties.module';
 import { AppVersionModule } from './app-version/app-version.module';
 import { ChestModule } from './chest/chest.module';
+import { MiniModule } from './mini/mini.module';
+import { CommonModule } from './common/common.module';
+import { MemberModule } from './member/member.module';
+import { MiniappProtocolsModule } from './miniapp-protocols/miniapp-protocols.module';
 
 
 @Module({
@@ -52,8 +56,12 @@ import { ChestModule } from './chest/chest.module';
         NotificationsModule,
         CouponsModule,
         PenaltiesModule,
-    AppVersionModule,
-    ChestModule,
+        AppVersionModule,
+        ChestModule,
+        MiniModule,
+        CommonModule,
+        MemberModule,
+        MiniappProtocolsModule,
   ],
     controllers: [AppController],
     providers: [AppService, PrismaService,

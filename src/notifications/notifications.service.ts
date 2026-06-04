@@ -116,6 +116,67 @@ export class NotificationsService {
     return { list, total, page, limit };
   }
 
+  async adminListMiniappAnnouncementOptions(keyword?: string) {
+    const now = new Date();
+    const where: any = {
+      enabled: true,
+      audience: { in: ['ALL', 'APPLET'] },
+      OR: [{ publishAt: null }, { publishAt: { lte: now } }],
+      AND: [
+        {
+          OR: [{ expireAt: null }, { expireAt: { gte: now } }],
+        },
+      ],
+    };
+
+    const k = String(keyword || '').trim();
+    if (k) {
+      where.AND.push({
+        OR: [{ title: { contains: k } }, { content: { contains: k } }],
+      });
+    }
+
+    return this.prisma.systemAnnouncement.findMany({
+      where,
+      orderBy: [{ id: 'desc' }],
+      select: {
+        id: true,
+        title: true,
+        audience: true,
+        publishAt: true,
+        expireAt: true,
+      },
+      take: 300,
+    });
+  }
+
+  async getMiniappAnnouncementDetail(id: number) {
+    const now = new Date();
+    const row = await this.prisma.systemAnnouncement.findFirst({
+      where: {
+        id,
+        enabled: true,
+        audience: { in: ['ALL', 'APPLET'] },
+        OR: [{ publishAt: null }, { publishAt: { lte: now } }],
+        AND: [
+          {
+            OR: [{ expireAt: null }, { expireAt: { gte: now } }],
+          },
+        ],
+      },
+      select: {
+        id: true,
+        title: true,
+        content: true,
+        audience: true,
+        publishAt: true,
+        expireAt: true,
+      },
+    });
+    if (!row) throw new BadRequestException('公告不存在或不可访问');
+    return row;
+  }
+
   async adminCreateAnnouncement(dto: CreateAnnouncementDto, operatorId?: number) {
     const publishAt = this.parseMaybeDate(dto.publishAt || undefined);
     const expireAt = this.parseMaybeDate(dto.expireAt || undefined);

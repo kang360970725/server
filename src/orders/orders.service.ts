@@ -1,4 +1,5 @@
-import {BadRequestException, ConflictException, Injectable, NotFoundException} from '@nestjs/common';
+import {BadRequestException, ConflictException, Injectable, Logger, NotFoundException} from '@nestjs/common';
+import {Cron} from '@nestjs/schedule';
 import {PrismaService} from '../prisma/prisma.service';
 import {CreateOrderDto} from './dto/create-order.dto';
 import {AcceptDispatchDto} from './dto/accept-dispatch.dto';
@@ -10,10 +11,12 @@ import {
     CouponTemplateType,
     DispatchStatus,
     OrderStatus,
+    OrderPayStatus,
     OrderType,
     PaymentStatus,
     PlayerWorkStatus,
     UserCouponStatus,
+    UserType,
     WalletBizType
 } from '@prisma/client';
 import {WalletService} from '../wallet/wallet.service';
@@ -28,15 +31,57 @@ import {compareSettlementsToPlan} from "../utils/finance/generateRepairPlan";
 import {computeSettlementFreezeTime} from "../utils/orderDispatches/settlement-freeze.rule";
 import { NotificationsService } from '../notifications/notifications.service';
 import { PenaltiesService } from '../penalties/penalties.service';
+import { SystemConfigService } from '../system-config/system-config.service';
+
+type OrderCreateScene = 'ADMIN' | 'MINIAPP' | 'OFFICIAL_ACCOUNT';
+type CreateOrderContext = {
+    scene?: OrderCreateScene;
+    dispatcherId?: number | null;
+    customerUserId?: number | null;
+};
+
+const ORDER_SOURCE_DEFAULTS = [
+    { value: 'TUTU_PLATFORM', label: '突突平台', enabled: true },
+    { value: 'THIRD_PARTY_TRANSFER', label: '第三方转单', enabled: true },
+    { value: 'MINIAPP_SELF_SERVICE', label: '小程序自助下单', enabled: true },
+    { value: 'CUSTOMER_SERVICE_MANUAL', label: '客服手动派单', enabled: true },
+    { value: 'OFFICIAL_ACCOUNT', label: '公众号下单', enabled: true },
+];
 
 @Injectable()
 export class OrdersService {
+    private readonly logger = new Logger(OrdersService.name);
+
     constructor(
         private prisma: PrismaService,
         private wallet: WalletService,
         private notificationsService: NotificationsService,
         private penaltiesService: PenaltiesService,
+        private systemConfigService: SystemConfigService,
     ) {
+    }
+
+    private isOrderEffectivelyPaidOrGifted(order: { isPaid?: boolean | null; isGifted?: boolean | null; payStatus?: OrderPayStatus | string | null }) {
+        return Boolean(order?.isGifted) || order?.isPaid === true || String(order?.payStatus || '') === OrderPayStatus.SUCCESS;
+    }
+
+    private getAutoConfirmAnchorAt(order: { dispatches?: Array<{ completedAt?: Date | string | null }>; updatedAt?: Date | string | null }) {
+        const completedAtList = Array.isArray(order?.dispatches)
+            ? order.dispatches
+                .map((d) => (d?.completedAt ? new Date(d.completedAt) : null))
+                .filter((d): d is Date => d instanceof Date && !Number.isNaN(d.getTime()))
+            : [];
+
+        if (completedAtList.length) {
+            return completedAtList.sort((a, b) => a.getTime() - b.getTime())[completedAtList.length - 1];
+        }
+
+        const updatedAt = order?.updatedAt ? new Date(order.updatedAt) : null;
+        return updatedAt && !Number.isNaN(updatedAt.getTime()) ? updatedAt : null;
+    }
+
+    private async lockOrderForSettlement(tx: any, orderId: number) {
+        await tx.$queryRawUnsafe(`SELECT id FROM \`Order\` WHERE id = ? FOR UPDATE`, Number(orderId));
     }
 
     /**
@@ -97,6 +142,364 @@ export class OrdersService {
     }
 
     /**
+     * 按权重分配金额，结果统一保留到 0.1 元，且总和等于总额。
+     */
+    private splitAmountByWeights(totalAmount: number, weights: number[]) {
+        const totalTenths = Math.max(0, Math.round(Number(totalAmount || 0) * 10));
+        const safeWeights = Array.isArray(weights)
+            ? weights.map((n) => Math.max(0, Number(n || 0)))
+            : [];
+        const weightSum = safeWeights.reduce((sum, n) => sum + n, 0);
+
+        if (!safeWeights.length) {
+            return [];
+        }
+
+        if (weightSum <= 0) {
+            const base = Math.floor(totalTenths / safeWeights.length);
+            let remainder = totalTenths - base * safeWeights.length;
+            return safeWeights.map(() => {
+                const extra = remainder > 0 ? 1 : 0;
+                remainder = Math.max(0, remainder - extra);
+                return (base + extra) / 10;
+            });
+        }
+
+        const raw = safeWeights.map((w) => (totalTenths * w) / weightSum);
+        const units = raw.map((v) => Math.floor(v));
+        let remainder = totalTenths - units.reduce((sum, n) => sum + n, 0);
+        const order = raw
+            .map((v, idx) => ({ idx, frac: v - units[idx] }))
+            .sort((a, b) => b.frac - a.frac);
+
+        for (let i = 0; i < order.length && remainder > 0; i += 1) {
+            units[order[i].idx] += 1;
+            remainder -= 1;
+        }
+
+        return units.map((n) => n / 10);
+    }
+
+    private normalizePlayerEvaluationLabel(score: any) {
+        const n = Number(score);
+        if (!Number.isFinite(n) || n < 1 || n > 5) {
+            throw new BadRequestException('打手评分必须为 1-5 分');
+        }
+
+        const roundScore = Math.round(n);
+        if (roundScore >= 4) {
+            return { score: roundScore, ratingLabel: 'GOOD' as const };
+        }
+        if (roundScore === 3) {
+            return { score: roundScore, ratingLabel: 'MEDIUM' as const };
+        }
+        return { score: roundScore, ratingLabel: 'BAD' as const };
+    }
+
+    private normalizeAfterSaleAction(action: any) {
+        const v = String(action || '').trim().toUpperCase();
+        if (!v) return null;
+        const allow = new Set([
+            'RESPONSIBLE_50',
+            'RESPONSIBLE_100',
+            'MAINTENANCE_FEE',
+            'MAINTENANCE_REFUND',
+            'NO_ACTION',
+        ]);
+        if (!allow.has(v)) {
+            throw new BadRequestException('售后处理方式不合法');
+        }
+        return v;
+    }
+
+    private normalizeIdArray(input: any) {
+        return Array.isArray(input)
+            ? Array.from(
+                new Set(
+                    input
+                        .map((x) => Number(x))
+                        .filter((n) => Number.isFinite(n) && n > 0),
+                ),
+            )
+            : [];
+    }
+
+    private buildPlayerEvaluationKey(dispatchId: number, playerUserId: number) {
+        return `${Number(dispatchId)}_${Number(playerUserId)}`;
+    }
+
+    private async applyPlayerEvaluationAdjustmentsToSettlements(params: {
+        order: any;
+        settlementsToCreate: any[];
+        playerEvaluations?: any[];
+        autoConfirm?: boolean;
+    }) {
+        const { order, settlementsToCreate } = params;
+        const playerEvaluations = Array.isArray(params.playerEvaluations) ? params.playerEvaluations : [];
+        const autoConfirm = Boolean(params.autoConfirm);
+        const orderPaidAmount = Number(order?.isGifted ? order?.receivableAmount : order?.paidAmount) || 0;
+        const tipPoolTotal = roundMix1(orderPaidAmount * 0.03);
+        const csPoolTotal = roundMix1(orderPaidAmount * 0.01);
+
+        const playerRows = settlementsToCreate.filter((s: any) => String(s?.settlementType || '') !== 'CUSTOMER_SERVICE');
+        const csRows = settlementsToCreate.filter((s: any) => String(s?.settlementType || '') === 'CUSTOMER_SERVICE');
+
+        if (!playerRows.length) {
+            return { settlementsToCreate, evaluationRows: [] as any[] };
+        }
+
+        const evalMap = new Map<string, any>();
+        if (autoConfirm) {
+            for (const row of playerRows) {
+                const key = this.buildPlayerEvaluationKey(Number(row.dispatchId), Number(row.userId));
+                evalMap.set(key, {
+                    dispatchId: Number(row.dispatchId),
+                    playerUserId: Number(row.userId),
+                    score: 3,
+                    ratingLabel: 'MEDIUM',
+                    responsibleUserIds: [],
+                    tippedUserIds: [],
+                    afterSaleHandled: false,
+                    afterSaleAction: null,
+                    tipPoolAmount: null,
+                    tipAmount: 0,
+                    penaltyAmount: 0,
+                    maintenanceFeeAmount: 0,
+                    reviewRemark: 'SYSTEM_AUTO_CONFIRM_24H',
+                });
+            }
+        }
+        for (const item of playerEvaluations) {
+            const dispatchId = Number(item?.dispatchId);
+            const playerUserId = Number(item?.playerUserId);
+            if (!Number.isFinite(dispatchId) || dispatchId <= 0 || !Number.isFinite(playerUserId) || playerUserId <= 0) {
+                continue;
+            }
+            const { score, ratingLabel } = this.normalizePlayerEvaluationLabel(item?.score);
+            const responsibleUserIds = this.normalizeIdArray(item?.responsibleUserIds);
+            const tippedUserIds = this.normalizeIdArray(item?.tippedUserIds);
+            const afterSaleHandled = Boolean(item?.afterSaleHandled);
+            const afterSaleAction = this.normalizeAfterSaleAction(item?.afterSaleAction);
+            evalMap.set(this.buildPlayerEvaluationKey(dispatchId, playerUserId), {
+                ...item,
+                dispatchId,
+                playerUserId,
+                score,
+                ratingLabel,
+                responsibleUserIds,
+                tippedUserIds,
+                afterSaleHandled,
+                afterSaleAction,
+            });
+        }
+
+        const missingKeys: string[] = [];
+        if (!autoConfirm) {
+            for (const row of playerRows) {
+                const key = this.buildPlayerEvaluationKey(Number(row.dispatchId), Number(row.userId));
+                if (!evalMap.has(key)) missingKeys.push(key);
+            }
+        }
+        if (missingKeys.length) {
+            throw new BadRequestException(`请先完成全部打手评价：${Array.from(new Set(missingKeys)).join(',')}`);
+        }
+
+        const rowStates = playerRows.map((row: any) => {
+            const key = this.buildPlayerEvaluationKey(Number(row.dispatchId), Number(row.userId));
+            const evalItem = evalMap.get(key);
+            const baseAmount = roundMix1(Number(row.contributionBaseAmount ?? 0));
+            const currentFinal = roundMix1(Number(row.finalEarnings ?? 0));
+            const base65 = roundMix1(baseAmount * 0.65);
+            const baseFinalBeforeExtras = evalItem.ratingLabel === 'GOOD' ? currentFinal : base65;
+            return {
+                key,
+                row,
+                evalItem,
+                baseAmount,
+                currentFinal,
+                base65,
+                baseFinalBeforeExtras,
+                userId: Number(row.userId),
+                dispatchId: Number(row.dispatchId),
+            };
+        });
+
+        const userStates = new Map<number, any[]>();
+        for (const st of rowStates) {
+            const list = userStates.get(st.userId) || [];
+            list.push(st);
+            userStates.set(st.userId, list);
+        }
+
+        // 1) 对“责任打手”生成处罚池（按用户聚合，再分到该用户各自结算行）
+        const penaltyByUser = new Map<number, number>();
+        const maintenanceByUser = new Map<number, number>();
+
+        for (const st of rowStates) {
+            const evalItem = st.evalItem;
+            if (evalItem.ratingLabel !== 'BAD' || !evalItem.afterSaleHandled || !evalItem.afterSaleAction) continue;
+            const responsibleUserIds = evalItem.responsibleUserIds || [];
+            if (!responsibleUserIds.length) continue;
+
+            const maintenanceFee = Math.max(roundMix1(orderPaidAmount * 0.2), 20);
+            for (const responsibleUserId of responsibleUserIds) {
+                const targetRows = userStates.get(Number(responsibleUserId)) || [];
+                if (!targetRows.length) continue;
+
+                const targetBase65Total = targetRows.reduce((sum, r) => sum + Number(r.base65 ?? 0), 0);
+                if (targetBase65Total <= 0) continue;
+
+                let penaltyTotal = 0;
+                if (evalItem.afterSaleAction === 'RESPONSIBLE_50') {
+                    penaltyTotal = roundMix1(targetBase65Total * 0.5);
+                } else if (evalItem.afterSaleAction === 'RESPONSIBLE_100') {
+                    penaltyTotal = roundMix1(targetBase65Total);
+                } else if (evalItem.afterSaleAction === 'MAINTENANCE_FEE' || evalItem.afterSaleAction === 'MAINTENANCE_REFUND') {
+                    penaltyTotal = maintenanceFee;
+                } else {
+                    penaltyTotal = 0;
+                }
+
+                if (penaltyTotal > 0) {
+                    if (evalItem.afterSaleAction === 'MAINTENANCE_FEE' || evalItem.afterSaleAction === 'MAINTENANCE_REFUND') {
+                        maintenanceByUser.set(Number(responsibleUserId), roundMix1((maintenanceByUser.get(Number(responsibleUserId)) || 0) + penaltyTotal));
+                    } else {
+                        penaltyByUser.set(Number(responsibleUserId), roundMix1((penaltyByUser.get(Number(responsibleUserId)) || 0) + penaltyTotal));
+                    }
+                }
+            }
+        }
+
+        // 2) 打赏池：全单只取一次 3%，按被打赏用户均分，再按该用户各行权重分配
+        const tippedUserIds = Array.from(new Set(
+            rowStates
+                .filter((st) => st.evalItem.ratingLabel === 'GOOD')
+                .flatMap((st) => st.evalItem.tippedUserIds || [])
+                .map((x) => Number(x))
+                .filter((n) => Number.isFinite(n) && n > 0),
+        ));
+
+        const tipByUser = new Map<number, number>();
+        if (tippedUserIds.length > 0 && tipPoolTotal > 0) {
+            const shares = this.splitAmountByWeights(tipPoolTotal, tippedUserIds.map(() => 1));
+            tippedUserIds.forEach((userId, idx) => {
+                const share = Number(shares[idx] ?? 0);
+                if (share > 0) tipByUser.set(Number(userId), share);
+            });
+        }
+
+        // 3) 按用户层面分配 tip / penalty 到每条结算行
+        const rowAdjustments = new Map<string, {
+            tipAmount: number;
+            penaltyAmount: number;
+            maintenanceFeeAmount: number;
+        }>();
+
+        for (const [userId, rows] of userStates.entries()) {
+            const penaltyTotal = roundMix1(Number(penaltyByUser.get(userId) || 0));
+            const maintenanceTotal = roundMix1(Number(maintenanceByUser.get(userId) || 0));
+            const tipTotal = roundMix1(Number(tipByUser.get(userId) || 0));
+            const weightsForPenalty = rows.map((r) => Number(r.base65 ?? 0));
+            const weightsForTip = rows.map((r) => Number(r.baseFinalBeforeExtras ?? 0));
+
+            const penaltyShares = penaltyTotal > 0 ? this.splitAmountByWeights(penaltyTotal, weightsForPenalty) : rows.map(() => 0);
+            const maintenanceShares = maintenanceTotal > 0 ? this.splitAmountByWeights(maintenanceTotal, weightsForPenalty) : rows.map(() => 0);
+            const tipShares = tipTotal > 0 ? this.splitAmountByWeights(tipTotal, weightsForTip) : rows.map(() => 0);
+
+            rows.forEach((r, idx) => {
+                const penaltyAmount = roundMix1(Number(penaltyShares[idx] ?? 0));
+                const maintenanceFeeAmount = roundMix1(Number(maintenanceShares[idx] ?? 0));
+                const tipAmount = roundMix1(Number(tipShares[idx] ?? 0));
+                rowAdjustments.set(r.key, {
+                    tipAmount,
+                    penaltyAmount,
+                    maintenanceFeeAmount,
+                });
+            });
+        }
+
+        // 4) CS 1% 从玩家收益池扣除，按“扣前的玩家收益”权重分摊
+        const allWeights = rowStates.map((r) => {
+            const adj = rowAdjustments.get(r.key);
+            const preCs = roundMix1(
+                (Number(r.baseFinalBeforeExtras ?? 0)
+                    - Number(adj?.penaltyAmount ?? 0)
+                    - Number(adj?.maintenanceFeeAmount ?? 0))
+                + Number(adj?.tipAmount ?? 0),
+            );
+            return Math.max(0, preCs);
+        });
+        const csShares = csPoolTotal > 0 ? this.splitAmountByWeights(csPoolTotal, allWeights) : rowStates.map(() => 0);
+
+        const playerRowsByKey = new Map(playerRows.map((r: any) => [this.buildPlayerEvaluationKey(Number(r.dispatchId), Number(r.userId)), r]));
+        const evaluationRows: any[] = [];
+
+        rowStates.forEach((st, idx) => {
+            const row = playerRowsByKey.get(st.key);
+            if (!row) return;
+
+            const adjust = rowAdjustments.get(st.key) || { tipAmount: 0, penaltyAmount: 0, maintenanceFeeAmount: 0 };
+            const csAmount = roundMix1(Number(csShares[idx] ?? 0));
+            const preCsFinal = roundMix1(
+                (Number(st.baseFinalBeforeExtras ?? 0)
+                    - Number(adjust.penaltyAmount ?? 0)
+                    - Number(adjust.maintenanceFeeAmount ?? 0))
+                + Number(adjust.tipAmount ?? 0),
+            );
+            const finalEarnings = roundMix1(preCsFinal - csAmount);
+            const clubEarnings = roundMix1(
+                Number(st.baseAmount ?? 0)
+                - Number(st.baseFinalBeforeExtras ?? 0)
+                + Number(adjust.penaltyAmount ?? 0)
+                + Number(adjust.maintenanceFeeAmount ?? 0)
+                - Number(adjust.tipAmount ?? 0),
+            );
+
+            row.calculatedEarnings = finalEarnings;
+            row.manualAdjustment = 0;
+            row.finalEarnings = finalEarnings;
+            row.clubEarnings = clubEarnings;
+            row.csEarnings = csAmount;
+            row.inviteEarnings = roundMix1(Number(adjust.tipAmount ?? 0));
+
+            evaluationRows.push({
+                key: st.key,
+                dispatchId: st.dispatchId,
+                playerUserId: st.userId,
+                score: st.evalItem.score,
+                ratingLabel: st.evalItem.ratingLabel,
+                afterSaleHandled: Boolean(st.evalItem.afterSaleHandled),
+                afterSaleAction: st.evalItem.afterSaleAction,
+                responsibleUserIds: st.evalItem.responsibleUserIds || [],
+                tippedUserIds: st.evalItem.tippedUserIds || [],
+                tipPoolAmount: tipPoolTotal > 0 ? tipPoolTotal : null,
+                tipAmount: roundMix1(Number(adjust.tipAmount ?? 0)),
+                penaltyAmount: roundMix1(Number(adjust.penaltyAmount ?? 0)),
+                maintenanceFeeAmount: roundMix1(Number(adjust.maintenanceFeeAmount ?? 0)),
+                reviewRemark: st.evalItem.reviewRemark || null,
+                playerName: row.userName,
+            });
+        });
+
+        // 5) CS settlement 行保持其自身收益，不参与评级扣款
+        for (const csRow of csRows) {
+            csRow.calculatedEarnings = roundMix1(Number(csRow.calculatedEarnings ?? csRow.finalEarnings ?? 0));
+            csRow.manualAdjustment = roundMix1(Number(csRow.manualAdjustment ?? 0));
+            csRow.finalEarnings = roundMix1(Number(csRow.finalEarnings ?? csRow.calculatedEarnings ?? 0));
+            csRow.clubEarnings = roundMix1(Number(csRow.clubEarnings ?? 0));
+            csRow.csEarnings = roundMix1(Number(csRow.csEarnings ?? 0));
+            csRow.inviteEarnings = roundMix1(Number(csRow.inviteEarnings ?? 0));
+        }
+
+        return {
+            settlementsToCreate: [...playerRows, ...csRows],
+            evaluationRows,
+            tipPoolTotal,
+            csPoolTotal,
+        };
+    }
+
+    /**
      * 根据已拆分优惠字段，计算订单优惠类型标签。
      * 用途：列表/统计快速分组，不替代明细表。
      */
@@ -116,7 +519,53 @@ export class OrdersService {
         return 'MIXED';
     }
 
-    private calcCouponDiscount(params: {
+    private isAutoRefundSupportedChannel(channel?: string | null) {
+        const c = String(channel || '').trim().toUpperCase();
+        return c === 'WECHAT' || c === 'BALANCE';
+    }
+
+    private isManualRefundOrder(order: { isPaid?: boolean | null; latestPayment?: { channel?: string | null } | null }) {
+        if (!order?.isPaid) return false;
+        const channel = String(order?.latestPayment?.channel || '').trim().toUpperCase();
+        if (!channel) return true; // 历史已收款但无支付流水，视为人工渠道
+        return !this.isAutoRefundSupportedChannel(channel);
+    }
+
+    private getDefaultOrderSourceByScene(scene?: OrderCreateScene) {
+        if (scene === 'MINIAPP') return 'MINIAPP_SELF_SERVICE';
+        if (scene === 'OFFICIAL_ACCOUNT') return 'OFFICIAL_ACCOUNT';
+        return 'CUSTOMER_SERVICE_MANUAL';
+    }
+
+    private async getOrderSourceOptions() {
+        const list = await this.systemConfigService.getOrderSourceOptions();
+        return Array.isArray(list) && list.length ? list : ORDER_SOURCE_DEFAULTS;
+    }
+
+    private async normalizeOrderSource(input: unknown, scene?: OrderCreateScene) {
+        const value = String(input || '').trim();
+        const list = await this.getOrderSourceOptions();
+        const hit = list.find((item) => item.value === value);
+        if (value) {
+            if (!hit) throw new BadRequestException('订单渠道来源无效');
+            if (hit.enabled === false) throw new BadRequestException('订单渠道来源已停用');
+            return hit.value;
+        }
+        return this.getDefaultOrderSourceByScene(scene);
+    }
+
+    private async resolveOrderSourceLabel(orderSource?: string | null) {
+        const code = String(orderSource || '').trim() || 'CUSTOMER_SERVICE_MANUAL';
+        const list = await this.getOrderSourceOptions();
+        return list.find((item) => item.value === code)?.label || code;
+    }
+
+    private canDispatchBeforePaid(order: { isGifted?: boolean | null; orderSource?: string | null }) {
+        const source = String(order?.orderSource || '').trim() || 'CUSTOMER_SERVICE_MANUAL';
+        return Boolean(order?.isGifted) || source === 'CUSTOMER_SERVICE_MANUAL';
+    }
+
+    private async calcCouponDiscount(params: {
         originalAmount: number;
         projectId: number;
         template: {
@@ -149,7 +598,17 @@ export class OrdersService {
                 ? template.applicableProjectIds.map((x: any) => Number(x)).filter((x: number) => Number.isFinite(x))
                 : [];
             if (!ids.includes(Number(projectId))) {
-                throw new BadRequestException('该优惠券不适用于当前项目');
+                throw new BadRequestException('该优惠券不适用于当前商品');
+            }
+        }
+        if (template.applicableScope === CouponScope.CATEGORY) {
+            const project = await this.prisma.gameProject.findUnique({ where: { id: Number(projectId) }, select: { id: true, category: true } });
+            const categoryId = String(project?.category || '').trim();
+            const ids = Array.isArray(template.applicableProjectIds)
+                ? template.applicableProjectIds.map((x: any) => String(x || '').trim()).filter((x: string) => !!x)
+                : [];
+            if (!categoryId || !ids.includes(categoryId)) {
+                throw new BadRequestException('该优惠券不适用于当前商品分类');
             }
         }
 
@@ -200,7 +659,11 @@ export class OrdersService {
     /*** -----------------------------
      * 创建订单方法
      * -----------------------------*/
-    async createOrder(dto: CreateOrderDto, dispatcherId: number) {
+    async createOrder(dto: CreateOrderDto, operatorId: number, context?: CreateOrderContext) {
+        const scene = context?.scene || 'ADMIN';
+        const dispatcherId = context?.dispatcherId === undefined ? operatorId : context.dispatcherId;
+        const customerUserId = context?.customerUserId == null ? null : Number(context.customerUserId);
+        const orderSource = await this.normalizeOrderSource(dto?.orderSource, scene);
         const project = await this.prisma.gameProject.findUnique({where: {id: dto.projectId}});
         if (!project) throw new NotFoundException('项目不存在');
 
@@ -255,7 +718,7 @@ export class OrdersService {
 
         // 统一优惠汇总（先接基础口径，便于后续无缝接优惠券/活动）
         const couponDiscountAmount = selectedUserCoupon
-            ? this.calcCouponDiscount({
+            ? await this.calcCouponDiscount({
                 originalAmount,
                 projectId: project.id,
                 template: selectedUserCoupon.template,
@@ -333,6 +796,7 @@ export class OrdersService {
                 // ✅ 赠送单一般不应有付款时间（也可以按业务改成 now）
                 paymentTime: isGifted || isPaid ? null : (dto.paymentTime ? new Date(dto.paymentTime) : null),
                 isPaid,
+                payStatus: isPaid ? 'SUCCESS' : 'PENDING',
 
                 // orderTime: dto.orderTime ? new Date(dto.orderTime) : null,
                 orderTime: new Date(),
@@ -343,8 +807,10 @@ export class OrdersService {
                 projectSnapshot: projectSnapshot as any,
 
                 customerGameId: dto.customerGameId ?? null,
+                customerUserId,
 
                 dispatcherId,
+                orderSource,
 
                 csRate: dto.csRate ?? defaultCsRate,
                 inviteRate: dto.inviteRate ?? defaultInviteRate,
@@ -379,7 +845,7 @@ export class OrdersService {
                     currentDispatch: true,
                     discountDetails: true,
                 },
-            });
+            } as any);
 
             if (selectedUserCoupon) {
                 const consumeResult = await tx.userCoupon.updateMany({
@@ -404,10 +870,11 @@ export class OrdersService {
             return createdOrder;
         });
 
-        await this.logOrderAction(dispatcherId, order.id, 'CREATE_ORDER', {
+        await this.logOrderAction(operatorId, order.id, 'CREATE_ORDER', {
             autoSerial: order.autoSerial,
             projectId: order.projectId,
             paidAmount: order.paidAmount,
+            orderSource,
         });
 
         // ✅ 新建即派单：若传了 playerIds，则直接创建首轮派单并指派
@@ -417,7 +884,7 @@ export class OrdersService {
 
         if (playerIds.length > 0) {
             // 复用现有派单逻辑（包含防重复、参与者写入、日志等）
-            await this.assignDispatch(order.id, playerIds, dispatcherId, 'AUTO_CREATE');
+            await this.assignDispatch(order.id, playerIds, operatorId, 'AUTO_CREATE');
             // 派单后返回完整详情（带 currentDispatch/participants）
             return this.getOrderDetail(order.id);
         }
@@ -442,12 +909,13 @@ export class OrdersService {
         if (query.status) where.status = query.status as any;
         if (query.dispatcherId) where.dispatcherId = query.dispatcherId;
         if (query.customerGameId) where.customerGameId = { contains: query.customerGameId };
+        if (query.orderSource) where.orderSource = String(query.orderSource).trim();
         if (query.playerId) {
             where.dispatches = {
                 some: { participants: { some: { userId: query.playerId } } },
             };
         }
-        if (query.isPaid !== undefined) where.isPaid = Boolean(query.isPaid);
+        if (query.isPaid !== undefined) where.isPaid = query.isPaid === true;
 
         // ✅ 全局 keyword：订单号 / 客服 / 陪玩昵称
         const keyword = query.keyword?.trim();
@@ -474,7 +942,7 @@ export class OrdersService {
             ];
         }
 
-        const [data, total] = await Promise.all([
+        const [rows, total] = await Promise.all([
             this.prisma.order.findMany({
                 where,
                 skip,
@@ -484,6 +952,7 @@ export class OrdersService {
                     id: true,
                     autoSerial: true,
                     status: true,
+                    orderSource: true,
                     isPaid: true,
                     isGifted: true,
                     paidAmount: true,
@@ -492,7 +961,8 @@ export class OrdersService {
                     project: {
                         select: { id: true, name: true },
                     },
-                    dispatcher: { select: { id: true, name: true, phone: true } },
+                    dispatcher: { select: { id: true, name: true, phone: true, userType: true } },
+                    customerUser: { select: { id: true, name: true, phone: true } },
                     currentDispatch: {
                         select: {
                             id: true,
@@ -506,9 +976,18 @@ export class OrdersService {
                         },
                     },
                 },
-            }),
+            } as any),
             this.prisma.order.count({ where }),
         ]);
+
+        const optionList = await this.getOrderSourceOptions();
+        const sourceLabelMap = new Map(optionList.map((item) => [item.value, item.label]));
+        const data = rows.map((row: any) => ({
+            ...row,
+            orderSource: String(row?.orderSource || '').trim() || 'CUSTOMER_SERVICE_MANUAL',
+            orderSourceLabel:
+                sourceLabelMap.get(String(row?.orderSource || '').trim() || 'CUSTOMER_SERVICE_MANUAL') || '客服手动派单',
+        }));
 
         return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
     }
@@ -525,12 +1004,15 @@ export class OrdersService {
         // ===========================
         // 1️⃣ 查询订单 + 结算（参考）
         // ===========================
-        const order = await this.prisma.order.findUnique({
+        const order: any = await this.prisma.order.findUnique({
             where: { id },
             include: {
                 project: true,
+                customerUser: {
+                    select: { id: true, name: true, phone: true, avatar: true },
+                },
                 dispatcher: {
-                    select: { id: true, name: true, phone: true },
+                    select: { id: true, name: true, phone: true, userType: true },
                 },
 
                 // ✅ 当前派单批次
@@ -573,8 +1055,14 @@ export class OrdersService {
                     },
                     orderBy: { id: 'desc' },
                 },
+                latestPayment: {
+                    select: {
+                        amount: true,
+                        status: true,
+                    },
+                },
             },
-        });
+        } as any);
 
         if (!order) {
             throw new NotFoundException('订单不存在');
@@ -761,8 +1249,11 @@ export class OrdersService {
         // ===========================
         // 6️⃣ 返回
         // ===========================
+        const orderSourceLabel = await this.resolveOrderSourceLabel((order as any)?.orderSource);
+
         return {
             ...order,
+            orderSourceLabel,
 
             // ✅ 钱包真实收益概览（增强：IN/OUT/净额）
             walletEarningsSummary: {
@@ -797,7 +1288,12 @@ export class OrdersService {
 
         const order = await this.prisma.order.findUnique({
             where: {id: orderId},
-            select: {id: true, status: true},
+            select: {
+                id: true,
+                status: true,
+                isPaid: true,
+                latestPayment: { select: { channel: true, status: true } },
+            },
         });
 
         if (!order) throw new NotFoundException('订单不存在');
@@ -807,10 +1303,14 @@ export class OrdersService {
             throw new BadRequestException('当前订单状态不可取消');
         }
 
+        if (this.isManualRefundOrder(order as any)) {
+            throw new BadRequestException('支付渠道不正确，需要人工手动退款');
+        }
+
         const updated = await this.prisma.order.update({
             where: {id: orderId},
             data: {
-                status: 'CANCELLED' as any,
+                status: OrderStatus.CANCELLED,
             },
         });
 
@@ -822,13 +1322,54 @@ export class OrdersService {
                     targetType: 'ORDER',
                     targetId: orderId,
                     oldData: {status: order.status} as any,
-                    newData: {status: 'CANCELLED'} as any,
+                    newData: {status: OrderStatus.CANCELLED} as any,
                     remark: remark || '取消订单',
                 },
             });
         }
 
         return updated;
+    }
+
+    async deleteOrder(orderId: number, operatorId: number, remark?: string) {
+        if (!orderId) throw new BadRequestException('orderId 必填');
+
+        const order = await this.prisma.order.findUnique({
+            where: { id: orderId },
+            select: {
+                id: true,
+                autoSerial: true,
+                status: true,
+                isPaid: true,
+                orderSource: true,
+            },
+        });
+
+        if (!order) throw new NotFoundException('订单不存在');
+
+        await this.prisma.order.delete({
+            where: { id: orderId },
+        });
+
+        if (operatorId) {
+            await this.prisma.userLog.create({
+                data: {
+                    userId: operatorId,
+                    action: 'DELETE_ORDER',
+                    targetType: 'ORDER',
+                    targetId: orderId,
+                    oldData: order as any,
+                    newData: null as any,
+                    remark: remark || '删除订单',
+                },
+            });
+        }
+
+        return {
+            success: true,
+            id: orderId,
+            autoSerial: order.autoSerial,
+        };
     }
 
     /*** -----------------------------
@@ -870,6 +1411,9 @@ export class OrdersService {
         if (!allowOrderStatus.has(String(order.status))) {
             throw new BadRequestException('当前订单状态不可派单');
         }
+        if (!this.canDispatchBeforePaid(order) && !order.isPaid) {
+            throw new BadRequestException('当前订单未收款，暂不可派单');
+        }
 
         // round 从 1 开始递增
         const nextRound = (order.dispatches?.reduce((max, d) => Math.max(max, d.round), 0) || 0) + 1;
@@ -900,6 +1444,7 @@ export class OrdersService {
             data: {
                 status: 'WAIT_ACCEPT' as any,
                 currentDispatchId: dispatch.id,
+                dispatcherId: operatorId || order.dispatcherId,
             },
         });
 
@@ -1529,16 +2074,17 @@ export class OrdersService {
                     },
                 },
                 settlements: {select: {id: true, userId: true, paymentStatus: true, calculatedEarnings: true, finalEarnings: true}},
+                latestPayment: { select: { id: true, channel: true, status: true } },
             },
         });
         if (!order) throw new NotFoundException('订单不存在');
 
+        if (this.isManualRefundOrder(order as any)) {
+            throw new BadRequestException('支付渠道不正确，需要人工手动退款');
+        }
+
         // 已退款幂等
         if (order.status === OrderStatus.REFUNDED) return this.getOrderDetail(orderId);
-
-        // 若已打款，不允许退款清零（避免财务对不上）
-        const hasPaid = order.settlements?.some((s) => s.paymentStatus === PaymentStatus.PAID);
-        if (hasPaid) throw new BadRequestException('存在已打款结算记录，禁止退款（请先走财务冲正流程）');
 
         const settlementUserIds = Array.from(
             new Set(
@@ -1860,7 +2406,26 @@ export class OrdersService {
                 // 人工确认收款：写标记 + 写时间
                 isPaid: true,
                 paymentTime: now,
+                payStatus: OrderPayStatus.SUCCESS,
             },
+        });
+
+        const manualPayment = await this.prisma.orderPayment.create({
+            data: {
+                orderId,
+                paymentNo: `MAN-${orderId}-${Date.now()}`,
+                channel: 'MANUAL',
+                status: OrderPayStatus.SUCCESS,
+                amount: paidAmount,
+                currency: 'CNY',
+                paidAt: now,
+            },
+            select: { id: true },
+        });
+
+        await this.prisma.order.update({
+            where: { id: orderId },
+            data: { latestPaymentId: manualPayment.id },
         });
 
         await this.logOrderAction(operatorId, orderId, 'MARK_PAID', {
@@ -2190,6 +2755,30 @@ export class OrdersService {
                         },
                     },
                 },
+
+                playerEvaluations: {
+                    orderBy: { id: 'asc' },
+                    select: {
+                        id: true,
+                        orderId: true,
+                        dispatchId: true,
+                        playerUserId: true,
+                        evaluatorId: true,
+                        score: true,
+                        ratingLabel: true,
+                        afterSaleHandled: true,
+                        afterSaleAction: true,
+                        responsibleUserIds: true,
+                        tippedUserIds: true,
+                        tipPoolAmount: true,
+                        tipAmount: true,
+                        penaltyAmount: true,
+                        maintenanceFeeAmount: true,
+                        reviewRemark: true,
+                        createdAt: true,
+                        updatedAt: true,
+                    },
+                },
             },
         });
 
@@ -2211,6 +2800,8 @@ export class OrdersService {
     private async buildSettlementPlanFromOrder(params: {
         order: any;
         modePlayAllocList?: any;
+        playerEvaluations?: any[];
+        autoConfirm?: boolean;
     }) {
         const { order, modePlayAllocList } = params;
 
@@ -2243,6 +2834,14 @@ export class OrdersService {
                 throw new BadRequestException('未知 billingMode');
         }
 
+        const applied = await this.applyPlayerEvaluationAdjustmentsToSettlements({
+            order,
+            settlementsToCreate,
+            playerEvaluations: params.playerEvaluations ?? order?.playerEvaluations ?? [],
+            autoConfirm: Boolean(params.autoConfirm),
+        });
+        settlementsToCreate = applied.settlementsToCreate;
+
         if (!Array.isArray(settlementsToCreate) || !settlementsToCreate.length) {
             throw new BadRequestException('未生成可写入的结算计划');
         }
@@ -2250,6 +2849,9 @@ export class OrdersService {
         return {
             billingMode,
             settlementsToCreate,
+            evaluationRows: applied.evaluationRows,
+            tipPoolTotal: applied.tipPoolTotal,
+            csPoolTotal: applied.csPoolTotal,
         };
     }
 
@@ -2313,6 +2915,9 @@ export class OrdersService {
                 calculatedEarnings: s.calculatedEarnings,
                 manualAdjustment: s.manualAdjustment ?? 0,
                 finalEarnings: s.finalEarnings,
+                clubEarnings: s.clubEarnings ?? 0,
+                csEarnings: s.csEarnings ?? null,
+                inviteEarnings: s.inviteEarnings ?? null,
                 settlementBatchId,
                 paymentStatus: 'UNPAID',
             }));
@@ -2375,6 +2980,9 @@ export class OrdersService {
                     calculatedEarnings: true,
                     manualAdjustment: true,
                     finalEarnings: true,
+                    clubEarnings: true,
+                    csEarnings: true,
+                    inviteEarnings: true,
                 },
             });
 
@@ -2424,6 +3032,9 @@ export class OrdersService {
                     commissionRate: extra.commissionRate,
                     grossPerformanceAmount: extra.grossPerformanceAmount,
                     netIncomeAmount: extra.netIncomeAmount,
+                    clubEarnings: s.clubEarnings,
+                    csEarnings: s.csEarnings,
+                    inviteEarnings: s.inviteEarnings,
                     userName: extra.userName,
                 };
             });
@@ -2581,6 +3192,9 @@ export class OrdersService {
                     calculatedEarnings: true,
                     manualAdjustment: true,
                     finalEarnings: true,
+                    clubEarnings: true,
+                    csEarnings: true,
+                    inviteEarnings: true,
                 },
             });
 
@@ -2641,6 +3255,9 @@ export class OrdersService {
                     commissionRate: extra.commissionRate,
                     grossPerformanceAmount: extra.grossPerformanceAmount,
                     netIncomeAmount: extra.netIncomeAmount,
+                    clubEarnings: s.clubEarnings,
+                    csEarnings: s.csEarnings,
+                    inviteEarnings: s.inviteEarnings,
                     userName: extra.userName,
                 };
             });
@@ -2761,6 +3378,8 @@ export class OrdersService {
             paidAmount?: number;
             confirmPaid?: any;
             modePlayAllocList?: any;
+            playerEvaluations?: any[];
+            autoConfirm?: boolean;
         },
     ) {
         orderId = Number(orderId);
@@ -2770,11 +3389,13 @@ export class OrdersService {
         if (!operatorId) throw new BadRequestException('未登录或无权限操作');
 
         const remark = dto?.remark;
+        const isAutoConfirm = Boolean(dto?.autoConfirm);
 
         return this.prisma.$transaction(async (tx) => {
             /**
              * Step 0：并发保护
              */
+            await this.lockOrderForSettlement(tx, orderId);
             await this.assertOrderNotSettlingOrThrow(
                 tx,
                 orderId,
@@ -2847,16 +3468,18 @@ export class OrdersService {
                 scope: 'COMPLETED_AND_ARCHIVED',
             });
 
-            if ((latestOrder as any).isPaid !== true && (latestOrder as any).isGifted !== true) {
+            if (!this.isOrderEffectivelyPaidOrGifted(latestOrder as any)) {
                 throw new BadRequestException('未收款订单不允许最终确认结单');
             }
 
             /**
              * Step 5：构建 settlement 计划
              */
-            const { settlementsToCreate } = await this.buildSettlementPlanFromOrder({
+            const { settlementsToCreate, evaluationRows } = await this.buildSettlementPlanFromOrder({
                 order: latestOrder,
                 modePlayAllocList: dto?.modePlayAllocList,
+                playerEvaluations: dto?.playerEvaluations,
+                autoConfirm: isAutoConfirm,
             });
 
             /**
@@ -2871,6 +3494,51 @@ export class OrdersService {
                 reason: remark,
             });
 
+            if (evaluationRows.length) {
+                for (const item of evaluationRows) {
+                    await tx.orderPlayerEvaluation.upsert({
+                        where: {
+                            orderId_dispatchId_playerUserId: {
+                                orderId: Number(orderId),
+                                dispatchId: Number(item.dispatchId),
+                                playerUserId: Number(item.playerUserId),
+                            },
+                        },
+                        update: {
+                            evaluatorId: operatorId,
+                            score: Number(item.score ?? 0),
+                            ratingLabel: String(item.ratingLabel || 'MEDIUM'),
+                            afterSaleHandled: Boolean(item.afterSaleHandled),
+                            afterSaleAction: item.afterSaleAction || null,
+                            responsibleUserIds: Array.isArray(item.responsibleUserIds) ? item.responsibleUserIds : [],
+                            tippedUserIds: Array.isArray(item.tippedUserIds) ? item.tippedUserIds : [],
+                            tipPoolAmount: item.tipPoolAmount ?? null,
+                            tipAmount: item.tipAmount ?? null,
+                            penaltyAmount: item.penaltyAmount ?? null,
+                            maintenanceFeeAmount: item.maintenanceFeeAmount ?? null,
+                            reviewRemark: item.reviewRemark || null,
+                        },
+                        create: {
+                            orderId: Number(orderId),
+                            dispatchId: Number(item.dispatchId),
+                            playerUserId: Number(item.playerUserId),
+                            evaluatorId: operatorId,
+                            score: Number(item.score ?? 0),
+                            ratingLabel: String(item.ratingLabel || 'MEDIUM'),
+                            afterSaleHandled: Boolean(item.afterSaleHandled),
+                            afterSaleAction: item.afterSaleAction || null,
+                            responsibleUserIds: Array.isArray(item.responsibleUserIds) ? item.responsibleUserIds : [],
+                            tippedUserIds: Array.isArray(item.tippedUserIds) ? item.tippedUserIds : [],
+                            tipPoolAmount: item.tipPoolAmount ?? null,
+                            tipAmount: item.tipAmount ?? null,
+                            penaltyAmount: item.penaltyAmount ?? null,
+                            maintenanceFeeAmount: item.maintenanceFeeAmount ?? null,
+                            reviewRemark: item.reviewRemark || null,
+                        },
+                    });
+                }
+            }
+
             /**
              * Step 7：后置同步
              * - 更新订单状态为 COMPLETED
@@ -2882,14 +3550,15 @@ export class OrdersService {
                 orderId,
                 operatorId,
                 settlements: result.settlements || [],
-                action: 'CONFIRM_COMPLETE_ORDER_V3',
-                remark: remark || '客服确认最终结单',
+                action: isAutoConfirm ? 'SYSTEM_AUTO_CONFIRM_COMPLETE_ORDER_24H' : 'CONFIRM_COMPLETE_ORDER_V3',
+                remark: remark || (isAutoConfirm ? '系统24小时自动确认结单' : '客服确认最终结单'),
                 orderStatusToUpdate: OrderStatus.COMPLETED,
                 logExtra: {
                     settlementBatchId: result.settlementBatchId,
                     freezeDays: result.freezeDays,
                     freezeStartAt: result.freezeStartAt,
                     freezeEndAt: result.freezeEndAt,
+                    confirmMode: isAutoConfirm ? 'AUTO' : 'MANUAL',
                 },
             });
 
@@ -2901,8 +3570,241 @@ export class OrdersService {
                 freezeDays: result.freezeDays,
                 freezeStartAt: result.freezeStartAt,
                 freezeEndAt: result.freezeEndAt,
+                confirmMode: isAutoConfirm ? 'AUTO' : 'MANUAL',
             };
         });
+    }
+
+    @Cron('0 */10 * * * *', { timeZone: 'Asia/Shanghai' })
+    async autoConfirmPendingOrders() {
+        const thresholdMs = 24 * 60 * 60 * 1000;
+        const now = Date.now();
+
+        const systemActor = await this.prisma.user.findFirst({
+            where: {
+                userType: UserType.SUPER_ADMIN,
+                status: 'ACTIVE',
+            },
+            orderBy: { id: 'asc' },
+            select: { id: true },
+        });
+
+        if (!systemActor?.id) {
+            this.logger.warn('[auto-confirm] 未找到可用超级管理员账号，跳过自动确认');
+            return { scanned: 0, confirmed: 0, skipped: 0 };
+        }
+
+        const pendingOrders = await this.prisma.order.findMany({
+            where: {
+                status: OrderStatus.COMPLETED_PENDING_CONFIRM,
+            },
+            orderBy: { updatedAt: 'asc' },
+            select: {
+                id: true,
+                isPaid: true,
+                isGifted: true,
+                payStatus: true,
+                updatedAt: true,
+                dispatches: {
+                    select: {
+                        completedAt: true,
+                    },
+                },
+            },
+        });
+
+        let confirmed = 0;
+        let skipped = 0;
+
+        for (const order of pendingOrders) {
+            if (!this.isOrderEffectivelyPaidOrGifted(order as any)) {
+                skipped++;
+                continue;
+            }
+
+            const anchorAt = this.getAutoConfirmAnchorAt(order as any);
+            if (!anchorAt) {
+                skipped++;
+                continue;
+            }
+
+            if (now - anchorAt.getTime() < thresholdMs) {
+                continue;
+            }
+
+            try {
+                this.logger.log(`[auto-confirm] start orderId=${order.id}, anchorAt=${anchorAt.toISOString()}`);
+                await this.confirmCompleteOrder(Number(order.id), systemActor.id, {
+                    remark: 'SYSTEM_AUTO_CONFIRM_24H',
+                    autoConfirm: true,
+                });
+                this.logger.log(`[auto-confirm] success orderId=${order.id}`);
+                confirmed++;
+            } catch (e: any) {
+                this.logger.error(
+                    `[auto-confirm] orderId=${order.id} 自动确认失败：${e?.message || e}`,
+                    e?.stack,
+                );
+            }
+        }
+
+        if (confirmed > 0 || skipped > 0) {
+            this.logger.log(
+                `[auto-confirm] scanned=${pendingOrders.length}, confirmed=${confirmed}, skipped=${skipped}`,
+            );
+        }
+
+        return {
+            scanned: pendingOrders.length,
+            confirmed,
+            skipped,
+        };
+    }
+
+    private buildEvaluationDateRange(scope?: string, startAt?: string, endAt?: string) {
+        const from = startAt ? new Date(startAt) : null;
+        const to = endAt ? new Date(endAt) : null;
+
+        if (from || to) {
+            const range: any = {};
+            if (from && !Number.isNaN(from.getTime())) range.gte = from;
+            if (to && !Number.isNaN(to.getTime())) range.lte = to;
+            return range;
+        }
+
+        const now = new Date();
+        const s = String(scope || 'ALL').toUpperCase();
+        if (s === 'ALL') return {};
+
+        const start = new Date(now);
+        start.setHours(0, 0, 0, 0);
+
+        if (s === 'WEEK') {
+            const day = start.getDay();
+            const diff = day === 0 ? 6 : day - 1;
+            start.setDate(start.getDate() - diff);
+            return { gte: start };
+        }
+
+        if (s === 'MONTH') {
+            start.setDate(1);
+            return { gte: start };
+        }
+
+        return {};
+    }
+
+    async getPlayerEvaluationLeaderboard(params: {
+        scope?: string;
+        startAt?: string;
+        endAt?: string;
+        keyword?: string;
+        page?: number;
+        limit?: number;
+    }) {
+        const page = Math.max(1, Number(params.page ?? 1));
+        const limit = Math.min(100, Math.max(1, Number(params.limit ?? 20)));
+        const where: any = {};
+        const createdAtRange = this.buildEvaluationDateRange(params.scope, params.startAt, params.endAt);
+        if (Object.keys(createdAtRange).length) {
+            where.createdAt = createdAtRange;
+        }
+
+        const rows = await this.prisma.orderPlayerEvaluation.findMany({
+            where,
+            include: {
+                player: {
+                    select: {
+                        id: true,
+                        name: true,
+                        avatar: true,
+                        rating: true,
+                        staffRating: { select: { rate: true } },
+                    },
+                },
+            },
+            orderBy: { createdAt: 'desc' },
+        });
+
+        const keyword = String(params.keyword || '').trim();
+        const aggMap = new Map<number, any>();
+
+        for (const row of rows) {
+            const player = row.player;
+            if (keyword) {
+                const hit =
+                    String(player?.name || '').includes(keyword) ||
+                    String(player?.id || '').includes(keyword);
+                if (!hit) continue;
+            }
+
+            const userId = Number(row.playerUserId);
+            const item = aggMap.get(userId) || {
+                userId,
+                player: player || null,
+                totalCount: 0,
+                scoreSum: 0,
+                goodCount: 0,
+                mediumCount: 0,
+                badCount: 0,
+                afterSaleCount: 0,
+                tipCount: 0,
+                tipTotal: 0,
+                penaltyTotal: 0,
+                maintenanceFeeTotal: 0,
+            };
+
+            const score = Number(row.score || 0);
+            item.totalCount += 1;
+            item.scoreSum += score;
+            if (score >= 4) item.goodCount += 1;
+            else if (score === 3) item.mediumCount += 1;
+            else item.badCount += 1;
+
+            if (row.afterSaleHandled) item.afterSaleCount += 1;
+            if (Number(row.tipAmount || 0) > 0) item.tipCount += 1;
+            item.tipTotal += Number(row.tipAmount || 0);
+            item.penaltyTotal += Number(row.penaltyAmount || 0);
+            item.maintenanceFeeTotal += Number(row.maintenanceFeeAmount || 0);
+
+            aggMap.set(userId, item);
+        }
+
+        const list = Array.from(aggMap.values()).map((item) => {
+            const totalCount = Number(item.totalCount || 0);
+            const scoreAvg = totalCount > 0 ? round2(Number(item.scoreSum || 0) / totalCount) : 0;
+            const goodRate = totalCount > 0 ? round2((Number(item.goodCount || 0) / totalCount) * 100) : 0;
+            return {
+                ...item,
+                ratingAvg: scoreAvg,
+                goodRate,
+                badRate: totalCount > 0 ? round2((Number(item.badCount || 0) / totalCount) * 100) : 0,
+            };
+        }).sort((a, b) => {
+            const scoreDiff = Number(b.ratingAvg || 0) - Number(a.ratingAvg || 0);
+            if (scoreDiff !== 0) return scoreDiff;
+            const goodRateDiff = Number(b.goodRate || 0) - Number(a.goodRate || 0);
+            if (goodRateDiff !== 0) return goodRateDiff;
+            const goodCountDiff = Number(b.goodCount || 0) - Number(a.goodCount || 0);
+            if (goodCountDiff !== 0) return goodCountDiff;
+            return Number(b.tipTotal || 0) - Number(a.tipTotal || 0);
+        });
+
+        const total = list.length;
+        const items = list.slice((page - 1) * limit, (page - 1) * limit + limit);
+
+        return {
+            scope: String(params.scope || 'ALL').toUpperCase(),
+            page,
+            limit,
+            total,
+            items,
+            summary: {
+                totalPlayers: total,
+                totalReviews: rows.length,
+                totalTips: round2(list.reduce((sum, it) => sum + Number(it.tipTotal || 0), 0)),
+            },
+        };
     }
     
     

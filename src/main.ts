@@ -1,6 +1,7 @@
 // src/main.ts
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 function parseCorsWhitelist(env?: string): string[] {
   if (!env) return [];
@@ -68,6 +69,21 @@ async function bootstrap() {
     allowedHeaders: ['Content-Type', 'Authorization'],
     exposedHeaders: ['x-access-token'],
   });
+
+  if (process.env.ENABLE_SWAGGER === 'true' || !isProd) {
+    const config = new DocumentBuilder()
+      .setTitle('BlueCat MiniApp API')
+      .setDescription('MiniApp 联调接口文档')
+      .setVersion('1.0.0')
+      .addBearerAuth()
+      .build();
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup('api-docs', app, document, {
+      swaggerOptions: {
+        persistAuthorization: true,
+      },
+    });
+  }
 
   // ✅ 端口占用时给出更清晰的提示
   try {

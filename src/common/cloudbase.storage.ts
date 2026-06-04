@@ -13,7 +13,7 @@ let cachedExpireAtMs = 0;
 
 function assertSecret() {
     if (!SECRET_ID || !SECRET_KEY) {
-        throw new BadRequestException('缺少云开发密钥：请配置环境变量 TCB_SECRET_ID / TCB_SECRET_KEY');
+        throw new BadRequestException('缺少云开发密钥：请配置 TCB_SECRET_ID / TCB_SECRET_KEY');
     }
 }
 
@@ -255,6 +255,50 @@ export async function tcbUploadFile(params: { cloudPath: string; fileContent: Bu
 
     return {
         cloudPath,
+        cloudObjectId: item.cloudObjectId || null,
+        downloadUrl: item.downloadUrl || null,
+        downloadUrlEncoded: item.downloadUrlEncoded || null,
+    };
+}
+
+/**
+ * 获取直传 COS 的上传凭证信息（前端直传用）
+ * HTTP API：/v1/storages/get-objects-upload-info
+ */
+export async function tcbGetUploadInfo(params: { cloudPath: string }) {
+    const { cloudPath } = params;
+    if (!cloudPath) throw new BadRequestException('cloudPath 不能为空');
+
+    const arr = await postStorageApi<
+        Array<{
+            objectId: string;
+            uploadUrl?: string;
+            authorization?: string;
+            token?: string;
+            cloudObjectMeta?: string;
+            code?: string;
+            message?: string;
+            cloudObjectId?: string;
+            downloadUrl?: string;
+            downloadUrlEncoded?: string;
+        }>
+    >('/v1/storages/get-objects-upload-info', [{ objectId: cloudPath }]);
+
+    const item = Array.isArray(arr) ? arr[0] : null;
+    if (!item) throw new BadRequestException('获取上传信息失败（空响应）');
+    if ((item as any).code) {
+        throw new BadRequestException(`获取上传信息失败：${(item as any).code} ${(item as any).message || ''}`);
+    }
+    if (!item.uploadUrl || !item.authorization || !item.cloudObjectMeta) {
+        throw new BadRequestException('获取上传信息失败（缺少 uploadUrl/authorization/cloudObjectMeta）');
+    }
+
+    return {
+        cloudPath,
+        uploadUrl: item.uploadUrl,
+        authorization: item.authorization,
+        token: item.token || '',
+        cloudObjectMeta: item.cloudObjectMeta,
         cloudObjectId: item.cloudObjectId || null,
         downloadUrl: item.downloadUrl || null,
         downloadUrlEncoded: item.downloadUrlEncoded || null,

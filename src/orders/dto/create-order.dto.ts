@@ -48,6 +48,10 @@ export class CreateOrderDto {
     customerGameId?: string;
 
     @IsOptional()
+    @IsString()
+    orderSource?: string;
+
+    @IsOptional()
     @IsNumber()
     csRate?: number; // 默认：非体验单 0.01，体验单 0
 

@@ -12,6 +12,43 @@ import { WalletService } from '../wallet/wallet.service';
 export class UsersService {
   constructor(private prisma: PrismaService, private wallet: WalletService) {}
 
+  private getActorAllowedUserTypes(actor?: { userType?: UserType; permissions?: string[] }): UserType[] | null {
+    const permissions = Array.isArray(actor?.permissions) ? actor!.permissions! : [];
+    const allowed = new Set<UserType>();
+
+    if (permissions.includes('users:member:page')) {
+      allowed.add(UserType.REGISTERED_USER);
+    }
+
+    if (permissions.includes('users:staff:page')) {
+      allowed.add(UserType.STAFF);
+    }
+
+    if (permissions.includes('users:internal:page')) {
+      allowed.add(UserType.SUPER_ADMIN);
+      allowed.add(UserType.ADMIN);
+      allowed.add(UserType.CUSTOMER_SERVICE);
+      allowed.add(UserType.OPERATION);
+      allowed.add(UserType.FINANCE);
+    }
+
+    if (!allowed.size) {
+      throw new ForbiddenException('当前角色无权访问用户管理');
+    }
+
+    return Array.from(allowed);
+  }
+
+  private assertActorCanAccessUser(
+    actor: { userType?: UserType; permissions?: string[] } | undefined,
+    targetUserType?: UserType,
+  ) {
+    const allowed = this.getActorAllowedUserTypes(actor);
+    if (!targetUserType || !allowed.includes(targetUserType)) {
+      throw new ForbiddenException('无权访问该用户');
+    }
+  }
+
   private normalizeWorkModePayload(input: { workMode?: 'ONLINE' | 'OFFLINE'; offlineJoinedAt?: string | Date | null }) {
     const workMode = (input.workMode ?? 'ONLINE') as 'ONLINE' | 'OFFLINE';
     const offlineJoinedAtRaw = input.offlineJoinedAt ?? null;
@@ -27,8 +64,13 @@ export class UsersService {
     };
   }
 
-  async create(createUserDto: CreateUserDto, operatorId?: number) {
+  async create(
+    createUserDto: CreateUserDto,
+    operatorId?: number,
+    actor?: { userType?: UserType; permissions?: string[] },
+  ) {
     const { phone, password, userType = UserType.REGISTERED_USER, ...rest } = createUserDto;
+    this.assertActorCanAccessUser(actor, userType);
     const workModePayload = this.normalizeWorkModePayload({
       workMode: createUserDto.workMode,
       offlineJoinedAt: createUserDto.offlineJoinedAt,
@@ -99,6 +141,8 @@ export class UsersService {
     search?: string;
     userType?: UserType;
     status?: string;
+    scene?: string;
+    actor?: { userType?: UserType; permissions?: string[]; id?: number; userId?: number };
 
     loginInactiveDays?: number;   // 新增：超过多少天未登录
     acceptInactiveDays?: number;  // 新增：超过多少天未接单
@@ -108,6 +152,8 @@ export class UsersService {
       search,
       userType,
       status,
+      scene,
+      actor,
       loginInactiveDays,
       acceptInactiveDays
     } = params;
@@ -117,6 +163,39 @@ export class UsersService {
 
     const where: any = {};
     const AND: any[] = [];
+
+    const sceneKey = String(scene || '').trim().toUpperCase() || 'DEFAULT';
+    const actorAllowedUserTypes = this.getActorAllowedUserTypes(actor);
+
+    const resolveSceneUserTypes = (): UserType[] | null => {
+      const sceneTypeMap: Record<string, UserType[] | null> = {
+        MEMBER: [UserType.REGISTERED_USER],
+        STAFF: [UserType.STAFF],
+        INTERNAL: [UserType.SUPER_ADMIN, UserType.ADMIN, UserType.CUSTOMER_SERVICE, UserType.OPERATION, UserType.FINANCE],
+        ALL: actorAllowedUserTypes,
+        DEFAULT: actorAllowedUserTypes,
+      };
+
+      const requestedTypes = sceneTypeMap[sceneKey];
+      if (requestedTypes === undefined) {
+        throw new ForbiddenException('无效的用户管理场景');
+      }
+
+      if (requestedTypes === null) {
+        return actorAllowedUserTypes;
+      }
+
+      const filteredTypes = requestedTypes.filter((type) => actorAllowedUserTypes.includes(type));
+      if (!filteredTypes.length) {
+        throw new ForbiddenException('当前角色无权访问该用户管理场景');
+      }
+      return filteredTypes;
+    };
+
+    const sceneUserTypes = resolveSceneUserTypes();
+    if (sceneUserTypes?.length) {
+      AND.push({ userType: { in: sceneUserTypes } });
+    }
 
     /**
      * 1️⃣ 搜索：支持 ID / 手机号 / name / realName
@@ -141,6 +220,9 @@ export class UsersService {
      * 2️⃣ 用户类型
      */
     if (userType) {
+      if (sceneUserTypes?.length && !sceneUserTypes.includes(userType)) {
+        throw new ForbiddenException('当前场景不允许查询该用户类型');
+      }
       AND.push({ userType });
     }
 
@@ -267,7 +349,7 @@ export class UsersService {
     };
   }
 
-  async findOne(id: number) {
+  async findOne(id: number, actor?: { userType?: UserType }) {
     const user = await this.prisma.user.findUnique({
       where: { id },
       include: {
@@ -300,11 +382,12 @@ export class UsersService {
     if (!user) {
       throw new NotFoundException('用户不存在');
     }
+    this.assertActorCanAccessUser(actor, user.userType);
 
     return user;
   }
 
-  async update(id: number, updateUserDto: UpdateUserDto, operatorId?: number) {
+  async update(id: number, updateUserDto: UpdateUserDto, operatorId?: number, actor?: { userType?: UserType }) {
 
     const oldUser = await this.prisma.user.findUnique({
       where: { id },
@@ -314,6 +397,7 @@ export class UsersService {
     if (!oldUser) {
       throw new NotFoundException('用户不存在');
     }
+    this.assertActorCanAccessUser(actor, oldUser.userType);
 
     if (updateUserDto.password) {
       updateUserDto.password = await bcrypt.hash(updateUserDto.password, 10);
@@ -571,7 +655,7 @@ export class UsersService {
     return changes.length > 0 ? `修改了: ${changes.join('; ')}` : '未修改任何字段';
   }
 
-  async changeLevel(id: number, changeLevelDto: ChangeLevelDto, operatorId: number) {
+  async changeLevel(id: number, changeLevelDto: ChangeLevelDto, operatorId: number, actor?: { userType?: UserType }) {
     const user = await this.prisma.user.findUnique({
       where: { id },
       include: this.getUserIncludeFields(), // 改为使用 include
@@ -580,6 +664,7 @@ export class UsersService {
     if (!user) {
       throw new NotFoundException('用户不存在');
     }
+    this.assertActorCanAccessUser(actor, user.userType);
 
     // 只有员工才能调整等级
     if (user.userType !== 'STAFF') {
@@ -615,7 +700,7 @@ export class UsersService {
     return updatedUser;
   }
 
-  async resetPassword(id: number, resetPasswordDto: ResetPasswordDto, operatorId: number) {
+  async resetPassword(id: number, resetPasswordDto: ResetPasswordDto, operatorId: number, actor?: { userType?: UserType }) {
     const user = await this.prisma.user.findUnique({
       where: { id },
       include: this.getUserIncludeFields(), // 改为使用 include
@@ -624,6 +709,7 @@ export class UsersService {
     if (!user) {
       throw new NotFoundException('用户不存在');
     }
+    this.assertActorCanAccessUser(actor, user.userType);
 
     // 生成随机密码
     const tempPassword = Math.random().toString(36).slice(-8);
@@ -656,7 +742,7 @@ export class UsersService {
     };
   }
 
-  async remove(id: number, operatorId?: number) {
+  async remove(id: number, operatorId?: number, actor?: { userType?: UserType }) {
     const user = await this.prisma.user.findUnique({
       where: { id },
       include: this.getUserIncludeFields(), // 改为使用 include
@@ -665,6 +751,7 @@ export class UsersService {
     if (!user) {
       throw new NotFoundException('用户不存在');
     }
+    this.assertActorCanAccessUser(actor, user.userType);
 
     await this.prisma.user.delete({
       where: { id },
@@ -705,6 +792,36 @@ export class UsersService {
           name: true,
           description: true
         }
+      },
+      memberProfile: {
+        select: {
+          memberCode: true,
+          levelCode: true,
+          totalRechargeAmount: true,
+          totalConsumeAmount: true,
+          annualContribution: true,
+          lastRechargeAt: true,
+        },
+      },
+      memberPointAccount: {
+        select: {
+          availablePoints: true,
+          totalEarnedPoints: true,
+          totalSpentPoints: true,
+        },
+      },
+      wechatBindings: {
+        select: {
+          id: true,
+          platform: true,
+          appId: true,
+          openId: true,
+          unionId: true,
+          lastBindAt: true,
+          lastLoginAt: true,
+        },
+        orderBy: [{ lastLoginAt: 'desc' as const }, { updatedAt: 'desc' as const }],
+        take: 5,
       }
     };
   }

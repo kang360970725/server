@@ -40,7 +40,7 @@ export class CreateCouponTemplateDto {
 
   @IsOptional()
   @IsArray()
-  applicableProjectIds?: number[];
+  applicableProjectIds?: Array<number | string>;
 
   @IsOptional()
   @IsEnum(CouponTemplateStatus)

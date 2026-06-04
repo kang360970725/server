@@ -18,6 +18,7 @@ import { MarkPaidDto } from './dto/mark-paid.dto';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import {DispatchStatus} from "@prisma/client";
+import { SystemConfigService } from '../system-config/system-config.service';
 
 /**
  * Orders Controller（v0.1）
@@ -27,7 +28,17 @@ import {DispatchStatus} from "@prisma/client";
 @Controller('orders')
 @UseGuards(JwtAuthGuard)
 export class OrdersController {
-    constructor(private readonly ordersService: OrdersService) {}
+    constructor(
+        private readonly ordersService: OrdersService,
+        private readonly systemConfigService: SystemConfigService,
+    ) {}
+
+    private assertCustomerServiceOrSuperAdmin(user: any) {
+        const userType = String(user?.userType || '').trim();
+        if (!['CUSTOMER_SERVICE', 'SUPER_ADMIN'].includes(userType)) {
+            throw new ForbiddenException('仅客服或超级管理员可操作');
+        }
+    }
 
     /** 订单列表（管理端） */
     @Post('list')
@@ -36,6 +47,14 @@ export class OrdersController {
     async list(@Body() body: any) {
         const page = Math.max(1, Number(body.page ?? 1));
         const limit = Math.min(100, Math.max(1, Number(body.limit ?? 20)));
+        const isPaid =
+            body.isPaid === undefined || body.isPaid === null || body.isPaid === ''
+                ? undefined
+                : body.isPaid === true || body.isPaid === 'true' || body.isPaid === 1 || body.isPaid === '1'
+                    ? true
+                    : body.isPaid === false || body.isPaid === 'false' || body.isPaid === 0 || body.isPaid === '0'
+                        ? false
+                        : Boolean(body.isPaid);
         return this.ordersService.listOrders({
             page,
             limit,
@@ -47,7 +66,30 @@ export class OrdersController {
             projectId: body.projectId != null ? Number(body.projectId) : undefined,
             dispatcherId: body.dispatcherId != null ? Number(body.dispatcherId) : undefined,
             playerId: body.playerId != null ? Number(body.playerId) : undefined,
-            isPaid: body.isPaid === undefined ? undefined : Boolean(body.isPaid),
+            orderSource: body.orderSource ? String(body.orderSource).trim() : undefined,
+            isPaid,
+        });
+    }
+
+    @Post('source-options')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:list:page')
+    async sourceOptions() {
+        return this.systemConfigService.getEnabledOrderSourceOptions();
+    }
+
+    /** 打手评价榜单 */
+    @Post('player-evaluations/leaderboard')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:list:page')
+    async playerEvaluationLeaderboard(@Body() body: any) {
+        return this.ordersService.getPlayerEvaluationLeaderboard({
+            scope: body?.scope,
+            startAt: body?.startAt,
+            endAt: body?.endAt,
+            keyword: body?.keyword,
+            page: Number(body?.page ?? 1),
+            limit: Number(body?.limit ?? 20),
         });
     }
 
@@ -67,6 +109,7 @@ export class OrdersController {
     @Permissions('orders:list:page')
     async create(@Body() body: any, @Request() req: any) {
         const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+        this.assertCustomerServiceOrSuperAdmin(req?.user);
         return this.ordersService.createOrder(body, operatorId);
     }
 
@@ -78,6 +121,16 @@ export class OrdersController {
         const id = Number(body.id);
         if (!id || Number.isNaN(id)) throw new BadRequestException('id 必须为数字');
         return this.ordersService.cancelOrder(id, req.user?.userId, body.remark);
+    }
+
+    /** 删除订单（管理端） */
+    @Post('delete')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:list:page')
+    async remove(@Body() body: any, @Request() req: any) {
+        const id = Number(body.id);
+        if (!id || Number.isNaN(id)) throw new BadRequestException('id 必须为数字');
+        return this.ordersService.deleteOrder(id, req.user?.userId, body.remark);
     }
 
     /** 派单/重新派单（管理端） */
@@ -171,9 +224,12 @@ export class OrdersController {
 
     /** 确认结算 */
     @Post('confirm-complete')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:detail:page')
     async confirmComplete(@Body() body: any, @Req() req: any) {
         const orderId = Number(body?.id);
         if (!orderId) throw new BadRequestException('id 必填');
+        this.assertCustomerServiceOrSuperAdmin(req?.user);
 
         return this.ordersService.confirmCompleteOrder(
             orderId,
@@ -182,7 +238,8 @@ export class OrdersController {
                 remark: body?.remark,
                 paidAmount: body?.paidAmount,
                 confirmPaid: body?.confirmPaid, // 可选：默认 true
-                modePlayAllocList: body?.modePlayAllocList //趣味玩法单 客服设定的每轮收益
+                modePlayAllocList: body?.modePlayAllocList, //趣味玩法单 客服设定的每轮收益
+                playerEvaluations: body?.playerEvaluations,
             },
         );
     }

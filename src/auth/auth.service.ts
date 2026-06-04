@@ -6,6 +6,7 @@ import {
   ForbiddenException
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import type { StringValue } from 'ms';
 import { PrismaService } from '../prisma.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
@@ -14,10 +15,47 @@ import * as bcrypt from 'bcrypt';
 
 @Injectable()
 export class AuthService {
+  static readonly DEFAULT_ACCESS_TOKEN_EXPIRES_IN = '2h';
+  static readonly MINI_ACCESS_TOKEN_EXPIRES_IN = '30d';
+
   constructor(
       private prisma: PrismaService,
       private jwtService: JwtService,
   ) {}
+
+  private signAccessToken(
+    user: { id?: number; userId?: number; phone?: string; name?: string },
+    expiresIn: StringValue | number = AuthService.DEFAULT_ACCESS_TOKEN_EXPIRES_IN as StringValue,
+  ) {
+    const uid = Number(user?.id || user?.userId || 0);
+    if (!uid) throw new UnauthorizedException('无效用户');
+    const payload = {
+      phone: String(user?.phone || '').trim(),
+      sub: uid,
+      name: String(user?.name || '').trim(),
+    };
+    return this.jwtService.sign(payload, { expiresIn });
+  }
+
+  private buildMiniProfileCompletion(user: any) {
+    const phone = String(user?.phone || '').trim();
+    const name = String(user?.name || '').trim();
+    const avatar = String(user?.avatar || '').trim();
+    const bindings = Array.isArray(user?.wechatBindings) ? user.wechatBindings : [];
+    const latestBinding = bindings[0] || null;
+    const bindingNickname = String(latestBinding?.nickname || '').trim();
+
+    const needPhone = !phone || phone.startsWith('wx_');
+    const needNickname = !bindingNickname && (!name || name.startsWith('微信用户'));
+    const needAvatar = !avatar;
+
+    return {
+      completed: !(needPhone || needNickname || needAvatar),
+      needPhone,
+      needNickname,
+      needAvatar,
+    };
+  }
 
   async register(registerDto: RegisterDto) {
     // 添加 null 检查
@@ -64,8 +102,7 @@ export class AuthService {
     });
 
     // 生成 token
-    const payload = { phone: user.phone, sub: user.id, name };
-    const access_token = this.jwtService.sign(payload);
+    const access_token = this.signAccessToken(user);
 
     return {
       access_token,
@@ -107,8 +144,7 @@ export class AuthService {
         lastLoginAt: new Date(),
       },
     });
-    const payload = { phone: user.phone, sub: user.id, name: user.name };
-    const access_token = this.jwtService.sign(payload);
+    const access_token = this.signAccessToken(user);
 
     // 返回用户信息（不包含密码）
     const { password: _, ...userWithoutPassword } = user;
@@ -154,6 +190,44 @@ export class AuthService {
         needResetPwd: true,
         roleId: true,
         createdAt: true,
+        memberProfile: {
+          select: {
+            levelCode: true,
+            memberCode: true,
+            totalRechargeAmount: true,
+            annualContribution: true,
+          },
+        },
+        memberPointAccount: {
+          select: {
+            availablePoints: true,
+            totalEarnedPoints: true,
+            totalSpentPoints: true,
+          },
+        },
+        walletAccount: {
+          select: {
+            availableBalance: true,
+            frozenBalance: true,
+            depositBalance: true,
+            walletUid: true,
+          },
+        },
+        wechatBindings: {
+          select: {
+            id: true,
+            platform: true,
+            appId: true,
+            openId: true,
+            unionId: true,
+            nickname: true,
+            avatarUrl: true,
+            lastBindAt: true,
+            lastLoginAt: true,
+          },
+          orderBy: [{ lastLoginAt: 'desc' as const }, { updatedAt: 'desc' as const }],
+          take: 5,
+        },
         Role: {
           select: {
             id: true,
@@ -169,27 +243,29 @@ export class AuthService {
     }
 
     const permissions = user.Role?.permissions?.map((p) => p.key) || [];
+    const profileCompletion = this.buildMiniProfileCompletion(user);
 
     // ✅ 不把 Role.permissions 全量给前端也行；这里保留 Role 基础信息方便展示
     return {
       ...user,
       permissions,
+      profileCompletion,
+      profileCompleted: profileCompletion.completed,
     };
   }
 
-  refreshAccessToken(user: { id?: number; userId?: number; phone?: string; name?: string }) {
-    const uid = Number(user?.id || user?.userId || 0);
-    if (!uid) throw new UnauthorizedException('无效用户');
-
-    const payload = {
-      phone: String(user?.phone || '').trim(),
-      sub: uid,
-      name: String(user?.name || '').trim(),
-    };
-    const access_token = this.jwtService.sign(payload);
+  refreshAccessToken(
+    user: { id?: number; userId?: number; phone?: string; name?: string },
+    options?: { mini?: boolean },
+  ) {
+    const mini = !!options?.mini;
+    const access_token = this.signAccessToken(
+      user,
+      mini ? AuthService.MINI_ACCESS_TOKEN_EXPIRES_IN : AuthService.DEFAULT_ACCESS_TOKEN_EXPIRES_IN,
+    );
     return {
       access_token,
-      expiresInSeconds: 2 * 60 * 60,
+      expiresInSeconds: mini ? 30 * 24 * 60 * 60 : 2 * 60 * 60,
     };
   }
 

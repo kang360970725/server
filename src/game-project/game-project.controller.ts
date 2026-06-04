@@ -8,6 +8,7 @@ import {
     Delete,
     ParseIntPipe,
     Put,
+    Req,
     UseGuards,
 } from '@nestjs/common';
 import { GameProjectService } from './game-project.service';
@@ -37,11 +38,33 @@ export class GameProjectController {
         return this.gameProjectService.options(body);
     }
 
+    @Post('upload-info')
+    @UseGuards(PermissionsGuard)
+    @Permissions('system:game-project:page')
+    uploadInfo(@Body() body: { filename?: string; scene?: string }) {
+        return this.gameProjectService.getUploadInfo(body || {});
+    }
+
+    // 商品联动下拉：从菜单项目管理中筛选“商品”分类
+    @Post('options/product')
+    @UseGuards(PermissionsGuard)
+    @Permissions('system:game-project:page')
+    productOptions(@Body() body: any) {
+        return this.gameProjectService.options({ ...(body || {}), category: '商品' });
+    }
+
     @Get()
     @UseGuards(PermissionsGuard)
     @Permissions('system:game-project:page')
     findAll() {
         return this.gameProjectService.findAll();
+    }
+
+    @Post('list')
+    @UseGuards(PermissionsGuard)
+    @Permissions('system:game-project:page')
+    list(@Body() body: any) {
+        return this.gameProjectService.list(body || {});
     }
 
     @Get(':id')
@@ -88,5 +111,36 @@ export class GameProjectController {
     @Get('public/menu/:id')
     publicMenuDetail(@Param('id', ParseIntPipe) id: number) {
         return this.gameProjectService.publicMenuDetail(id);
+    }
+
+    @Get(':id/rating-summary')
+    @UseGuards(PermissionsGuard)
+    @Permissions('system:game-project:page')
+    ratingSummary(@Param('id', ParseIntPipe) id: number) {
+        return this.gameProjectService.ratingSummary(id);
+    }
+
+    @Post(':id/reviews/list')
+    @UseGuards(PermissionsGuard)
+    @Permissions('system:game-project:page')
+    listReviews(@Param('id', ParseIntPipe) id: number, @Body() body: any) {
+        return this.gameProjectService.listReviews({
+            projectId: id,
+            page: body?.page,
+            limit: body?.limit,
+            includeHidden: body?.includeHidden,
+        });
+    }
+
+    @Post('reviews/:reviewId/hide')
+    @UseGuards(PermissionsGuard)
+    @Permissions('system:game-project:page')
+    hideReview(@Req() req: any, @Param('reviewId', ParseIntPipe) reviewId: number, @Body() body: any) {
+        const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+        return this.gameProjectService.hideReview(reviewId, {
+            hidden: Boolean(body?.hidden),
+            reason: body?.reason ? String(body.reason) : undefined,
+            operatorId: Number.isFinite(operatorId) ? operatorId : undefined,
+        });
     }
 }

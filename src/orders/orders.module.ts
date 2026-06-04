@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { WalletModule } from '../wallet/wallet.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PenaltiesModule } from '../penalties/penalties.module';
+import { SystemConfigModule } from '../system-config/system-config.module';
 
 /**
  * OrdersModule
@@ -12,7 +13,7 @@ import { PenaltiesModule } from '../penalties/penalties.module';
  * - 仅新增 imports，不影响既有 controller/provider 行为
  */
 @Module({
-    imports: [WalletModule, NotificationsModule, PenaltiesModule],
+    imports: [WalletModule, NotificationsModule, PenaltiesModule, SystemConfigModule],
     controllers: [OrdersController],
     providers: [OrdersService, PrismaService],
     exports: [OrdersService],

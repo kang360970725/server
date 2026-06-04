@@ -2,10 +2,53 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateGameProjectDto, UpdateGameProjectDto } from './dto/game-project.dto';
 import { OrderType, ProjectStatus, BillingMode } from '@prisma/client';
+import { tcbGetUploadInfo } from '../common/cloudbase.storage';
+import { SystemConfigService } from '../system-config/system-config.service';
 
 @Injectable()
 export class GameProjectService {
-    constructor(private prisma: PrismaService) {}
+    constructor(
+        private prisma: PrismaService,
+        private readonly systemConfigService: SystemConfigService,
+    ) {}
+
+    private buildCategoryNameMap(nodes: any[]): Map<string, string> {
+        const map = new Map<string, string>();
+        const walk = (arr: any[]) => {
+            (arr || []).forEach((node) => {
+                const id = String(node?.id || '').trim();
+                const name = String(node?.name || '').trim();
+                if (id && name) map.set(id, name);
+                if (Array.isArray(node?.children)) walk(node.children);
+            });
+        };
+        walk(nodes || []);
+        return map;
+    }
+
+    private buildTagNameMap(tags: any[]): Map<string, string> {
+        const map = new Map<string, string>();
+        (tags || []).forEach((tag) => {
+            const id = String(tag?.id || '').trim();
+            const name = String(tag?.name || '').trim();
+            if (id && name) map.set(id, name);
+        });
+        return map;
+    }
+
+    async getUploadInfo(params: { filename?: string; scene?: string }) {
+        const rawName = String(params?.filename || 'file').trim();
+        const safeName = rawName.replace(/[^\w.\-]/g, '_').slice(-80) || 'file';
+        const ext = safeName.includes('.') ? safeName.split('.').pop() : 'bin';
+        const scene = String(params?.scene || 'detail').trim() || 'detail';
+        const date = new Date();
+        const y = date.getFullYear();
+        const m = `${date.getMonth() + 1}`.padStart(2, '0');
+        const d = `${date.getDate()}`.padStart(2, '0');
+        const stamp = Date.now();
+        const cloudPath = `uploads/game-project/${scene}/${y}${m}${d}/${stamp}.${ext}`;
+        return tcbGetUploadInfo({ cloudPath });
+    }
 
     async create(createGameProjectDto: CreateGameProjectDto) {
         const data: any = {
@@ -26,6 +69,64 @@ export class GameProjectService {
             where: { status: 'ACTIVE' },
             orderBy: { createdAt: 'desc' },
         });
+    }
+
+    async list(params: {
+        page?: number;
+        limit?: number;
+        keyword?: string;
+        gameType?: string;
+        category?: string;
+        status?: string;
+    }) {
+        const page = Math.max(1, Number(params?.page || 1));
+        const limit = Math.min(100, Math.max(1, Number(params?.limit || 20)));
+        const skip = (page - 1) * limit;
+        const where: any = {};
+
+        const keyword = String(params?.keyword || '').trim();
+        if (keyword) {
+            where.OR = [
+                { name: { contains: keyword } },
+                { description: { contains: keyword } },
+            ];
+        }
+        if (params?.gameType) where.gameType = String(params.gameType).trim();
+        if (params?.category) where.category = String(params.category).trim();
+        if (params?.status) where.status = String(params.status).trim();
+
+        const [data, total] = await Promise.all([
+            this.prisma.gameProject.findMany({
+                where,
+                orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+                skip,
+                take: limit,
+            }),
+            this.prisma.gameProject.count({ where }),
+        ]);
+        const ids = data.map((x) => Number(x.id)).filter((x) => Number.isFinite(x) && x > 0);
+        const ratingRows = ids.length
+            ? await this.prisma.productReview.findMany({
+                where: { projectId: { in: ids }, isHidden: false },
+                select: { projectId: true, score: true },
+            })
+            : [];
+        const bucket = new Map<number, { sum: number; cnt: number }>();
+        ratingRows.forEach((r) => {
+            const old = bucket.get(r.projectId) || { sum: 0, cnt: 0 };
+            old.sum += Number(r.score || 0);
+            old.cnt += 1;
+            bucket.set(r.projectId, old);
+        });
+        const merged = data.map((item: any) => {
+            const st = bucket.get(Number(item.id));
+            return {
+                ...item,
+                ratingAvg: st?.cnt ? Number((st.sum / st.cnt).toFixed(2)) : 5.0,
+                ratingCount: st?.cnt || 0,
+            };
+        });
+        return { data: merged, total, page, limit, totalPages: Math.ceil(total / limit) };
     }
 
     async findOne(id: number) {
@@ -60,10 +161,13 @@ export class GameProjectService {
         });
     }
 
-    async options(params: { keyword?: string }) {
+    async options(params: { keyword?: string; category?: string }) {
         const where: any = { status: 'ACTIVE' };
         if (params?.keyword) {
             where.OR = [{ name: { contains: params.keyword } }];
+        }
+        if (params?.category) {
+            where.category = String(params.category).trim();
         }
         return this.prisma.gameProject.findMany({
             where,
@@ -78,8 +182,11 @@ export class GameProjectService {
         gameType?: string;
         projectType?: string;
         category?: string;
+        page?: number;
+        limit?: number;
     }) {
         const where: any = { status: 'ACTIVE' };
+        where.showInMenuList = true;
         if (params?.keyword) {
             where.name = { contains: String(params.keyword).trim() };
         }
@@ -87,64 +194,253 @@ export class GameProjectService {
         if (params?.projectType) where.projectType = String(params.projectType).trim();
         if (params?.category) where.category = String(params.category).trim();
 
-        const list = await this.prisma.gameProject.findMany({
+        const hasPaging = Number.isFinite(Number(params?.page)) || Number.isFinite(Number(params?.limit));
+        const page = hasPaging ? Math.max(1, Number(params?.page || 1)) : 1;
+        const limit = hasPaging ? Math.min(30, Math.max(1, Number(params?.limit || 20))) : 0;
+        const skip = hasPaging ? (page - 1) * limit : 0;
+
+        const selectFields = {
+            id: true,
+            name: true,
+            price: true,
+            originPrice: true,
+            type: true,
+            billingMode: true,
+            baseAmount: true,
+            clubRate: true,
+            coverImage: true,
+            description: true,
+            gameType: true,
+            projectType: true,
+            category: true,
+        } as const;
+
+        const listQuery = this.prisma.gameProject.findMany({
             where,
             orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
-            select: {
-                id: true,
-                name: true,
-                price: true,
-                type: true,
-                billingMode: true,
-                baseAmount: true,
-                clubRate: true,
-                coverImage: true,
-                description: true,
-                gameType: true,
-                projectType: true,
-                category: true,
-            },
+            ...(hasPaging ? { skip, take: limit } : {}),
+            select: selectFields,
         });
 
-        const pickTags = (rows: any[], key: 'gameType' | 'projectType' | 'category') =>
+        const totalQuery = hasPaging ? this.prisma.gameProject.count({ where }) : Promise.resolve(0);
+        const [list, total, categoryTree, tagList, filterRows] = await Promise.all([
+            listQuery,
+            totalQuery,
+            this.systemConfigService.getGoodsCategoryTree(),
+            this.systemConfigService.getGoodsTagList(),
+            this.prisma.gameProject.findMany({
+                where: { status: 'ACTIVE' },
+                orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+                select: {
+                    gameType: true,
+                    projectType: true,
+                    category: true,
+                },
+            }),
+        ]);
+
+        const categoryNameMap = this.buildCategoryNameMap(Array.isArray(categoryTree) ? categoryTree : []);
+        const tagNameMap = this.buildTagNameMap(Array.isArray(tagList) ? tagList : []);
+        const mappedList = list.map((item: any) => {
+            const gameTypeId = String(item?.gameType || '').trim();
+            const categoryId = String(item?.category || '').trim();
+            const resolvedCategoryId = categoryId || gameTypeId;
+            const projectTypeIds = String(item?.projectType || '')
+                .split(',')
+                .map((x) => x.trim())
+                .filter((x) => !!x);
+            const projectTypeNames = projectTypeIds.map((id) => tagNameMap.get(id) || id);
+            return {
+                ...item,
+                gameTypeId: gameTypeId || null,
+                categoryId: resolvedCategoryId || null,
+                category: resolvedCategoryId || null,
+                gameTypeName: gameTypeId ? categoryNameMap.get(gameTypeId) || null : null,
+                categoryName: resolvedCategoryId ? categoryNameMap.get(resolvedCategoryId) || null : null,
+                projectTypeNames,
+            };
+        });
+
+        const pickTags = (rows: any[], key: 'gameTypeName' | 'categoryName') =>
             Array.from(
                 new Set(
                     rows
-                        .map((x) => (x?.[key] || '').trim())
+                        .map((x) => String(x?.[key] || '').trim())
                         .filter((x) => !!x),
                 ),
             );
+        const pickProjectTypes = (rows: any[]) =>
+            Array.from(
+                new Set(
+                    rows.flatMap((x) =>
+                        Array.isArray(x?.projectTypeNames)
+                            ? x.projectTypeNames.map((y: any) => String(y || '').trim()).filter(Boolean)
+                            : [],
+                    ),
+                ),
+            );
+
+        const filterItems = filterRows.map((item: any) => {
+            const gameTypeId = String(item?.gameType || '').trim();
+            const categoryId = String(item?.category || '').trim();
+            const resolvedCategoryId = categoryId || null;
+            const projectTypeIds = String(item?.projectType || '')
+                .split(',')
+                .map((x) => x.trim())
+                .filter((x) => !!x);
+            const projectTypeNames = projectTypeIds.map((id) => tagNameMap.get(id) || id);
+            return {
+                ...item,
+                gameTypeId: gameTypeId || null,
+                categoryId: resolvedCategoryId || null,
+                category: categoryId || null,
+                gameTypeName: gameTypeId ? categoryNameMap.get(gameTypeId) || null : null,
+                categoryName: resolvedCategoryId ? categoryNameMap.get(resolvedCategoryId) || null : null,
+                projectTypeNames,
+            };
+        });
+
+        const buildOptions = (
+            rows: any[],
+            keyField: 'gameTypeId' | 'categoryId',
+            labelField: 'gameTypeName' | 'categoryName',
+        ) =>
+            Array.from(
+                new Map(
+                    rows
+                        .map((x) => {
+                            const key = String(x?.[keyField] || '').trim();
+                            const label = String(x?.[labelField] || '').trim();
+                            return key && label ? [key, { key, label }] : null;
+                        })
+                        .filter(Boolean) as Array<[string, { key: string; label: string }]>,
+                ).values(),
+            );
 
         return {
-            list,
+            list: mappedList,
+            total: hasPaging ? total : mappedList.length,
+            page,
+            limit,
+            totalPages: hasPaging && limit ? Math.ceil(total / limit) : 1,
+            hasMore: hasPaging ? page * limit < total : false,
             filters: {
-                gameTypes: pickTags(list, 'gameType'),
-                projectTypes: pickTags(list, 'projectType'),
-                categories: pickTags(list, 'category'),
+                gameTypes: pickTags(filterItems, 'gameTypeName'),
+                projectTypes: pickProjectTypes(filterItems),
+                categories: pickTags(filterItems, 'categoryName'),
+                gameTypeOptions: buildOptions(filterItems, 'gameTypeId', 'gameTypeName'),
+                categoryOptions: buildOptions(filterItems, 'categoryId', 'categoryName'),
             },
         };
     }
 
     async publicMenuDetail(id: number) {
-        return this.prisma.gameProject.findFirst({
-            where: { id, status: 'ACTIVE' },
-            select: {
-                id: true,
-                name: true,
-                price: true,
-                type: true,
-                billingMode: true,
-                baseAmount: true,
-                clubRate: true,
-                coverImage: true,
-                description: true,
-                gameType: true,
-                projectType: true,
-                category: true,
-                richContent: true,
-                createdAt: true,
-                updatedAt: true,
-            },
+        const [row, categoryTree, tagList] = await Promise.all([
+            this.prisma.gameProject.findFirst({
+                where: { id, status: 'ACTIVE' },
+                select: {
+                    id: true,
+                    name: true,
+                    price: true,
+                    originPrice: true,
+                    type: true,
+                    billingMode: true,
+                    baseAmount: true,
+                    clubRate: true,
+                    coverImage: true,
+                    description: true,
+                    gameType: true,
+                    projectType: true,
+                    category: true,
+                    richContent: true,
+                    createdAt: true,
+                    updatedAt: true,
+                },
+            }),
+            this.systemConfigService.getGoodsCategoryTree(),
+            this.systemConfigService.getGoodsTagList(),
+        ]);
+        if (!row) return null;
+        const categoryNameMap = this.buildCategoryNameMap(Array.isArray(categoryTree) ? categoryTree : []);
+        const tagNameMap = this.buildTagNameMap(Array.isArray(tagList) ? tagList : []);
+        const gameTypeId = String((row as any)?.gameType || '').trim();
+        const categoryId = String((row as any)?.category || '').trim();
+        const resolvedCategoryId = categoryId || null;
+        const projectTypeIds = String((row as any)?.projectType || '')
+            .split(',')
+            .map((x) => x.trim())
+            .filter((x) => !!x);
+        const projectTypeNames = projectTypeIds.map((id) => tagNameMap.get(id) || id);
+        return {
+            ...row,
+            gameTypeId: gameTypeId || null,
+            categoryId: resolvedCategoryId || null,
+            category: categoryId || null,
+            gameTypeName: gameTypeId ? categoryNameMap.get(gameTypeId) || null : null,
+            categoryName: resolvedCategoryId ? categoryNameMap.get(resolvedCategoryId) || null : null,
+            projectTypeNames,
+        };
+    }
+
+    async ratingSummary(projectId: number) {
+        const rows = await this.prisma.productReview.findMany({
+            where: { projectId: Number(projectId), isHidden: false },
+            select: { score: true },
+        });
+        const count = rows.length;
+        const avg = count ? Number((rows.reduce((s, r) => s + Number(r.score || 0), 0) / count).toFixed(2)) : 5.0;
+        return { projectId: Number(projectId), ratingAvg: avg, ratingCount: count };
+    }
+
+    async listReviews(params: { projectId: number; page?: number; limit?: number; includeHidden?: boolean }) {
+        const page = Math.max(1, Number(params?.page || 1));
+        const limit = Math.min(100, Math.max(1, Number(params?.limit || 20)));
+        const skip = (page - 1) * limit;
+        const includeHidden = Boolean(params?.includeHidden);
+        const where: any = { projectId: Number(params.projectId) };
+        if (!includeHidden) where.isHidden = false;
+        const [data, total] = await Promise.all([
+            this.prisma.productReview.findMany({
+                where,
+                skip,
+                take: limit,
+                orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+                select: {
+                    id: true,
+                    score: true,
+                    tags: true,
+                    content: true,
+                    anonymous: true,
+                    isHidden: true,
+                    hiddenReason: true,
+                    hiddenAt: true,
+                    createdAt: true,
+                    orderId: true,
+                    user: { select: { id: true, name: true, phone: true } },
+                },
+            }),
+            this.prisma.productReview.count({ where }),
+        ]);
+        return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+    }
+
+    async hideReview(reviewId: number, params: { hidden: boolean; reason?: string; operatorId?: number }) {
+        const hidden = Boolean(params.hidden);
+        return this.prisma.productReview.update({
+            where: { id: Number(reviewId) },
+            data: hidden
+                ? {
+                    isHidden: true,
+                    hiddenReason: params.reason ? String(params.reason).slice(0, 255) : null,
+                    hiddenBy: params.operatorId ? Number(params.operatorId) : null,
+                    hiddenAt: new Date(),
+                }
+                : {
+                    isHidden: false,
+                    hiddenReason: null,
+                    hiddenBy: null,
+                    hiddenAt: null,
+                },
         });
     }
 }

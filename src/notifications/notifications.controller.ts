@@ -31,6 +31,13 @@ export class NotificationsController {
     return this.service.adminListAnnouncements(dto);
   }
 
+  @Post('admin/announcements/miniapp-options')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:role:page')
+  async adminListMiniappAnnouncementOptions(@Body() body: { keyword?: string }) {
+    return this.service.adminListMiniappAnnouncementOptions(body?.keyword);
+  }
+
   @Post('admin/announcements/create')
   @UseGuards(PermissionsGuard)
   @Permissions('system:role:page')

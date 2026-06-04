@@ -53,14 +53,22 @@ export class CouponsService {
       throw new BadRequestException('券类型不合法');
     }
     const applicableScope = dto.applicableScope || CouponScope.ALL;
-    const projectIds = Array.isArray(dto.applicableProjectIds)
-      ? dto.applicableProjectIds
-          .map((x) => Number(x))
-          .filter((x) => Number.isFinite(x) && x > 0)
-      : [];
+    const scopeTargetIds = Array.isArray(dto.applicableProjectIds) ? dto.applicableProjectIds : [];
+    const projectTargetIds = scopeTargetIds
+      .map((x) => Number(x))
+      .filter((x) => Number.isFinite(x) && x > 0);
+    const categoryTargetIds = scopeTargetIds
+      .map((x) => String(x || '').trim())
+      .filter((x) => !!x);
 
-    if (applicableScope === CouponScope.PROJECT && !projectIds.length) {
-      throw new BadRequestException('项目券必须配置可用项目');
+    if (applicableScope === CouponScope.PROJECT && !projectTargetIds.length) {
+      throw new BadRequestException('指定商品券必须配置可用商品');
+    }
+    if (applicableScope === CouponScope.CATEGORY && !categoryTargetIds.length) {
+      throw new BadRequestException('指定分类券必须配置可用分类');
+    }
+    if (applicableScope === CouponScope.USER_LEVEL) {
+      throw new BadRequestException('指定等级功能尚未开放');
     }
     const discountValue = dto.discountValue == null ? null : this.toAmount2(Number(dto.discountValue));
     const thresholdAmount = dto.thresholdAmount == null ? null : this.toAmount2(Number(dto.thresholdAmount));
@@ -92,7 +100,12 @@ export class CouponsService {
         thresholdAmount,
         maxDiscountAmount,
         applicableScope,
-        applicableProjectIds: applicableScope === CouponScope.PROJECT ? (projectIds as any) : null,
+        applicableProjectIds:
+          applicableScope === CouponScope.PROJECT
+            ? (projectTargetIds as any)
+            : applicableScope === CouponScope.CATEGORY
+              ? (categoryTargetIds as any)
+            : null,
         status: dto.status || CouponTemplateStatus.DRAFT,
         startAt,
         endAt,
