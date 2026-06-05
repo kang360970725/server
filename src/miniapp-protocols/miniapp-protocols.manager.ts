@@ -59,6 +59,11 @@ const DEFAULT_CATEGORIES = [
     sort: 10,
   },
   {
+    name: 'C 端客户权益',
+    description: '菜单 Banner、权益说明及客户须知',
+    sort: 15,
+  },
+  {
     name: 'B 端商户协议（商家入驻签约）',
     description: '商家入驻、结算、保证金及发布规范',
     sort: 20,
@@ -247,6 +252,10 @@ function normalizeText(value: any) {
   return String(value || '').trim();
 }
 
+function normalizeCategoryKey(value: any) {
+  return normalizeText(value).replace(/\s+/g, '').replace(/[（）()]/g, '');
+}
+
 function normalizeCategory(row: MiniappProtocolCategory): MiniappProtocolCategoryItem {
   return {
     id: Number(row.id),
@@ -325,15 +334,18 @@ export class MiniappProtocolsService implements OnModuleInit {
   }
 
   private async ensureSeed() {
-    const categoryCount = await this.prisma.miniappProtocolCategory.count();
-    if (categoryCount === 0) {
-      await this.prisma.miniappProtocolCategory.createMany({
-        data: DEFAULT_CATEGORIES.map((item) => ({
+    for (const item of DEFAULT_CATEGORIES) {
+      const existing = await this.prisma.miniappProtocolCategory.findFirst({
+        where: { name: item.name },
+      });
+      if (existing) continue;
+      await this.prisma.miniappProtocolCategory.create({
+        data: {
           name: item.name,
           description: item.description,
           sort: item.sort,
           enabled: true,
-        })),
+        },
       });
     }
 
@@ -491,6 +503,38 @@ export class MiniappProtocolsService implements OnModuleInit {
     if (!row || !row.enabled || !row.category?.enabled) return null;
     if (!normalizeText(row.content)) return null;
     return normalizeProtocol(row);
+  }
+
+  async listPublicByCategoryName(categoryName: string) {
+    const targetCategoryName = normalizeText(categoryName);
+    if (!targetCategoryName) return [];
+    const targetCategoryKey = normalizeCategoryKey(targetCategoryName);
+
+    const categories = await this.prisma.miniappProtocolCategory.findMany({
+      where: { enabled: true },
+    });
+    const category = categories.find((item) => {
+      const currentName = normalizeText(item.name);
+      const currentKey = normalizeCategoryKey(currentName);
+      return currentName === targetCategoryName
+        || currentKey === targetCategoryKey
+        || currentKey.includes(targetCategoryKey)
+        || targetCategoryKey.includes(currentKey);
+    });
+    if (!category) return [];
+
+    const rows = await this.prisma.miniappProtocol.findMany({
+      where: {
+        categoryId: category.id,
+        enabled: true,
+      },
+      include: {
+        category: true,
+      },
+      orderBy: [{ sort: 'asc' }, { id: 'asc' }],
+    });
+
+    return sortProtocols(rows.map((row) => normalizeProtocol(row)));
   }
 
   async upsert(dto: UpsertMiniappProtocolDto) {

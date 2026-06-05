@@ -233,10 +233,15 @@ export class OrdersService {
         settlementsToCreate: any[];
         playerEvaluations?: any[];
         autoConfirm?: boolean;
+        orderTipEnabled?: boolean;
+        orderTipUserIds?: any[];
     }) {
         const { order, settlementsToCreate } = params;
         const playerEvaluations = Array.isArray(params.playerEvaluations) ? params.playerEvaluations : [];
         const autoConfirm = Boolean(params.autoConfirm);
+        const hasOrderTipPayload = params.orderTipEnabled !== undefined || Array.isArray(params.orderTipUserIds);
+        const orderTipEnabled = hasOrderTipPayload ? Boolean(params.orderTipEnabled) : false;
+        const requestedTipUserIds = this.normalizeIdArray(params.orderTipUserIds);
         const orderPaidAmount = Number(order?.isGifted ? order?.receivableAmount : order?.paidAmount) || 0;
         const tipPoolTotal = roundMix1(orderPaidAmount * 0.03);
         const csPoolTotal = roundMix1(orderPaidAmount * 0.01);
@@ -325,7 +330,11 @@ export class OrdersService {
         });
 
         const userStates = new Map<number, any[]>();
+        const goodParticipantIds = new Set<number>();
+        const badParticipantIds = new Set<number>();
         for (const st of rowStates) {
+            if (st.evalItem.ratingLabel === 'GOOD') goodParticipantIds.add(Number(st.userId));
+            if (st.evalItem.ratingLabel === 'BAD') badParticipantIds.add(Number(st.userId));
             const list = userStates.get(st.userId) || [];
             list.push(st);
             userStates.set(st.userId, list);
@@ -370,14 +379,32 @@ export class OrdersService {
             }
         }
 
-        // 2) 打赏池：全单只取一次 3%，按被打赏用户均分，再按该用户各行权重分配
-        const tippedUserIds = Array.from(new Set(
+        // 2) 打赏池：全单只取一次 3%，订单级下拉选择；候选只来自非差评参与者
+        const allowedTipUserIds = Array.from(goodParticipantIds).filter((userId) => !badParticipantIds.has(Number(userId)));
+        const requestedTipUserIdsFiltered = requestedTipUserIds.filter((userId) => allowedTipUserIds.includes(Number(userId)));
+        if (hasOrderTipPayload) {
+            if (orderTipEnabled) {
+                if (!requestedTipUserIds.length) {
+                    throw new BadRequestException(`已开启打赏但未选择被打赏打手，无法结单：orderId=${order.id}`);
+                }
+                const invalidTipUserIds = requestedTipUserIds.filter((userId) => !allowedTipUserIds.includes(Number(userId)));
+                if (invalidTipUserIds.length) {
+                    throw new BadRequestException(`打赏打手选择无效，存在不允许打赏的打手：${Array.from(new Set(invalidTipUserIds)).join(',')}`);
+                }
+            } else if (requestedTipUserIds.length > 0) {
+                throw new BadRequestException(`打赏开关已关闭，但仍提交了打赏打手，无法结单：orderId=${order.id}`);
+            }
+        }
+        const legacyTipUserIds = Array.from(new Set(
             rowStates
                 .filter((st) => st.evalItem.ratingLabel === 'GOOD')
                 .flatMap((st) => st.evalItem.tippedUserIds || [])
                 .map((x) => Number(x))
-                .filter((n) => Number.isFinite(n) && n > 0),
+                .filter((n) => Number.isFinite(n) && n > 0 && allowedTipUserIds.includes(Number(n))),
         ));
+        const tippedUserIds = hasOrderTipPayload
+            ? (orderTipEnabled ? requestedTipUserIdsFiltered : [])
+            : legacyTipUserIds;
 
         const tipByUser = new Map<number, number>();
         if (tippedUserIds.length > 0 && tipPoolTotal > 0) {
@@ -462,6 +489,10 @@ export class OrdersService {
             row.csEarnings = csAmount;
             row.inviteEarnings = roundMix1(Number(adjust.tipAmount ?? 0));
 
+            if (Number(row.clubEarnings ?? 0) < -0.1) {
+                throw new BadRequestException(`俱乐部收益异常，无法结单：orderId=${order.id}, dispatchId=${st.dispatchId}, userId=${st.userId}`);
+            }
+
             evaluationRows.push({
                 key: st.key,
                 dispatchId: st.dispatchId,
@@ -471,7 +502,7 @@ export class OrdersService {
                 afterSaleHandled: Boolean(st.evalItem.afterSaleHandled),
                 afterSaleAction: st.evalItem.afterSaleAction,
                 responsibleUserIds: st.evalItem.responsibleUserIds || [],
-                tippedUserIds: st.evalItem.tippedUserIds || [],
+                tippedUserIds: st.evalItem.ratingLabel === 'GOOD' ? tippedUserIds : [],
                 tipPoolAmount: tipPoolTotal > 0 ? tipPoolTotal : null,
                 tipAmount: roundMix1(Number(adjust.tipAmount ?? 0)),
                 penaltyAmount: roundMix1(Number(adjust.penaltyAmount ?? 0)),
@@ -482,6 +513,23 @@ export class OrdersService {
         });
 
         // 5) CS settlement 行保持其自身收益，不参与评级扣款
+        const playerBaseTotal = roundMix1(
+            rowStates.reduce((sum, st) => sum + Number(st.baseAmount ?? 0), 0),
+        );
+        const playerTotalBeforeCs = roundMix1(
+            rowStates.reduce((sum, st) => sum + Number(st.row?.finalEarnings ?? 0) + Number(st.row?.clubEarnings ?? 0), 0),
+        );
+        const csRowTotal = roundMix1(
+            csRows.reduce((sum, r: any) => sum + Number(r.finalEarnings ?? r.calculatedEarnings ?? 0), 0),
+        );
+
+        if (Math.abs(round2(playerBaseTotal) - round2(orderPaidAmount)) > 0.1) {
+            throw new BadRequestException(`订单结算基数与实付金额不一致，无法结单：orderId=${order.id}`);
+        }
+        if (round2(playerTotalBeforeCs + csRowTotal) - round2(orderPaidAmount) > 0.1) {
+            throw new BadRequestException(`订单结算总额异常，无法结单：orderId=${order.id}`);
+        }
+
         for (const csRow of csRows) {
             csRow.calculatedEarnings = roundMix1(Number(csRow.calculatedEarnings ?? csRow.finalEarnings ?? 0));
             csRow.manualAdjustment = roundMix1(Number(csRow.manualAdjustment ?? 0));
@@ -2802,6 +2850,8 @@ export class OrdersService {
         modePlayAllocList?: any;
         playerEvaluations?: any[];
         autoConfirm?: boolean;
+        orderTipEnabled?: boolean;
+        orderTipUserIds?: any[];
     }) {
         const { order, modePlayAllocList } = params;
 
@@ -2839,6 +2889,8 @@ export class OrdersService {
             settlementsToCreate,
             playerEvaluations: params.playerEvaluations ?? order?.playerEvaluations ?? [],
             autoConfirm: Boolean(params.autoConfirm),
+            orderTipEnabled: params.orderTipEnabled,
+            orderTipUserIds: params.orderTipUserIds,
         });
         settlementsToCreate = applied.settlementsToCreate;
 
@@ -3380,6 +3432,8 @@ export class OrdersService {
             modePlayAllocList?: any;
             playerEvaluations?: any[];
             autoConfirm?: boolean;
+            orderTipEnabled?: boolean;
+            orderTipUserIds?: any[];
         },
     ) {
         orderId = Number(orderId);
@@ -3480,6 +3534,8 @@ export class OrdersService {
                 modePlayAllocList: dto?.modePlayAllocList,
                 playerEvaluations: dto?.playerEvaluations,
                 autoConfirm: isAutoConfirm,
+                orderTipEnabled: dto?.orderTipEnabled,
+                orderTipUserIds: dto?.orderTipUserIds,
             });
 
             /**

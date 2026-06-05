@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import { Public } from '../auth/decorators/public.decorator';
@@ -50,6 +50,12 @@ export class MiniappProtocolsController {
   @Permissions('system:role:page')
   async delete(@Body() body: { key: string }) {
     return this.service.remove(body || {});
+  }
+
+  @Public()
+  @Get('public/list-by-category')
+  async listPublicByCategory(@Query('category') category: string) {
+    return this.service.listPublicByCategoryName(category);
   }
 
   @Public()

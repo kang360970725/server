@@ -240,6 +240,8 @@ export class OrdersController {
                 confirmPaid: body?.confirmPaid, // 可选：默认 true
                 modePlayAllocList: body?.modePlayAllocList, //趣味玩法单 客服设定的每轮收益
                 playerEvaluations: body?.playerEvaluations,
+                orderTipEnabled: body?.orderTipEnabled,
+                orderTipUserIds: body?.orderTipUserIds,
             },
         );
     }
