@@ -3,13 +3,12 @@ import * as crypto from 'crypto';
 
 @Controller('uploads')
 export class CommonUploadController {
-  // 直接写死配置（按你的要求，不走 .env）
-  // TODO: 将下面值替换为你的真实 COS 配置
-  private readonly fixedSecretId = 'AKID0saYQJI9qMgolEXjpjYAhAUmJk2AD6rP';
-  private readonly fixedSecretKey = 'NZcUAezCD3jGh0DMNaeYJ6pNo5IKCt07';
-  private readonly fixedBucket = 'bluecat-pw-1393974512';
-  private readonly fixedRegion = 'ap-shanghai';
-  private readonly fixedCdnDomain = '';
+  // ✅ 不写死密钥，运行时从环境变量读取，避免提交泄露
+  private readonly fixedSecretId = process.env.COS_SECRET_ID || process.env.COS_STS_SECRET_ID || '';
+  private readonly fixedSecretKey = process.env.COS_SECRET_KEY || process.env.COS_STS_SECRET_KEY || '';
+  private readonly fixedBucket = process.env.COS_BUCKET || process.env.COS_UPLOAD_BUCKET || 'bluecat-pw-1393974512';
+  private readonly fixedRegion = process.env.COS_REGION || process.env.COS_UPLOAD_REGION || 'ap-shanghai';
+  private readonly fixedCdnDomain = process.env.COS_CDN_DOMAIN || process.env.COS_UPLOAD_CDN_DOMAIN || '';
 
   private readonly allowedModules = new Set([
     'game-project',
