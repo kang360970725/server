@@ -12,6 +12,14 @@ RUN npm install
 
 COPY . .
 
+# 构建期再次校验关键源码文件，避免镜像上下文缺块导致 nest build 才报 TS2307
+RUN test -f src/mini/mini.module.ts \
+ && test -f src/member/member.module.ts \
+ && test -f src/miniapp-protocols/miniapp-protocols.module.ts \
+ && test -f src/common/common-upload.controller.ts \
+ || (echo "ERROR: required source file missing in build context" && \
+     ls -la src/mini src/member src/miniapp-protocols src/common && exit 1)
+
 # 构建期校验：若迁移目录不完整，直接失败，避免带病镜像发布
 RUN test -d "prisma/migrations/${PRISMA_REQUIRED_MIGRATION}" \
  || (echo "ERROR: required migration missing: ${PRISMA_REQUIRED_MIGRATION}" && ls -la prisma/migrations && exit 1)
