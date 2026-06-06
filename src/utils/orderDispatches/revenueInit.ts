@@ -2,6 +2,8 @@ import {round2, roundMix1, toNum} from "../money/format";
 import {DispatchStatus} from "@prisma/client";
 import {BadRequestException} from "@nestjs/common";
 
+const CUSTOMER_SERVICE_SHARE_RATE = 0.01;
+
 const distributeRoundedMoney = (total: number, count: number) => {
     const safeTotal = Number(total) || 0;
     const safeCount = Math.max(1, Math.floor(Number(count) || 0));
@@ -13,6 +15,15 @@ const distributeRoundedMoney = (total: number, count: number) => {
         return base;
     });
     return items;
+};
+
+const getSettlementParticipants = (dispatch: any) => {
+    return (dispatch?.participants ?? []).filter((p: any) => {
+        const userId = Number(p?.userId ?? 0);
+        if (!Number.isFinite(userId) || userId <= 0) return false;
+        if (p?.rejectedAt) return false;
+        return true;
+    });
 };
 export const calcBillableHours = (acceptedAt?: Date | null, endAt?: Date | null, deductMinutesValue?: number | null) => {
     if (!acceptedAt || !endAt) return 0;
@@ -63,8 +74,10 @@ export const computeBillingHours = (order: any) => {
             ? order.projectSnapshot?.price
             : orderMeanPrice;
 
+    const includeCustomerServiceRate = order?.dispatcher?.userType === 'CUSTOMER_SERVICE';
+
     for (const d of dispatches) {
-        const active = (d.participants ?? []).filter((p: any) => p.acceptedAt && !p.rejectedAt);
+        const active = getSettlementParticipants(d);
         const inactive = (d.participants ?? []).filter((p: any) => p.rejectedAt);
 
         if (!active.length) {
@@ -99,7 +112,6 @@ export const computeBillingHours = (order: any) => {
 
         if (d.status === DispatchStatus.COMPLETED) {
             thisMoney = roundMix1(lastPaidAmount * 1);
-            lastPaidAmount = 0;
 
             // ✅ 客服收益：只在最终结单轮生成
             if (order?.dispatcher?.userType === 'CUSTOMER_SERVICE') {
@@ -130,12 +142,16 @@ export const computeBillingHours = (order: any) => {
         }
 
         const perBaseYuanList = distributeRoundedMoney(thisMoney, active.length);
+        if (d.status === DispatchStatus.COMPLETED) {
+            lastPaidAmount = 0;
+        }
 
         for (const [idx, p] of active.entries()) {
             const { playerRate, commissionRate } = getPlayerRate(
                 order.customClubRate,
                 projectSnapshot?.clubRate,
                 p.user?.staffRating?.rate,
+                { includeCustomerServiceRate },
             );
 
             const perBaseYuan = perBaseYuanList[idx] ?? 0;
@@ -193,9 +209,10 @@ export const computeBillingGuaranteed = (order: any) => {
     const orderPaidAmount = order.isGifted ? receivableAmount : paidAmount;
 
     const orderRatio = lastPaidAmount > 0 ? Number(baseAmountWan) / lastPaidAmount : 0;
+    const includeCustomerServiceRate = order?.dispatcher?.userType === 'CUSTOMER_SERVICE';
 
     for (const d of dispatches) {
-        const active = (d.participants ?? []).filter((p: any) => p.acceptedAt && !p.rejectedAt);
+        const active = getSettlementParticipants(d);
         const inactive = (d.participants ?? []).filter((p: any) => p.rejectedAt);
 
         if (!active.length) {
@@ -230,6 +247,9 @@ export const computeBillingGuaranteed = (order: any) => {
             }
         }
 
+        const completedRoundShareList =
+            d.status === DispatchStatus.COMPLETED ? distributeRoundedMoney(lastPaidAmount, active.length) : null;
+
         for (const p of active) {
             let contributionBaseAmount = 0;
             let finalMoney = 0;
@@ -246,6 +266,7 @@ export const computeBillingGuaranteed = (order: any) => {
                         order.customClubRate,
                         projectSnapshot?.clubRate,
                         p.user?.staffRating?.rate,
+                        { includeCustomerServiceRate },
                     );
                     const playerRate = Number(rateRes.playerRate ?? 0);
                     commissionRate = roundMix1(rateRes.commissionRate ?? 0);
@@ -265,13 +286,15 @@ export const computeBillingGuaranteed = (order: any) => {
                     order.customClubRate,
                     projectSnapshot?.clubRate,
                     p.user?.staffRating?.rate,
+                    { includeCustomerServiceRate },
                 );
                 const playerRate = Number(rateRes.playerRate ?? 0);
                 commissionRate = roundMix1(rateRes.commissionRate ?? 0);
 
-                contributionBaseAmount = active.length > 0 ? lastPaidAmount / active.length : 0;
+                const perBaseYuanList = completedRoundShareList ?? [];
+                const currentIndex = active.indexOf(p);
+                contributionBaseAmount = perBaseYuanList[currentIndex] ?? (active.length > 0 ? lastPaidAmount / active.length : 0);
                 finalMoney = contributionBaseAmount * playerRate;
-                lastPaidAmount = 0;
             }
 
             const settlementType = order.settlementType ?? 'REGULAR';
@@ -293,6 +316,10 @@ export const computeBillingGuaranteed = (order: any) => {
                 grossPerformanceAmount: roundMix1(contributionBaseAmount),
                 netIncomeAmount: roundMix1(finalMoney),
             });
+        }
+
+        if (d.status === DispatchStatus.COMPLETED) {
+            lastPaidAmount = 0;
         }
     }
 
@@ -326,9 +353,10 @@ export const computeBillingMODEPLAY = (order: any, modePlayAllocList: any) => {
     );
 
     const orderPaidAmount = order.isGifted ? receivableAmount : paidAmount;
+    const includeCustomerServiceRate = order?.dispatcher?.userType === 'CUSTOMER_SERVICE';
 
     for (const d of dispatches) {
-        const active = (d.participants ?? []).filter((p: any) => p.acceptedAt && !p.rejectedAt);
+        const active = getSettlementParticipants(d);
         const inactive = (d.participants ?? []).filter((p: any) => p.rejectedAt);
 
         if (!active.length) {
@@ -373,6 +401,7 @@ export const computeBillingMODEPLAY = (order: any, modePlayAllocList: any) => {
                 order.customClubRate,
                 projectSnapshot?.clubRate,
                 p.user?.staffRating?.rate,
+                { includeCustomerServiceRate },
             );
 
             const thisMoney = roundMix1(
@@ -412,7 +441,15 @@ export const computeBillingMODEPLAY = (order: any, modePlayAllocList: any) => {
  * - orderClubRate：订单定义的抽成比例 order.customClubRate
  * - objectClubRate：项目定义的抽成比例 order.projectSnapshot.clubRate
  */
-export const getPlayerRate = (orderClubRate: any, objectClubRate: any, userStaffRate: any) => {
+export const getPlayerRate = (
+    orderClubRate: any,
+    objectClubRate: any,
+    userStaffRate: any,
+    options?: {
+        includeCustomerServiceRate?: boolean;
+        extraCustomerServiceRate?: number;
+    },
+) => {
     let pick = orderClubRate;
     let source: 'ORDER' | 'OBJECT' | 'USER' | 'DEFAULT' = 'ORDER';
     if (pick === null || pick === undefined) {
@@ -429,7 +466,13 @@ export const getPlayerRate = (orderClubRate: any, objectClubRate: any, userStaff
     }
 
     const n = Number(pick);
-    const commissionRate = Number.isFinite(n) ? Math.max(0, Math.min(1, n > 1 ? n / 100 : n)) : 0;
+    const baseCommissionRate = Number.isFinite(n) ? Math.max(0, Math.min(1, n > 1 ? n / 100 : n)) : 0;
+    const extraCustomerServiceRate = options?.includeCustomerServiceRate
+        ? Number.isFinite(Number(options?.extraCustomerServiceRate))
+            ? Math.max(0, Number(options?.extraCustomerServiceRate))
+            : CUSTOMER_SERVICE_SHARE_RATE
+        : 0;
+    const commissionRate = Math.max(0, Math.min(1, baseCommissionRate + extraCustomerServiceRate));
 
     return {
         commissionRate,

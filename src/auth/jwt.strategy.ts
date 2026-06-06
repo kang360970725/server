@@ -34,6 +34,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         name: true,
         Role: {
           select: {
+            name: true,
             permissions: { select: { key: true } },
           },
         },
@@ -43,6 +44,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     if (!user) throw new UnauthorizedException('用户不存在');
 
     const permissions = user.Role?.permissions?.map((p) => p.key) || [];
+    const roleName = String(user.Role?.name || '').trim();
 
     return {
       id: user.id,
@@ -51,6 +53,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       name: user.name,
       status: user.status,
       roleId: user.roleId,
+      roleName,
       userType: user.userType,
       permissions,
     };

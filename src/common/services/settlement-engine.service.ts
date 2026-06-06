@@ -95,14 +95,19 @@ export class SettlementEngineService {
     }
 
     /**
-     * 验证总收益不超过订单金额
+     * 验证总收益不超过订单金额，且短缺在允许误差内
      */
     validateTotalEarnings(clubEarnings: number, playerEarnings: number[], orderAmount: number): boolean {
         const totalPlayerEarnings = playerEarnings.reduce((sum, earning) => sum + earning, 0);
         const totalEarnings = clubEarnings + totalPlayerEarnings;
+        const paidTotal = Number(orderAmount) || 0;
+        const settledTotal = Number(totalEarnings) || 0;
+        const shortfall = paidTotal - settledTotal;
+        const allowedShortfall = paidTotal * 0.05;
 
-        // 允许轻微误差
-        return totalEarnings <= orderAmount * 1.01;
+        if (settledTotal - paidTotal > 0.1) return false;
+        if (shortfall < -0.1) return false;
+        return shortfall <= allowedShortfall + 0.1;
     }
 
     /**

@@ -1874,6 +1874,7 @@ export class WalletService {
             'SETTLEMENT_EARNING_BASE',
             'SETTLEMENT_EARNING_CARRY',
             'SETTLEMENT_EARNING_CS',
+            'SETTLEMENT_RECALC',
         ]);
 
         const applyDelta = (
@@ -2863,10 +2864,12 @@ export class WalletService {
     async rollbackOrderWalletImpactInTxV2(params: {
         tx: any;
         settlementIds: number[];
+        orderId?: number | null;
     }) {
-        const { tx, settlementIds } = params;
+        const { tx, settlementIds, orderId } = params;
 
         const ids = Array.from(new Set((settlementIds || []).map(Number).filter(Boolean)));
+        const oid = Number(orderId ?? 0);
 
         if (ids.length === 0) {
             return {
@@ -2886,11 +2889,12 @@ export class WalletService {
             'SETTLEMENT_EARNING_CARRY',
             'SETTLEMENT_BOMB_LOSS',
             'SETTLEMENT_EARNING_CS',
+            'SETTLEMENT_RECALC',
         ];
 
         /**
          * Step 1：只取“结算主流水”
-         * - sourceType 必须是 ORDER_SETTLEMENT
+         * - sourceType 必须是 ORDER_SETTLEMENT / ORDER_SETTLEMENT_RECALC
          * - bizType 必须是主收益白名单
          * - 排除已经 REVERSED 的流水
          *
@@ -2899,8 +2903,10 @@ export class WalletService {
          */
         const baseTxs = await tx.walletTransaction.findMany({
             where: {
-                sourceType: 'ORDER_SETTLEMENT',
-                sourceId: { in: ids },
+                sourceType: {
+                    in: ['ORDER_SETTLEMENT', 'ORDER_SETTLEMENT_RECALC'],
+                },
+                ...(oid > 0 ? { orderId: oid } : { sourceId: { in: ids } }),
                 bizType: { in: MAIN_SETTLEMENT_BIZ_TYPES },
                 NOT: { status: 'REVERSED' },
             },

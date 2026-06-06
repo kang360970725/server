@@ -33,11 +33,14 @@ export class OrdersController {
         private readonly systemConfigService: SystemConfigService,
     ) {}
 
-    private assertCustomerServiceOrSuperAdmin(user: any) {
-        const userType = String(user?.userType || '').trim();
-        if (!['CUSTOMER_SERVICE', 'SUPER_ADMIN'].includes(userType)) {
-            throw new ForbiddenException('仅客服或超级管理员可操作');
-        }
+    private assertCustomerServiceOrFinanceAdmin(user: any) {
+      const userType = String(user?.userType || '').trim();
+      const roleName = String(user?.roleName || '').trim().toUpperCase();
+      const isFinanceAdminRole = roleName === 'FINANCE_ADMIN';
+      const isCustomerServiceRole = roleName.includes('客服');
+      if (userType !== 'CUSTOMER_SERVICE' && !isFinanceAdminRole && !isCustomerServiceRole) {
+        throw new ForbiddenException('仅客服或财务管理员可操作');
+      }
     }
 
     /** 订单列表（管理端） */
@@ -109,7 +112,7 @@ export class OrdersController {
     @Permissions('orders:list:page')
     async create(@Body() body: any, @Request() req: any) {
         const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
-        this.assertCustomerServiceOrSuperAdmin(req?.user);
+        this.assertCustomerServiceOrFinanceAdmin(req?.user);
         return this.ordersService.createOrder(body, operatorId);
     }
 
@@ -229,7 +232,7 @@ export class OrdersController {
     async confirmComplete(@Body() body: any, @Req() req: any) {
         const orderId = Number(body?.id);
         if (!orderId) throw new BadRequestException('id 必填');
-        this.assertCustomerServiceOrSuperAdmin(req?.user);
+        this.assertCustomerServiceOrFinanceAdmin(req?.user);
 
         return this.ordersService.confirmCompleteOrder(
             orderId,
@@ -377,7 +380,17 @@ export class OrdersController {
      */
     @Post('repair-wallet-by-settlementsV1')
     async repairWalletBySettlementsV1(
-        @Body() body: { id: number; reason?: string; scope?: any; dryRun?: boolean; applyRepair?: boolean; modePlayAllocList?: any },
+        @Body() body: {
+            id: number;
+            reason?: string;
+            scope?: any;
+            dryRun?: boolean;
+            applyRepair?: boolean;
+            modePlayAllocList?: any;
+            playerEvaluations?: any;
+            orderTipEnabled?: boolean;
+            orderTipUserIds?: any;
+        },
         @Req() req: any,
     ) {
         const orderId = Number(body?.id);
@@ -392,7 +405,10 @@ export class OrdersController {
             scope: body?.scope ?? 'COMPLETED_AND_ARCHIVED',
             dryRun: body?.dryRun ?? true, // ✅ 默认 dryRun（防误操作）
             applyRepair: body?.applyRepair ?? false, // ✅ 默认 applyRepair（防误操作）
-            modePlayAllocList: body?.modePlayAllocList
+            modePlayAllocList: body?.modePlayAllocList,
+            playerEvaluations: body?.playerEvaluations,
+            orderTipEnabled: body?.orderTipEnabled,
+            orderTipUserIds: body?.orderTipUserIds,
         } as any);
     }
 

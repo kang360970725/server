@@ -235,10 +235,12 @@ export class OrdersService {
         autoConfirm?: boolean;
         orderTipEnabled?: boolean;
         orderTipUserIds?: any[];
+        skipValidation?: boolean;
     }) {
         const { order, settlementsToCreate } = params;
         const playerEvaluations = Array.isArray(params.playerEvaluations) ? params.playerEvaluations : [];
         const autoConfirm = Boolean(params.autoConfirm);
+        const skipValidation = Boolean(params.skipValidation);
         const hasOrderTipPayload = params.orderTipEnabled !== undefined || Array.isArray(params.orderTipUserIds);
         const orderTipEnabled = hasOrderTipPayload ? Boolean(params.orderTipEnabled) : false;
         const requestedTipUserIds = this.normalizeIdArray(params.orderTipUserIds);
@@ -247,15 +249,16 @@ export class OrdersService {
         const csPoolTotal = roundMix1(orderPaidAmount * 0.01);
 
         const playerRows = settlementsToCreate.filter((s: any) => String(s?.settlementType || '') !== 'CUSTOMER_SERVICE');
+        const adjustablePlayerRows = playerRows.filter((s: any) => String(s?.settlementType || '') !== 'CARRY_COMPENSATION');
         const csRows = settlementsToCreate.filter((s: any) => String(s?.settlementType || '') === 'CUSTOMER_SERVICE');
 
-        if (!playerRows.length) {
+        if (!adjustablePlayerRows.length) {
             return { settlementsToCreate, evaluationRows: [] as any[] };
         }
 
         const evalMap = new Map<string, any>();
         if (autoConfirm) {
-            for (const row of playerRows) {
+            for (const row of adjustablePlayerRows) {
                 const key = this.buildPlayerEvaluationKey(Number(row.dispatchId), Number(row.userId));
                 evalMap.set(key, {
                     dispatchId: Number(row.dispatchId),
@@ -300,7 +303,7 @@ export class OrdersService {
 
         const missingKeys: string[] = [];
         if (!autoConfirm) {
-            for (const row of playerRows) {
+            for (const row of adjustablePlayerRows) {
                 const key = this.buildPlayerEvaluationKey(Number(row.dispatchId), Number(row.userId));
                 if (!evalMap.has(key)) missingKeys.push(key);
             }
@@ -309,7 +312,7 @@ export class OrdersService {
             throw new BadRequestException(`请先完成全部打手评价：${Array.from(new Set(missingKeys)).join(',')}`);
         }
 
-        const rowStates = playerRows.map((row: any) => {
+        const rowStates = adjustablePlayerRows.map((row: any) => {
             const key = this.buildPlayerEvaluationKey(Number(row.dispatchId), Number(row.userId));
             const evalItem = evalMap.get(key);
             const baseAmount = roundMix1(Number(row.contributionBaseAmount ?? 0));
@@ -355,14 +358,14 @@ export class OrdersService {
                 const targetRows = userStates.get(Number(responsibleUserId)) || [];
                 if (!targetRows.length) continue;
 
-                const targetBase65Total = targetRows.reduce((sum, r) => sum + Number(r.base65 ?? 0), 0);
-                if (targetBase65Total <= 0) continue;
+                const targetEntitledTotal = targetRows.reduce((sum, r) => sum + Number(r.baseFinalBeforeExtras ?? 0), 0);
+                if (targetEntitledTotal <= 0) continue;
 
                 let penaltyTotal = 0;
                 if (evalItem.afterSaleAction === 'RESPONSIBLE_50') {
-                    penaltyTotal = roundMix1(targetBase65Total * 0.5);
+                    penaltyTotal = roundMix1(targetEntitledTotal * 0.5);
                 } else if (evalItem.afterSaleAction === 'RESPONSIBLE_100') {
-                    penaltyTotal = roundMix1(targetBase65Total);
+                    penaltyTotal = roundMix1(targetEntitledTotal);
                 } else if (evalItem.afterSaleAction === 'MAINTENANCE_FEE' || evalItem.afterSaleAction === 'MAINTENANCE_REFUND') {
                     penaltyTotal = maintenanceFee;
                 } else {
@@ -426,7 +429,7 @@ export class OrdersService {
             const penaltyTotal = roundMix1(Number(penaltyByUser.get(userId) || 0));
             const maintenanceTotal = roundMix1(Number(maintenanceByUser.get(userId) || 0));
             const tipTotal = roundMix1(Number(tipByUser.get(userId) || 0));
-            const weightsForPenalty = rows.map((r) => Number(r.base65 ?? 0));
+            const weightsForPenalty = rows.map((r) => Number(r.baseFinalBeforeExtras ?? 0));
             const weightsForTip = rows.map((r) => Number(r.baseFinalBeforeExtras ?? 0));
 
             const penaltyShares = penaltyTotal > 0 ? this.splitAmountByWeights(penaltyTotal, weightsForPenalty) : rows.map(() => 0);
@@ -458,7 +461,7 @@ export class OrdersService {
         });
         const csShares = csPoolTotal > 0 ? this.splitAmountByWeights(csPoolTotal, allWeights) : rowStates.map(() => 0);
 
-        const playerRowsByKey = new Map(playerRows.map((r: any) => [this.buildPlayerEvaluationKey(Number(r.dispatchId), Number(r.userId)), r]));
+        const playerRowsByKey = new Map(adjustablePlayerRows.map((r: any) => [this.buildPlayerEvaluationKey(Number(r.dispatchId), Number(r.userId)), r]));
         const evaluationRows: any[] = [];
 
         rowStates.forEach((st, idx) => {
@@ -473,13 +476,15 @@ export class OrdersService {
                     - Number(adjust.maintenanceFeeAmount ?? 0))
                 + Number(adjust.tipAmount ?? 0),
             );
-            const finalEarnings = roundMix1(preCsFinal - csAmount);
+            const playerGrossBeforeCs = roundMix1(Math.max(0, preCsFinal));
+            const finalEarnings = roundMix1(Math.max(0, playerGrossBeforeCs - csAmount));
             const clubEarnings = roundMix1(
-                Number(st.baseAmount ?? 0)
-                - Number(st.baseFinalBeforeExtras ?? 0)
-                + Number(adjust.penaltyAmount ?? 0)
-                + Number(adjust.maintenanceFeeAmount ?? 0)
-                - Number(adjust.tipAmount ?? 0),
+                Math.max(
+                    0,
+                    Number(st.baseAmount ?? 0)
+                    - Number(finalEarnings ?? 0)
+                    - Number(csAmount ?? 0),
+                ),
             );
 
             row.calculatedEarnings = finalEarnings;
@@ -514,20 +519,30 @@ export class OrdersService {
 
         // 5) CS settlement 行保持其自身收益，不参与评级扣款
         const playerBaseTotal = roundMix1(
-            rowStates.reduce((sum, st) => sum + Number(st.baseAmount ?? 0), 0),
+            playerRows.reduce((sum, st: any) => sum + Number(st.contributionBaseAmount ?? 0), 0),
         );
         const playerTotalBeforeCs = roundMix1(
-            rowStates.reduce((sum, st) => sum + Number(st.row?.finalEarnings ?? 0) + Number(st.row?.clubEarnings ?? 0), 0),
+            playerRows.reduce((sum, st: any) => sum + Number(st.finalEarnings ?? 0) + Number(st.clubEarnings ?? 0), 0),
         );
         const csRowTotal = roundMix1(
             csRows.reduce((sum, r: any) => sum + Number(r.finalEarnings ?? r.calculatedEarnings ?? 0), 0),
         );
 
-        if (Math.abs(round2(playerBaseTotal) - round2(orderPaidAmount)) > 0.1) {
+        const settledTotal = round2(playerTotalBeforeCs + csRowTotal);
+        const paidTotal = round2(orderPaidAmount);
+        const totalShortfall = round2(paidTotal - settledTotal);
+        const allowedShortfall = round2(paidTotal * 0.05);
+        const baseTotal = round2(playerBaseTotal);
+        const baseShortfall = round2(paidTotal - baseTotal);
+        const baseMismatch = baseTotal - paidTotal > 0.1 || baseShortfall - allowedShortfall > 0.1;
+        const totalMismatch = settledTotal - paidTotal > 0.1 || totalShortfall - allowedShortfall > 0.1;
+        const totalWithinTolerance = totalShortfall >= 0 && totalShortfall <= allowedShortfall + 0.1;
+
+        if (baseMismatch && !skipValidation) {
             throw new BadRequestException(`订单结算基数与实付金额不一致，无法结单：orderId=${order.id}`);
         }
-        if (round2(playerTotalBeforeCs + csRowTotal) - round2(orderPaidAmount) > 0.1) {
-            throw new BadRequestException(`订单结算总额异常，无法结单：orderId=${order.id}`);
+        if (totalMismatch && !skipValidation) {
+            throw new BadRequestException(`订单结算总额异常，无法结单：orderId=${order.id}，允许误差为实付金额的5%以内且不得超付`);
         }
 
         for (const csRow of csRows) {
@@ -540,10 +555,25 @@ export class OrdersService {
         }
 
         return {
-            settlementsToCreate: [...playerRows, ...csRows],
+            settlementsToCreate,
             evaluationRows,
             tipPoolTotal,
             csPoolTotal,
+            validation: {
+                orderPaidAmount,
+                playerBaseTotal,
+                baseTotal,
+                baseShortfall,
+                playerTotalBeforeCs,
+                csRowTotal,
+                settledTotal,
+                paidTotal,
+                totalShortfall,
+                allowedShortfall,
+                baseMismatch,
+                totalMismatch,
+                totalWithinTolerance,
+            },
         };
     }
 
@@ -2853,8 +2883,10 @@ export class OrdersService {
         autoConfirm?: boolean;
         orderTipEnabled?: boolean;
         orderTipUserIds?: any[];
+        skipValidation?: boolean;
     }) {
         const { order, modePlayAllocList } = params;
+        const skipValidation = Boolean(params.skipValidation);
 
         const billingMode = this.getBillingModeFromOrder(order);
         if (!billingMode) {
@@ -2892,6 +2924,7 @@ export class OrdersService {
             autoConfirm: Boolean(params.autoConfirm),
             orderTipEnabled: params.orderTipEnabled,
             orderTipUserIds: params.orderTipUserIds,
+            skipValidation,
         });
         settlementsToCreate = applied.settlementsToCreate;
 
@@ -2905,6 +2938,7 @@ export class OrdersService {
             evaluationRows: applied.evaluationRows,
             tipPoolTotal: applied.tipPoolTotal,
             csPoolTotal: applied.csPoolTotal,
+            validation: applied.validation,
         };
     }
 
@@ -3126,6 +3160,7 @@ export class OrdersService {
             const rollbackSettlementResult = await this.wallet.rollbackOrderWalletImpactInTxV2({
                 tx,
                 settlementIds: oldSettlementIds,
+                orderId,
             });
 
             /**
@@ -3527,108 +3562,140 @@ export class OrdersService {
                 throw new BadRequestException('未收款订单不允许最终确认结单');
             }
 
-            /**
-             * Step 5：构建 settlement 计划
-             */
-            const { settlementsToCreate, evaluationRows } = await this.buildSettlementPlanFromOrder({
-                order: latestOrder,
-                modePlayAllocList: dto?.modePlayAllocList,
-                playerEvaluations: dto?.playerEvaluations,
-                autoConfirm: isAutoConfirm,
-                orderTipEnabled: dto?.orderTipEnabled,
-                orderTipUserIds: dto?.orderTipUserIds,
-            });
+            try {
+                /**
+                 * Step 5：构建 settlement 计划
+                 */
+                const { settlementsToCreate, evaluationRows } = await this.buildSettlementPlanFromOrder({
+                    order: latestOrder,
+                    modePlayAllocList: dto?.modePlayAllocList,
+                    playerEvaluations: dto?.playerEvaluations,
+                    autoConfirm: isAutoConfirm,
+                    orderTipEnabled: dto?.orderTipEnabled,
+                    orderTipUserIds: dto?.orderTipUserIds,
+                });
 
-            /**
-             * Step 6：首次确认结单，应用 settlement
-             */
-            const result = await this.applySettlementPlanTx({
-                tx,
-                order: latestOrder,
-                operatorId,
-                settlementsToCreate,
-                mode: 'FINAL_CONFIRM',
-                reason: remark,
-            });
+                /**
+                 * Step 6：首次确认结单，应用 settlement
+                 */
+                const result = await this.applySettlementPlanTx({
+                    tx,
+                    order: latestOrder,
+                    operatorId,
+                    settlementsToCreate,
+                    mode: 'FINAL_CONFIRM',
+                    reason: remark,
+                });
 
-            if (evaluationRows.length) {
-                for (const item of evaluationRows) {
-                    await tx.orderPlayerEvaluation.upsert({
-                        where: {
-                            orderId_dispatchId_playerUserId: {
+                if (evaluationRows.length) {
+                    for (const item of evaluationRows) {
+                        await tx.orderPlayerEvaluation.upsert({
+                            where: {
+                                orderId_dispatchId_playerUserId: {
+                                    orderId: Number(orderId),
+                                    dispatchId: Number(item.dispatchId),
+                                    playerUserId: Number(item.playerUserId),
+                                },
+                            },
+                            update: {
+                                evaluatorId: operatorId,
+                                score: Number(item.score ?? 0),
+                                ratingLabel: String(item.ratingLabel || 'MEDIUM'),
+                                afterSaleHandled: Boolean(item.afterSaleHandled),
+                                afterSaleAction: item.afterSaleAction || null,
+                                responsibleUserIds: Array.isArray(item.responsibleUserIds) ? item.responsibleUserIds : [],
+                                tippedUserIds: Array.isArray(item.tippedUserIds) ? item.tippedUserIds : [],
+                                tipPoolAmount: item.tipPoolAmount ?? null,
+                                tipAmount: item.tipAmount ?? null,
+                                penaltyAmount: item.penaltyAmount ?? null,
+                                maintenanceFeeAmount: item.maintenanceFeeAmount ?? null,
+                                reviewRemark: item.reviewRemark || null,
+                            },
+                            create: {
                                 orderId: Number(orderId),
                                 dispatchId: Number(item.dispatchId),
                                 playerUserId: Number(item.playerUserId),
+                                evaluatorId: operatorId,
+                                score: Number(item.score ?? 0),
+                                ratingLabel: String(item.ratingLabel || 'MEDIUM'),
+                                afterSaleHandled: Boolean(item.afterSaleHandled),
+                                afterSaleAction: item.afterSaleAction || null,
+                                responsibleUserIds: Array.isArray(item.responsibleUserIds) ? item.responsibleUserIds : [],
+                                tippedUserIds: Array.isArray(item.tippedUserIds) ? item.tippedUserIds : [],
+                                tipPoolAmount: item.tipPoolAmount ?? null,
+                                tipAmount: item.tipAmount ?? null,
+                                penaltyAmount: item.penaltyAmount ?? null,
+                                maintenanceFeeAmount: item.maintenanceFeeAmount ?? null,
+                                reviewRemark: item.reviewRemark || null,
                             },
-                        },
-                        update: {
-                            evaluatorId: operatorId,
-                            score: Number(item.score ?? 0),
-                            ratingLabel: String(item.ratingLabel || 'MEDIUM'),
-                            afterSaleHandled: Boolean(item.afterSaleHandled),
-                            afterSaleAction: item.afterSaleAction || null,
-                            responsibleUserIds: Array.isArray(item.responsibleUserIds) ? item.responsibleUserIds : [],
-                            tippedUserIds: Array.isArray(item.tippedUserIds) ? item.tippedUserIds : [],
-                            tipPoolAmount: item.tipPoolAmount ?? null,
-                            tipAmount: item.tipAmount ?? null,
-                            penaltyAmount: item.penaltyAmount ?? null,
-                            maintenanceFeeAmount: item.maintenanceFeeAmount ?? null,
-                            reviewRemark: item.reviewRemark || null,
-                        },
-                        create: {
-                            orderId: Number(orderId),
-                            dispatchId: Number(item.dispatchId),
-                            playerUserId: Number(item.playerUserId),
-                            evaluatorId: operatorId,
-                            score: Number(item.score ?? 0),
-                            ratingLabel: String(item.ratingLabel || 'MEDIUM'),
-                            afterSaleHandled: Boolean(item.afterSaleHandled),
-                            afterSaleAction: item.afterSaleAction || null,
-                            responsibleUserIds: Array.isArray(item.responsibleUserIds) ? item.responsibleUserIds : [],
-                            tippedUserIds: Array.isArray(item.tippedUserIds) ? item.tippedUserIds : [],
-                            tipPoolAmount: item.tipPoolAmount ?? null,
-                            tipAmount: item.tipAmount ?? null,
-                            penaltyAmount: item.penaltyAmount ?? null,
-                            maintenanceFeeAmount: item.maintenanceFeeAmount ?? null,
-                            reviewRemark: item.reviewRemark || null,
-                        },
-                    });
+                        });
+                    }
                 }
-            }
 
-            /**
-             * Step 7：后置同步
-             * - 更新订单状态为 COMPLETED
-             * - 重建业绩 / 财务
-             * - 写日志
-             */
-            await this.afterSettlementAppliedTx({
-                tx,
-                orderId,
-                operatorId,
-                settlements: result.settlements || [],
-                action: isAutoConfirm ? 'SYSTEM_AUTO_CONFIRM_COMPLETE_ORDER_24H' : 'CONFIRM_COMPLETE_ORDER_V3',
-                remark: remark || (isAutoConfirm ? '系统24小时自动确认结单' : '客服确认最终结单'),
-                orderStatusToUpdate: OrderStatus.COMPLETED,
-                logExtra: {
+                /**
+                 * Step 7：后置同步
+                 * - 更新订单状态为 COMPLETED
+                 * - 重建业绩 / 财务
+                 * - 写日志
+                 */
+                await this.afterSettlementAppliedTx({
+                    tx,
+                    orderId,
+                    operatorId,
+                    settlements: result.settlements || [],
+                    action: isAutoConfirm ? 'SYSTEM_AUTO_CONFIRM_COMPLETE_ORDER_24H' : 'CONFIRM_COMPLETE_ORDER_V3',
+                    remark: remark || (isAutoConfirm ? '系统24小时自动确认结单' : '客服确认最终结单'),
+                    orderStatusToUpdate: OrderStatus.COMPLETED,
+                    logExtra: {
+                        settlementBatchId: result.settlementBatchId,
+                        freezeDays: result.freezeDays,
+                        freezeStartAt: result.freezeStartAt,
+                        freezeEndAt: result.freezeEndAt,
+                        confirmMode: isAutoConfirm ? 'AUTO' : 'MANUAL',
+                    },
+                });
+
+                return {
+                    orderId,
+                    status: OrderStatus.COMPLETED,
                     settlementBatchId: result.settlementBatchId,
+                    rebuiltSettlementCount: result.rebuiltSettlementCount,
                     freezeDays: result.freezeDays,
                     freezeStartAt: result.freezeStartAt,
                     freezeEndAt: result.freezeEndAt,
                     confirmMode: isAutoConfirm ? 'AUTO' : 'MANUAL',
-                },
-            });
+                };
+            } catch (err: any) {
+                const errMsg = String(err?.message || err || '');
+                if (err instanceof BadRequestException && errMsg.includes('订单结算基数与实付金额不一致')) {
+                    const preview = await this.buildSettlementPlanFromOrder({
+                        order: latestOrder,
+                        modePlayAllocList: dto?.modePlayAllocList,
+                        playerEvaluations: dto?.playerEvaluations,
+                        autoConfirm: isAutoConfirm,
+                        orderTipEnabled: dto?.orderTipEnabled,
+                        orderTipUserIds: dto?.orderTipUserIds,
+                        skipValidation: true,
+                    });
 
-            return {
-                orderId,
-                status: OrderStatus.COMPLETED,
-                settlementBatchId: result.settlementBatchId,
-                rebuiltSettlementCount: result.rebuiltSettlementCount,
-                freezeDays: result.freezeDays,
-                freezeStartAt: result.freezeStartAt,
-                freezeEndAt: result.freezeEndAt,
-                confirmMode: isAutoConfirm ? 'AUTO' : 'MANUAL',
-            };
+                    return {
+                        previewOnly: true,
+                        orderId,
+                        errorMessage: errMsg,
+                        status: latestOrder.status,
+                        orderStatusAfter: latestOrder.status,
+                        settlementBatchId: null,
+                        settlementCount: preview.settlementsToCreate?.length ?? 0,
+                        settlements: preview.settlementsToCreate ?? [],
+                        evaluationRows: preview.evaluationRows ?? [],
+                        tipPoolTotal: preview.tipPoolTotal ?? 0,
+                        csPoolTotal: preview.csPoolTotal ?? 0,
+                        validation: preview.validation ?? null,
+                    };
+                }
+
+                throw err;
+            }
         });
     }
 
@@ -3639,7 +3706,11 @@ export class OrdersService {
 
         const systemActor = await this.prisma.user.findFirst({
             where: {
-                userType: UserType.SUPER_ADMIN,
+                Role: {
+                    is: {
+                        name: 'FINANCE_ADMIN',
+                    },
+                },
                 status: 'ACTIVE',
             },
             orderBy: { id: 'asc' },
@@ -3647,7 +3718,7 @@ export class OrdersService {
         });
 
         if (!systemActor?.id) {
-            this.logger.warn('[auto-confirm] 未找到可用超级管理员账号，跳过自动确认');
+            this.logger.warn('[auto-confirm] 未找到可用财务管理员账号，跳过自动确认');
             return { scanned: 0, confirmed: 0, skipped: 0 };
         }
 
@@ -3896,6 +3967,9 @@ export class OrdersService {
         type?: '' | 'RECALCULATE';
         scope?: 'COMPLETED_AND_ARCHIVED' | 'COMPLETED_ONLY' | 'ARCHIVED_ONLY';
         modePlayAllocList?: any;
+        playerEvaluations?: any[];
+        orderTipEnabled?: boolean;
+        orderTipUserIds?: any[];
     }) {
         const {
             orderId,
@@ -3905,7 +3979,37 @@ export class OrdersService {
             applyRepair = false,
             scope = 'COMPLETED_AND_ARCHIVED',
             modePlayAllocList,
+            playerEvaluations,
+            orderTipEnabled,
+            orderTipUserIds,
         } = params;
+
+        const normalizePlayerEvaluations = (rows: any[] = []) => {
+            return (Array.isArray(rows) ? rows : [])
+                .map((item: any) => ({
+                    dispatchId: Number(item?.dispatchId ?? 0),
+                    playerUserId: Number(item?.playerUserId ?? 0),
+                    score: Number(item?.score ?? 0),
+                    ratingLabel: String(item?.ratingLabel ?? ''),
+                    afterSaleHandled: Boolean(item?.afterSaleHandled),
+                    afterSaleAction: item?.afterSaleAction || null,
+                    responsibleUserIds: this.normalizeIdArray(item?.responsibleUserIds),
+                    tippedUserIds: this.normalizeIdArray(item?.tippedUserIds),
+                }))
+                .sort((a, b) => (
+                    a.dispatchId - b.dispatchId ||
+                    a.playerUserId - b.playerUserId
+                ));
+        };
+
+        const normalizeModePlayAlloc = (rows: any[] = []) => {
+            return (Array.isArray(rows) ? rows : [])
+                .map((item: any) => ({
+                    dispatchId: Number(item?.dispatchId ?? 0),
+                    income: Number(item?.income ?? 0),
+                }))
+                .sort((a, b) => a.dispatchId - b.dispatchId);
+        };
 
         return this.prisma.$transaction(async (tx) => {
             /**
@@ -3932,6 +4036,9 @@ export class OrdersService {
             const { billingMode, settlementsToCreate } = await this.buildSettlementPlanFromOrder({
                 order,
                 modePlayAllocList,
+                playerEvaluations,
+                orderTipEnabled,
+                orderTipUserIds,
             });
 
             /**
@@ -3948,7 +4055,11 @@ export class OrdersService {
                         paidAmount: Number(order.paidAmount ?? 0),
                         status: order.status,
                         dispatchCount: Number(order.dispatches?.length ?? 0),
-                    },
+                        modePlayAllocList: normalizeModePlayAlloc(modePlayAllocList),
+                        playerEvaluations: normalizePlayerEvaluations(playerEvaluations),
+                        orderTipEnabled: Boolean(orderTipEnabled),
+                        orderTipUserIds: this.normalizeIdArray(orderTipUserIds),
+                    } as any,
                 });
 
                 const plan = compareSettlementsToPlan({
@@ -3994,6 +4105,10 @@ export class OrdersService {
                     paidAmount: number;
                     status: any;
                     dispatchCount: number;
+                    modePlayAllocList?: any[];
+                    playerEvaluations?: any[];
+                    orderTipEnabled?: boolean;
+                    orderTipUserIds?: number[];
                 }
                     | undefined = cached.snapshot;
 
@@ -4010,9 +4125,13 @@ export class OrdersService {
                     Number(snap?.paidAmount ?? 0) !== Number(order.paidAmount ?? 0) ||
                     String(snap?.status ?? '') !== String(order.status ?? '') ||
                     Number(snap?.dispatchCount ?? 0) !== Number(order.dispatches?.length ?? 0) ||
-                    currentUpdatedAt !== cachedUpdatedAt
+                    currentUpdatedAt !== cachedUpdatedAt ||
+                    JSON.stringify(snap?.modePlayAllocList ?? []) !== JSON.stringify(normalizeModePlayAlloc(modePlayAllocList)) ||
+                    JSON.stringify(snap?.playerEvaluations ?? []) !== JSON.stringify(normalizePlayerEvaluations(playerEvaluations)) ||
+                    Boolean(snap?.orderTipEnabled ?? false) !== Boolean(orderTipEnabled) ||
+                    JSON.stringify(snap?.orderTipUserIds ?? []) !== JSON.stringify(this.normalizeIdArray(orderTipUserIds))
                 ) {
-                    throw new BadRequestException('订单数据已变化，请重新 dryRun 后再 applyRepair');
+                    throw new BadRequestException('预览结果已失效，请重新 dryRun 后再 applyRepair');
                 }
 
                 planToApply = cached.settlementsToCreate;
@@ -5218,6 +5337,9 @@ export class OrdersService {
                             manualAdjustment: 0,
                             finalEarnings: final1,
                             clubEarnings: 0,
+                            contributionBaseAmount: calculated1,
+                            grossPerformanceAmount: calculated1,
+                            netIncomeAmount: final1,
 
                             csEarnings: null,
                             inviteEarnings: null,
@@ -5237,6 +5359,9 @@ export class OrdersService {
                             manualAdjustment: 0,
                             finalEarnings: final1,
                             clubEarnings: 0,
+                            contributionBaseAmount: calculated1,
+                            grossPerformanceAmount: calculated1,
+                            netIncomeAmount: final1,
                         },
                         select: {id: true, finalEarnings: true},
                     });
