@@ -2770,6 +2770,7 @@ export class OrdersService {
                                         userType: true,
                                         staffRating: {
                                             select: {
+                                                name: true,
                                                 rate: true,
                                             },
                                         },
