@@ -24,9 +24,9 @@ CREATE TABLE `order_player_evaluations` (
   KEY `idx_order_player_eval_player_created` (`playerUserId`, `createdAt`),
   KEY `idx_order_player_eval_evaluator_created` (`evaluatorId`, `createdAt`),
   CONSTRAINT `order_player_evaluations_orderId_fkey`
-    FOREIGN KEY (`orderId`) REFERENCES `orders` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+    FOREIGN KEY (`orderId`) REFERENCES `Order` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `order_player_evaluations_dispatchId_fkey`
-    FOREIGN KEY (`dispatchId`) REFERENCES `order_dispatches` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+    FOREIGN KEY (`dispatchId`) REFERENCES `OrderDispatch` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `order_player_evaluations_playerUserId_fkey`
     FOREIGN KEY (`playerUserId`) REFERENCES `users` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `order_player_evaluations_evaluatorId_fkey`

@@ -1,6 +1,6 @@
 -- 补齐订单支付状态、支付流水、商品评价，以及订单取消状态
 
-ALTER TABLE `orders`
+ALTER TABLE `Order`
   MODIFY COLUMN `status` ENUM(
     'WAIT_ASSIGN',
     'WAIT_ACCEPT',
@@ -40,14 +40,14 @@ CREATE TABLE `order_payments` (
 
 ALTER TABLE `order_payments`
   ADD CONSTRAINT `order_payments_orderId_fkey`
-  FOREIGN KEY (`orderId`) REFERENCES `orders`(`id`)
+  FOREIGN KEY (`orderId`) REFERENCES `Order`(`id`)
   ON DELETE CASCADE ON UPDATE CASCADE;
 
-ALTER TABLE `orders`
+ALTER TABLE `Order`
   ADD COLUMN `latestPaymentId` INTEGER NULL AFTER `payStatus`,
   ADD INDEX `Order_latestPaymentId_fkey`(`latestPaymentId`);
 
-ALTER TABLE `orders`
+ALTER TABLE `Order`
   ADD CONSTRAINT `Order_latestPaymentId_fkey`
   FOREIGN KEY (`latestPaymentId`) REFERENCES `order_payments`(`id`)
   ON DELETE SET NULL ON UPDATE CASCADE;
@@ -81,7 +81,7 @@ ALTER TABLE `product_reviews`
 
 ALTER TABLE `product_reviews`
   ADD CONSTRAINT `product_reviews_orderId_fkey`
-  FOREIGN KEY (`orderId`) REFERENCES `orders`(`id`)
+  FOREIGN KEY (`orderId`) REFERENCES `Order`(`id`)
   ON DELETE CASCADE ON UPDATE CASCADE;
 
 ALTER TABLE `product_reviews`
