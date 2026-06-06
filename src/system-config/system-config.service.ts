@@ -65,6 +65,11 @@ export class SystemConfigService implements OnModuleInit {
     WECHAT_PAY_RECHARGE_NOTIFY_URL: 'wechat_pay_recharge_notify_url',
     WECHAT_MINI_APPID: 'wechat_mini_appid',
     WECHAT_MINI_APPSECRET: 'wechat_mini_appsecret',
+    COS_SECRET_ID: 'cos_secret_id',
+    COS_SECRET_KEY: 'cos_secret_key',
+    COS_BUCKET: 'cos_bucket',
+    COS_REGION: 'cos_region',
+    COS_CDN_DOMAIN: 'cos_cdn_domain',
     ORDER_SOURCE_OPTIONS: 'order_source_options',
     MINIAPP_HOME_CONFIG: 'miniapp_home_config',
     MINIAPP_HOME_CONFIG_DRAFT: 'miniapp_home_config_draft',
@@ -170,6 +175,36 @@ export class SystemConfigService implements OnModuleInit {
         value: String(process.env.WECHAT_MINI_APPSECRET || '').trim(),
         valueType: 'STRING',
         remark: '微信小程序 AppSecret',
+      },
+      {
+        key: SystemConfigService.KEYS.COS_SECRET_ID,
+        value: String(process.env.COS_SECRET_ID || process.env.COS_STS_SECRET_ID || '').trim(),
+        valueType: 'STRING',
+        remark: '腾讯云 COS SecretId',
+      },
+      {
+        key: SystemConfigService.KEYS.COS_SECRET_KEY,
+        value: String(process.env.COS_SECRET_KEY || process.env.COS_STS_SECRET_KEY || '').trim(),
+        valueType: 'STRING',
+        remark: '腾讯云 COS SecretKey',
+      },
+      {
+        key: SystemConfigService.KEYS.COS_BUCKET,
+        value: String(process.env.COS_BUCKET || process.env.COS_UPLOAD_BUCKET || 'bluecat-pw-1393974512').trim(),
+        valueType: 'STRING',
+        remark: '腾讯云 COS Bucket',
+      },
+      {
+        key: SystemConfigService.KEYS.COS_REGION,
+        value: String(process.env.COS_REGION || process.env.COS_UPLOAD_REGION || 'ap-shanghai').trim(),
+        valueType: 'STRING',
+        remark: '腾讯云 COS 地域',
+      },
+      {
+        key: SystemConfigService.KEYS.COS_CDN_DOMAIN,
+        value: String(process.env.COS_CDN_DOMAIN || process.env.COS_UPLOAD_CDN_DOMAIN || '').trim(),
+        valueType: 'STRING',
+        remark: '腾讯云 COS CDN 域名（可选）',
       },
       {
         key: SystemConfigService.KEYS.ORDER_SOURCE_OPTIONS,
@@ -521,6 +556,23 @@ export class SystemConfigService implements OnModuleInit {
   async getEnabledOrderSourceOptions() {
     const list = await this.getOrderSourceOptions();
     return list.filter((item) => item.enabled !== false);
+  }
+
+  async getCosUploadConfig() {
+    const [secretId, secretKey, bucket, region, cdnDomain] = await Promise.all([
+      this.getString(SystemConfigService.KEYS.COS_SECRET_ID, process.env.COS_SECRET_ID || process.env.COS_STS_SECRET_ID || ''),
+      this.getString(SystemConfigService.KEYS.COS_SECRET_KEY, process.env.COS_SECRET_KEY || process.env.COS_STS_SECRET_KEY || ''),
+      this.getString(SystemConfigService.KEYS.COS_BUCKET, process.env.COS_BUCKET || process.env.COS_UPLOAD_BUCKET || 'bluecat-pw-1393974512'),
+      this.getString(SystemConfigService.KEYS.COS_REGION, process.env.COS_REGION || process.env.COS_UPLOAD_REGION || 'ap-shanghai'),
+      this.getString(SystemConfigService.KEYS.COS_CDN_DOMAIN, process.env.COS_CDN_DOMAIN || process.env.COS_UPLOAD_CDN_DOMAIN || ''),
+    ]);
+    return {
+      secretId: String(secretId || '').trim(),
+      secretKey: String(secretKey || '').trim(),
+      bucket: String(bucket || '').trim(),
+      region: String(region || '').trim(),
+      cdnDomain: String(cdnDomain || '').trim(),
+    };
   }
 
   async upsertMiniappHomeConfig(config: any) {

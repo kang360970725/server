@@ -1,14 +1,10 @@
 import { BadRequestException, Body, Controller, Post } from '@nestjs/common';
 import * as crypto from 'crypto';
+import { SystemConfigService } from '../system-config/system-config.service';
 
 @Controller('uploads')
 export class CommonUploadController {
-  // ✅ 不写死密钥，运行时从环境变量读取，避免提交泄露
-  private readonly fixedSecretId = process.env.COS_SECRET_ID || process.env.COS_STS_SECRET_ID || '';
-  private readonly fixedSecretKey = process.env.COS_SECRET_KEY || process.env.COS_STS_SECRET_KEY || '';
-  private readonly fixedBucket = process.env.COS_BUCKET || process.env.COS_UPLOAD_BUCKET || 'bluecat-pw-1393974512';
-  private readonly fixedRegion = process.env.COS_REGION || process.env.COS_UPLOAD_REGION || 'ap-shanghai';
-  private readonly fixedCdnDomain = process.env.COS_CDN_DOMAIN || process.env.COS_UPLOAD_CDN_DOMAIN || '';
+  constructor(private readonly systemConfigService: SystemConfigService) {}
 
   private readonly allowedModules = new Set([
     'game-project',
@@ -32,11 +28,12 @@ export class CommonUploadController {
     },
   ) {
     try {
-      const secretId = String(this.fixedSecretId || '').trim();
-      const secretKey = String(this.fixedSecretKey || '').trim();
-      const bucket = String(this.fixedBucket || '').trim();
-      const region = String(this.fixedRegion || '').trim();
-      const cdnDomain = String(this.fixedCdnDomain || '').trim();
+      const cosConfig = await this.systemConfigService.getCosUploadConfig();
+      const secretId = String(cosConfig.secretId || '').trim();
+      const secretKey = String(cosConfig.secretKey || '').trim();
+      const bucket = String(cosConfig.bucket || '').trim();
+      const region = String(cosConfig.region || '').trim();
+      const cdnDomain = String(cosConfig.cdnDomain || '').trim();
       const signExpireSeconds = 1800;
 
       if (!secretId || !secretKey || !bucket || !region) {
