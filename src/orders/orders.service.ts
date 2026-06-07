@@ -61,6 +61,23 @@ export class OrdersService {
     ) {
     }
 
+    private getDispatchParticipantUserSelect() {
+        return {
+            id: true,
+            name: true,
+            phone: true,
+            workStatus: true,
+            userType: true,
+            staffRating: {
+                select: {
+                    id: true,
+                    name: true,
+                    rate: true,
+                },
+            },
+        };
+    }
+
     private isOrderEffectivelyPaidOrGifted(order: { isPaid?: boolean | null; isGifted?: boolean | null; payStatus?: OrderPayStatus | string | null }) {
         return Boolean(order?.isGifted) || order?.isPaid === true || String(order?.payStatus || '') === OrderPayStatus.SUCCESS;
     }
@@ -1100,12 +1117,7 @@ export class OrdersService {
                             where: { isActive: true },
                             include: {
                                 user: {
-                                    select: {
-                                        id: true,
-                                        name: true,
-                                        phone: true,
-                                        workStatus: true,
-                                    },
+                                    select: this.getDispatchParticipantUserSelect(),
                                 },
                             },
                             orderBy: { id: 'asc' },
@@ -1119,7 +1131,7 @@ export class OrdersService {
                     include: {
                         participants: {
                             include: {
-                                user: { select: { id: true, name: true, phone: true } },
+                                user: { select: this.getDispatchParticipantUserSelect() },
                             },
                             orderBy: { id: 'asc' },
                         },
@@ -2794,17 +2806,7 @@ export class OrdersService {
                                 contributionAmount: true,
                                 progressBaseWan: true,
                                 user: {
-                                    select: {
-                                        id: true,
-                                        name: true,
-                                        userType: true,
-                                        staffRating: {
-                                            select: {
-                                                name: true,
-                                                rate: true,
-                                            },
-                                        },
-                                    },
+                                    select: this.getDispatchParticipantUserSelect(),
                                 },
                             },
                         },
