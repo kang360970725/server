@@ -2422,6 +2422,8 @@ export class WalletService {
         unlockAt?: Date | null;
 
         freezeWhenPositive?: boolean;
+        /** 可选：强制新流水状态，避免重算/冲正时把冻结态误落到可用余额 */
+        statusHint?: 'FROZEN' | 'AVAILABLE' | null;
 
         /** 可选：覆盖业务类型（如 SETTLEMENT_RECALC / SETTLEMENT_REVERSAL） */
         bizTypeOverride?: string | null;
@@ -2441,6 +2443,7 @@ export class WalletService {
             finalEarnings,
             unlockAt = null,
             freezeWhenPositive = true,
+            statusHint = null,
             bizTypeOverride = null,
             sourceTypeOverride = null,
             sourceIdOverride = null,
@@ -2478,7 +2481,19 @@ export class WalletService {
             isPositive &&
             freezeWhenPositive === true &&
             unlockAt &&
-            new Date(unlockAt).getTime() > now.getTime();
+            new Date(unlockAt).getTime() > now.getTime() &&
+            statusHint !== 'AVAILABLE';
+
+        const targetStatus: WalletTxStatus = (() => {
+            if (isPositive) {
+                if (statusHint === 'FROZEN') return 'FROZEN';
+                if (statusHint === 'AVAILABLE') return 'AVAILABLE';
+                return shouldFreeze ? 'FROZEN' : 'AVAILABLE';
+            }
+
+            if (statusHint === 'FROZEN') return 'FROZEN';
+            return 'AVAILABLE';
+        })();
 
         // ======================================================
         // ✅ 幂等（第一层）：按 sourceType + sourceId 查重
@@ -2513,14 +2528,16 @@ export class WalletService {
             const sameAmount = Number(existedAmount) === Number(amountAbs);
             const sameDirection = String(existedBySource.direction) === String(direction);
             const sameBizType = String(existedBySource.bizType) === String(bizType);
+            const sameStatus = String(existedBySource.status) === String(targetStatus);
 
-            if (sameAmount && sameDirection && sameBizType) {
+            if (sameAmount && sameDirection && sameBizType && sameStatus) {
                 return {
                     reused: true,
                     earningTxId: existedBySource.id,
                     shouldFreeze: existedBySource.status === 'FROZEN',
                     amount: amountAbs,
                     direction,
+                    status: existedBySource.status,
                     bizType,
                     sourceType,
                     sourceId,
@@ -2528,129 +2545,80 @@ export class WalletService {
                 };
             }
 
-            throw new BadRequestException(
-                `同来源钱包流水已存在但内容不一致，需人工冲正/重建：` +
-                `sourceType=${sourceType}, sourceId=${sourceId}, userId=${userId}, existedTxId=${existedBySource.id}, ` +
-                `existedBizType=${existedBySource.bizType}, newBizType=${bizType}, ` +
-                `existedDirection=${existedBySource.direction}, newDirection=${direction}, ` +
-                `existedAmount=${existedAmount}, newAmount=${amountAbs}`,
-            );
+            if (!sameAmount || !sameDirection || !sameBizType) {
+                throw new BadRequestException(
+                    `同来源钱包流水已存在但内容不一致，需人工冲正/重建：` +
+                    `sourceType=${sourceType}, sourceId=${sourceId}, userId=${userId}, existedTxId=${existedBySource.id}, ` +
+                    `existedBizType=${existedBySource.bizType}, newBizType=${bizType}, ` +
+                    `existedDirection=${existedBySource.direction}, newDirection=${direction}, ` +
+                    `existedAmount=${existedAmount}, newAmount=${amountAbs}`,
+                );
+            }
         }
 
-        // ======================================================
-        // ✅ 创建收益流水（第二层）：并发兜底 P2002
-        // ======================================================
-        let earningTx: { id: number };
+        const existingHold = existedBySource
+            ? await tx.walletHold.findUnique({
+                where: { earningTxId: existedBySource.id },
+                select: { id: true, amount: true, status: true, unlockAt: true },
+            })
+            : null;
 
-        try {
-            earningTx = await tx.walletTransaction.create({
-                data: {
-                    userId,
-                    direction,
-                    bizType,
-                    amount: amountAbs,
-                    status: shouldFreeze ? 'FROZEN' : 'AVAILABLE',
-
+        // ======================================================
+        // ✅ 创建/更新收益流水：同来源唯一键 upsert
+        // ======================================================
+        const earningTx = await tx.walletTransaction.upsert({
+            where: {
+                sourceType_sourceId: {
                     sourceType,
                     sourceId,
-
-                    orderId,
-                    dispatchId,
-                    settlementId,
-                } as any,
-                select: { id: true },
-            });
-        } catch (e: any) {
-            if (e?.code === 'P2002') {
-                const existed = await tx.walletTransaction.findUnique({
-                    where: {
-                        sourceType_sourceId: {
-                            sourceType,
-                            sourceId,
-                        },
-                    } as any,
-                    select: {
-                        id: true,
-                        userId: true,
-                        bizType: true,
-                        direction: true,
-                        amount: true,
-                        status: true,
-                    },
-                });
-
-                if (existed) {
-                    if (Number(existed.userId) !== Number(userId)) {
-                        throw new BadRequestException(
-                            `钱包流水来源冲突且 userId 不一致，需人工处理：` +
-                            `sourceType=${sourceType}, sourceId=${sourceId}, newUserId=${userId}, ` +
-                            `existedTxId=${existed.id}, existedUserId=${existed.userId}`,
-                        );
-                    }
-
-                    const existedAmount = round2(Number(existed.amount ?? 0));
-                    const sameAmount = Number(existedAmount) === Number(amountAbs);
-                    const sameDirection = String(existed.direction) === String(direction);
-                    const sameBizType = String(existed.bizType) === String(bizType);
-
-                    if (sameAmount && sameDirection && sameBizType) {
-                        return {
-                            reused: true,
-                            earningTxId: existed.id,
-                            shouldFreeze: existed.status === 'FROZEN',
-                            amount: amountAbs,
-                            direction,
-                            bizType,
-                            sourceType,
-                            sourceId,
-                            note: 'create 触发 uniq_wallet_tx_source，已回读复用现存流水',
-                        };
-                    }
-
-                    throw new BadRequestException(
-                        `create 冲突回读到的流水与本次不一致，需人工冲正/重建：` +
-                        `sourceType=${sourceType}, sourceId=${sourceId}, userId=${userId}, existedTxId=${existed.id}, ` +
-                        `existedBizType=${existed.bizType}, newBizType=${bizType}, ` +
-                        `existedDirection=${existed.direction}, newDirection=${direction}, ` +
-                        `existedAmount=${existedAmount}, newAmount=${amountAbs}`,
-                    );
-                }
-            }
-
-            throw e;
-        }
+                },
+            } as any,
+            create: {
+                userId,
+                direction,
+                bizType,
+                amount: amountAbs,
+                status: targetStatus,
+                sourceType,
+                sourceId,
+                orderId,
+                dispatchId,
+                settlementId,
+            } as any,
+            update: {
+                userId,
+                direction,
+                bizType,
+                amount: amountAbs,
+                status: targetStatus,
+                orderId,
+                dispatchId,
+                settlementId,
+            } as any,
+            select: { id: true },
+        });
 
         // ======================================================
         // 2) 更新账户余额
         // ======================================================
         let accountAfter: any;
 
-        if (direction === 'OUT') {
+        if (targetStatus === 'FROZEN') {
             accountAfter = await tx.walletAccount.update({
                 where: { userId },
-                data: {
-                    availableBalance: { decrement: amountAbs },
-                },
+                data: direction === 'OUT'
+                    ? { frozenBalance: { decrement: amountAbs } }
+                    : { frozenBalance: { increment: amountAbs } },
                 select: { availableBalance: true, frozenBalance: true },
             });
         } else {
-            if (shouldFreeze) {
-                accountAfter = await tx.walletAccount.update({
-                    where: { userId },
-                    data: {
-                        frozenBalance: { increment: amountAbs },
-                    },
-                    select: { availableBalance: true, frozenBalance: true },
-                });
-            } else {
-                accountAfter = await tx.walletAccount.update({
-                    where: { userId },
-                    data: {
-                        availableBalance: { increment: amountAbs },
-                    },
-                    select: { availableBalance: true, frozenBalance: true },
-                });
-            }
+            accountAfter = await tx.walletAccount.update({
+                where: { userId },
+                data: direction === 'OUT'
+                    ? { availableBalance: { decrement: amountAbs } }
+                    : { availableBalance: { increment: amountAbs } },
+                select: { availableBalance: true, frozenBalance: true },
+            });
         }
 
         // ======================================================
@@ -2669,25 +2637,44 @@ export class WalletService {
         // ======================================================
         let hold: any = null;
 
-        if (shouldFreeze) {
-            hold = await tx.walletHold.create({
-                data: {
+        const shouldCreateHold = isPositive && targetStatus === 'FROZEN';
+
+        if (shouldCreateHold) {
+            const resolvedUnlockAt = existingHold?.unlockAt ?? unlockAt;
+            if (!resolvedUnlockAt) {
+                throw new BadRequestException('缺少 unlockAt：首次创建冻结收益时必须提供解冻时间');
+            }
+            hold = await tx.walletHold.upsert({
+                where: { earningTxId: earningTx.id },
+                create: {
                     userId,
                     earningTxId: earningTx.id,
                     amount: amountAbs,
                     status: 'FROZEN',
-                    unlockAt: new Date(unlockAt as any),
+                    unlockAt: new Date(resolvedUnlockAt as any),
+                } as any,
+                update: {
+                    userId,
+                    amount: amountAbs,
+                    status: 'FROZEN',
+                    unlockAt: new Date(resolvedUnlockAt as any),
+                    releasedAt: null,
                 } as any,
                 select: { id: true, unlockAt: true, status: true },
+            });
+        } else if (existingHold) {
+            await tx.walletHold.delete({
+                where: { id: existingHold.id },
             });
         }
 
         return {
             earningTxId: earningTx.id,
             hold,
-            shouldFreeze,
+            shouldFreeze: targetStatus === 'FROZEN',
             amount: amountAbs,
             direction,
+            status: targetStatus,
             bizType,
             sourceType,
             sourceId,
@@ -2968,6 +2955,7 @@ export class WalletService {
         }
 
         const reversalPlans: any[] = [];
+        const sourceSettlementStatusHints: Array<{ settlementId: number; statusHint: 'FROZEN' | 'AVAILABLE' }> = [];
 
         /**
          * Step 3.1：主收益流水 reversal plan
@@ -2994,6 +2982,14 @@ export class WalletService {
             // ✅ 已解冻主收益：主流水 reversal 固定回 frozen
             // ✅ 未解冻主收益：按原主流水当前状态处理
             const mainTxStatusHint = hasRelease ? 'FROZEN' : t.status;
+            const recalcTxStatusHint = hasRelease ? 'AVAILABLE' : (String(t.status) === 'FROZEN' ? 'FROZEN' : 'AVAILABLE');
+
+            if (Number(t.sourceId ?? 0) > 0) {
+                sourceSettlementStatusHints.push({
+                    settlementId: Number(t.sourceId ?? t.settlementId ?? 0),
+                    statusHint: recalcTxStatusHint as 'FROZEN' | 'AVAILABLE',
+                });
+            }
 
             reversalPlans.push({
                 kind: 'EARNING_TX_REVERSAL',
@@ -3071,6 +3067,7 @@ export class WalletService {
             earningTxIds,
             releaseTxIds: releaseTxs.map((t: any) => Number(t.id)),
             reversalPlans,
+            sourceSettlementStatusHints,
         };
     }
 

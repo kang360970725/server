@@ -3155,6 +3155,12 @@ export class OrdersService {
             }
 
             const oldSettlementIds = oldSettlements.map((s: any) => s.id);
+            const oldSettlementKeyById = new Map<number, string>(
+                oldSettlements.map((s: any) => [
+                    Number(s.id),
+                    `${Number(s.dispatchId)}_${Number(s.userId)}_${String(s.settlementType)}`,
+                ]),
+            );
 
             /**
              * Step 1：生成旧钱包冲正计划
@@ -3171,15 +3177,16 @@ export class OrdersService {
             const reversalApplyResults: any[] = [];
             for (const plan of rollbackSettlementResult.reversalPlans ?? []) {
                 const r = await this.wallet.applySettlementEarningToWalletV2({
-                    tx,
-                    userId: plan.userId,
-                    settlementId: plan.settlementId ?? null,
-                    orderId: plan.orderId ?? orderId,
-                    dispatchId: plan.dispatchId ?? null,
-                    finalEarnings: Number(plan.finalEarnings ?? 0),
+                tx,
+                userId: plan.userId,
+                settlementId: plan.settlementId ?? null,
+                orderId: plan.orderId ?? orderId,
+                dispatchId: plan.dispatchId ?? null,
+                finalEarnings: Number(plan.finalEarnings ?? 0),
 
-                    unlockAt: null,
-                    freezeWhenPositive: false,
+                    unlockAt,
+                    freezeWhenPositive: true,
+                    statusHint: plan.statusHint ?? null,
 
                     bizTypeOverride: WalletBizType.SETTLEMENT_REVERSAL,
                     sourceTypeOverride: plan.sourceTypeOverride,
@@ -3241,8 +3248,9 @@ export class OrdersService {
                     dispatchId: t.dispatchId ?? null,
                     finalEarnings: reversalFinalEarnings,
 
-                    unlockAt: null,
-                    freezeWhenPositive: false,
+                    unlockAt,
+                    freezeWhenPositive: true,
+                    statusHint: String(t.status) === 'FROZEN' ? 'FROZEN' : 'AVAILABLE',
 
                     bizTypeOverride: WalletBizType.SETTLEMENT_REVERSAL,
                     sourceTypeOverride: 'ORDER_SETTLEMENT_ORPHAN_REVERSAL',
@@ -3294,12 +3302,22 @@ export class OrdersService {
                 );
             }
 
+            const recalcStatusHintByKey = new Map<string, 'FROZEN' | 'AVAILABLE'>();
+            for (const item of rollbackSettlementResult.sourceSettlementStatusHints ?? []) {
+                const key = oldSettlementKeyById.get(Number(item.settlementId));
+                if (key) {
+                    recalcStatusHintByKey.set(key, item.statusHint);
+                }
+            }
+
             /**
              * Step 6：写新“重算收益流水”
-             * - 修复类统一不冻结
+             * - 按旧结算状态决定是否冻结，避免把仍处于冻结态的重算结果直接落到可用余额
              */
             const recalcApplyResults: any[] = [];
             for (const s of createdSettlements) {
+                const key = `${Number(s.dispatchId)}_${Number(s.userId)}_${String(s.settlementType)}`;
+                const statusHint = recalcStatusHintByKey.get(key) ?? 'AVAILABLE';
                 const r = await this.wallet.applySettlementEarningToWalletV2({
                     tx,
                     userId: s.userId,
@@ -3308,8 +3326,9 @@ export class OrdersService {
                     dispatchId: s.dispatchId,
                     finalEarnings: Number(s.finalEarnings ?? 0),
 
-                    unlockAt: null,
-                    freezeWhenPositive: false,
+                    unlockAt,
+                    freezeWhenPositive: true,
+                    statusHint,
 
                     bizTypeOverride: WalletBizType.SETTLEMENT_RECALC,
                     sourceTypeOverride: 'ORDER_SETTLEMENT_RECALC',
