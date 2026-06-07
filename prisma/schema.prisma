@@ -692,6 +692,8 @@ model Order {
   /// 金额：手工录入（已确认 Q1=A）
   receivableAmount    Float
   paidAmount          Float
+  /// 结算基数：默认等于应收，用于分佣，不受优惠券/实收波动影响
+  settlementBaseAmount Float @default(0)
   /// 时间字段：
   orderTime           DateTime?
   paymentTime         DateTime?
@@ -1628,6 +1630,7 @@ model OrderFinanceRecord {
   /// 收入口径
   receivableAmount Decimal @default(0) @db.Decimal(12, 2) // 应收
   paidAmount Decimal @default(0) @db.Decimal(12, 2) // 实收
+  settlementBaseAmount Decimal @default(0) @db.Decimal(12, 2) // 结算基数
   discountAmount Decimal @default(0) @db.Decimal(12, 2) // 总优惠
   couponDiscountAmount Decimal @default(0) @db.Decimal(12, 2) // 优惠券优惠
   otherDiscountAmount Decimal @default(0) @db.Decimal(12, 2) // 其他优惠

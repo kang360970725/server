@@ -2515,6 +2515,92 @@ export class WalletService {
             },
         });
 
+        const existingHold = existedBySource
+            ? await tx.walletHold.findUnique({
+                where: { earningTxId: existedBySource.id },
+                select: { id: true, amount: true, status: true, unlockAt: true },
+            })
+            : null;
+
+        const signedAmount = direction === 'IN' ? amountAbs : -amountAbs;
+        const effectForStatus = (status: WalletTxStatus) => ({
+            available: status === 'AVAILABLE' ? signedAmount : 0,
+            frozen: status === 'FROZEN' ? signedAmount : 0,
+        });
+
+        const resolveUnlockAt = () => {
+            const resolved = unlockAt ?? existingHold?.unlockAt ?? null;
+            if (!resolved) {
+                throw new BadRequestException('缺少 unlockAt：首次创建冻结收益时必须提供解冻时间');
+            }
+            return new Date(resolved as any);
+        };
+
+        const applyAccountDelta = async (availableDelta: number, frozenDelta: number) => {
+            const data: any = {};
+            if (Math.abs(availableDelta) > 0) {
+                data.availableBalance =
+                    availableDelta > 0
+                        ? { increment: round2(availableDelta) }
+                        : { decrement: round2(Math.abs(availableDelta)) };
+            }
+            if (Math.abs(frozenDelta) > 0) {
+                data.frozenBalance =
+                    frozenDelta > 0
+                        ? { increment: round2(frozenDelta) }
+                        : { decrement: round2(Math.abs(frozenDelta)) };
+            }
+
+            if (!Object.keys(data).length) {
+                return tx.walletAccount.findUnique({
+                    where: { userId },
+                    select: { availableBalance: true, frozenBalance: true },
+                });
+            }
+
+            return tx.walletAccount.update({
+                where: { userId },
+                data,
+                select: { availableBalance: true, frozenBalance: true },
+            });
+        };
+
+        const syncHold = async (earningTxId: number, status: WalletTxStatus) => {
+            if (status === 'FROZEN') {
+                const resolvedUnlockAt = resolveUnlockAt();
+                return tx.walletHold.upsert({
+                    where: { earningTxId },
+                    create: {
+                        userId,
+                        earningTxId,
+                        amount: amountAbs,
+                        status: 'FROZEN',
+                        unlockAt: resolvedUnlockAt,
+                    } as any,
+                    update: {
+                        userId,
+                        amount: amountAbs,
+                        status: 'FROZEN',
+                        unlockAt: resolvedUnlockAt,
+                        releasedAt: null,
+                    } as any,
+                    select: { id: true, unlockAt: true, status: true },
+                });
+            }
+
+            if (existingHold) {
+                await tx.walletHold.delete({
+                    where: { id: existingHold.id },
+                });
+            }
+
+            return null;
+        };
+
+        let earningTxId: number;
+        let accountAfter: any;
+        let hold: any = null;
+
         if (existedBySource) {
             if (Number(existedBySource.userId) !== Number(userId)) {
                 throw new BadRequestException(
@@ -2524,26 +2610,9 @@ export class WalletService {
                 );
             }
 
-            const existedAmount = round2(Number(existedBySource.amount ?? 0));
-            const sameAmount = Number(existedAmount) === Number(amountAbs);
+            const sameAmount = Number(round2(Number(existedBySource.amount ?? 0))) === Number(amountAbs);
             const sameDirection = String(existedBySource.direction) === String(direction);
             const sameBizType = String(existedBySource.bizType) === String(bizType);
-            const sameStatus = String(existedBySource.status) === String(targetStatus);
-
-            if (sameAmount && sameDirection && sameBizType && sameStatus) {
-                return {
-                    reused: true,
-                    earningTxId: existedBySource.id,
-                    shouldFreeze: existedBySource.status === 'FROZEN',
-                    amount: amountAbs,
-                    direction,
-                    status: existedBySource.status,
-                    bizType,
-                    sourceType,
-                    sourceId,
-                    note: '已存在同来源钱包流水（uniq_wallet_tx_source），本次跳过创建与余额更新',
-                };
-            }
 
             if (!sameAmount || !sameDirection || !sameBizType) {
                 throw new BadRequestException(
@@ -2551,125 +2620,94 @@ export class WalletService {
                     `sourceType=${sourceType}, sourceId=${sourceId}, userId=${userId}, existedTxId=${existedBySource.id}, ` +
                     `existedBizType=${existedBySource.bizType}, newBizType=${bizType}, ` +
                     `existedDirection=${existedBySource.direction}, newDirection=${direction}, ` +
-                    `existedAmount=${existedAmount}, newAmount=${amountAbs}`,
+                    `existedAmount=${round2(Number(existedBySource.amount ?? 0))}, newAmount=${amountAbs}`,
                 );
             }
-        }
 
-        const existingHold = existedBySource
-            ? await tx.walletHold.findUnique({
-                where: { earningTxId: existedBySource.id },
-                select: { id: true, amount: true, status: true, unlockAt: true },
-            })
-            : null;
+            earningTxId = existedBySource.id;
 
-        // ======================================================
-        // ✅ 创建/更新收益流水：同来源唯一键 upsert
-        // ======================================================
-        const earningTx = await tx.walletTransaction.upsert({
-            where: {
-                sourceType_sourceId: {
+            if (String(existedBySource.status) === String(targetStatus)) {
+                hold = await syncHold(earningTxId, targetStatus);
+
+                return {
+                    reused: true,
+                    earningTxId,
+                    hold,
+                    shouldFreeze: targetStatus === 'FROZEN',
+                    amount: amountAbs,
+                    direction,
+                    status: targetStatus,
+                    bizType,
                     sourceType,
                     sourceId,
-                },
-            } as any,
-            create: {
-                userId,
-                direction,
-                bizType,
-                amount: amountAbs,
-                status: targetStatus,
-                sourceType,
-                sourceId,
-                orderId,
-                dispatchId,
-                settlementId,
-            } as any,
-            update: {
-                userId,
-                direction,
-                bizType,
-                amount: amountAbs,
-                status: targetStatus,
-                orderId,
-                dispatchId,
-                settlementId,
-            } as any,
-            select: { id: true },
-        });
-
-        // ======================================================
-        // 2) 更新账户余额
-        // ======================================================
-        let accountAfter: any;
-
-        if (targetStatus === 'FROZEN') {
-            accountAfter = await tx.walletAccount.update({
-                where: { userId },
-                data: direction === 'OUT'
-                    ? { frozenBalance: { decrement: amountAbs } }
-                    : { frozenBalance: { increment: amountAbs } },
-                select: { availableBalance: true, frozenBalance: true },
-            });
-        } else {
-            accountAfter = await tx.walletAccount.update({
-                where: { userId },
-                data: direction === 'OUT'
-                    ? { availableBalance: { decrement: amountAbs } }
-                    : { availableBalance: { increment: amountAbs } },
-                select: { availableBalance: true, frozenBalance: true },
-            });
-        }
-
-        // ======================================================
-        // 3) 回写余额快照
-        // ======================================================
-        await tx.walletTransaction.update({
-            where: { id: earningTx.id },
-            data: {
-                availableAfter: round2(Number(accountAfter?.availableBalance ?? 0)),
-                frozenAfter: round2(Number(accountAfter?.frozenBalance ?? 0)),
-            } as any,
-        });
-
-        // ======================================================
-        // 4) 若需要冻结：创建 hold
-        // ======================================================
-        let hold: any = null;
-
-        const shouldCreateHold = isPositive && targetStatus === 'FROZEN';
-
-        if (shouldCreateHold) {
-            const resolvedUnlockAt = existingHold?.unlockAt ?? unlockAt;
-            if (!resolvedUnlockAt) {
-                throw new BadRequestException('缺少 unlockAt：首次创建冻结收益时必须提供解冻时间');
+                    note: '已存在同来源钱包流水（uniq_wallet_tx_source），本次跳过余额更新，仅校正冻结单状态',
+                };
             }
-            hold = await tx.walletHold.upsert({
-                where: { earningTxId: earningTx.id },
-                create: {
+
+            const existedEffect = effectForStatus(existedBySource.status as WalletTxStatus);
+            const targetEffect = effectForStatus(targetStatus);
+            const availableDelta = round2(targetEffect.available - existedEffect.available);
+            const frozenDelta = round2(targetEffect.frozen - existedEffect.frozen);
+
+            await tx.walletTransaction.update({
+                where: { id: earningTxId },
+                data: {
                     userId,
-                    earningTxId: earningTx.id,
+                    direction,
+                    bizType,
                     amount: amountAbs,
-                    status: 'FROZEN',
-                    unlockAt: new Date(resolvedUnlockAt as any),
+                    status: targetStatus,
+                    orderId,
+                    dispatchId,
+                    settlementId,
                 } as any,
-                update: {
+            });
+
+            accountAfter = await applyAccountDelta(availableDelta, frozenDelta);
+            await tx.walletTransaction.update({
+                where: { id: earningTxId },
+                data: {
+                    availableAfter: round2(Number(accountAfter?.availableBalance ?? 0)),
+                    frozenAfter: round2(Number(accountAfter?.frozenBalance ?? 0)),
+                } as any,
+            });
+
+            hold = await syncHold(earningTxId, targetStatus);
+        } else {
+            const earningTx = await tx.walletTransaction.create({
+                data: {
                     userId,
+                    direction,
+                    bizType,
                     amount: amountAbs,
-                    status: 'FROZEN',
-                    unlockAt: new Date(resolvedUnlockAt as any),
-                    releasedAt: null,
+                    status: targetStatus,
+                    sourceType,
+                    sourceId,
+                    orderId,
+                    dispatchId,
+                    settlementId,
                 } as any,
-                select: { id: true, unlockAt: true, status: true },
+                select: { id: true },
             });
-        } else if (existingHold) {
-            await tx.walletHold.delete({
-                where: { id: existingHold.id },
+
+            earningTxId = earningTx.id;
+
+            const targetEffect = effectForStatus(targetStatus);
+            accountAfter = await applyAccountDelta(targetEffect.available, targetEffect.frozen);
+
+            await tx.walletTransaction.update({
+                where: { id: earningTxId },
+                data: {
+                    availableAfter: round2(Number(accountAfter?.availableBalance ?? 0)),
+                    frozenAfter: round2(Number(accountAfter?.frozenBalance ?? 0)),
+                } as any,
             });
+
+            hold = await syncHold(earningTxId, targetStatus);
         }
 
         return {
-            earningTxId: earningTx.id,
+            earningTxId,
             hold,
             shouldFreeze: targetStatus === 'FROZEN',
             amount: amountAbs,

@@ -240,6 +240,7 @@ export class OrdersController {
             {
                 remark: body?.remark,
                 paidAmount: body?.paidAmount,
+                settlementBaseMode: body?.settlementBaseMode,
                 confirmPaid: body?.confirmPaid, // 可选：默认 true
                 modePlayAllocList: body?.modePlayAllocList, //趣味玩法单 客服设定的每轮收益
                 playerEvaluations: body?.playerEvaluations,

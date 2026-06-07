@@ -25,6 +25,38 @@ const getSettlementParticipants = (dispatch: any) => {
         return true;
     });
 };
+
+const sortSettlementParticipants = (participants: any[]) => {
+    return [...(participants ?? [])].sort((a: any, b: any) => {
+        const userDiff = Number(a?.userId ?? 0) - Number(b?.userId ?? 0);
+        if (userDiff !== 0) return userDiff;
+        return Number(a?.id ?? 0) - Number(b?.id ?? 0);
+    });
+};
+
+const splitEvenlyWithResidual = (total: number, count: number) => {
+    const safeTotal = roundMix1(Number(total) || 0);
+    const safeCount = Math.max(1, Math.floor(Number(count) || 0));
+    const base = roundMix1(safeTotal / safeCount);
+    const residual = roundMix1(safeTotal - base * safeCount);
+    return {base, residual};
+};
+
+const getSettlementBaseAmount = (order: any) => {
+    const explicit = Number(order?.settlementBaseAmount ?? 0);
+    if (Number.isFinite(explicit) && explicit > 0) return roundMix1(explicit);
+
+    const receivable = Number(order?.receivableAmount ?? 0);
+    if (Number.isFinite(receivable) && receivable > 0) return roundMix1(receivable);
+
+    const original = Number(order?.originalAmount ?? 0);
+    if (Number.isFinite(original) && original > 0) return roundMix1(original);
+
+    const paid = Number(order?.paidAmount ?? 0);
+    if (Number.isFinite(paid) && paid > 0) return roundMix1(paid);
+
+    return 0;
+};
 export const calcBillableHours = (acceptedAt?: Date | null, endAt?: Date | null, deductMinutesValue?: number | null) => {
     if (!acceptedAt || !endAt) return 0;
     const diffMinutesRaw = Math.floor((+new Date(endAt) - +new Date(acceptedAt)) / 60000);
@@ -50,19 +82,15 @@ export const calcBillableHours = (acceptedAt?: Date | null, endAt?: Date | null,
  */
 export const computeBillingHours = (order: any) => {
     const settlements: any[] = [];
-    const {
-        paidAmount,
-        receivableAmount,
-        orderQuantity,
-        projectSnapshot,
-    } = order;
+    const { orderQuantity, projectSnapshot } = order;
 
     const dispatches = [...(order.dispatches ?? [])].sort(
         (a, b) => (a.round ?? 0) - (b.round ?? 0),
     );
 
-    let lastPaidAmount = order.isGifted ? receivableAmount : paidAmount;
-    const orderPaidAmount = order.isGifted ? receivableAmount : paidAmount;
+    const settlementBaseAmount = getSettlementBaseAmount(order);
+    let lastPaidAmount = settlementBaseAmount;
+    const orderPaidAmount = settlementBaseAmount;
 
     const orderMeanPrice = roundMix1(lastPaidAmount / orderQuantity);
     if (orderMeanPrice !== order.projectSnapshot?.price) {
@@ -77,7 +105,7 @@ export const computeBillingHours = (order: any) => {
     const includeCustomerServiceRate = order?.dispatcher?.userType === 'CUSTOMER_SERVICE';
 
     for (const d of dispatches) {
-        const active = getSettlementParticipants(d);
+        const active = sortSettlementParticipants(getSettlementParticipants(d));
         const inactive = (d.participants ?? []).filter((p: any) => p.rejectedAt);
 
         if (!active.length) {
@@ -141,22 +169,36 @@ export const computeBillingHours = (order: any) => {
             }
         }
 
-        const perBaseYuanList = distributeRoundedMoney(thisMoney, active.length);
-        if (d.status === DispatchStatus.COMPLETED) {
-            lastPaidAmount = 0;
-        }
-
-        for (const [idx, p] of active.entries()) {
-            const { playerRate, commissionRate } = getPlayerRate(
+        const rateSnapshots = active.map((p: any) => ({
+            p,
+            ...getPlayerRate(
                 order.customClubRate,
                 projectSnapshot?.clubRate,
                 p.user?.staffRating?.rate,
                 { includeCustomerServiceRate },
-            );
+            ),
+        }));
+        const uniformRate = rateSnapshots.length > 0
+            && rateSnapshots.every((item) => Math.abs(Number(item.playerRate ?? 0) - Number(rateSnapshots[0].playerRate ?? 0)) < 1e-9);
 
-            const perBaseYuan = perBaseYuanList[idx] ?? 0;
-            const expectedCalculated = roundMix1(perBaseYuan * playerRate);
+        if (d.status === DispatchStatus.COMPLETED) {
+            lastPaidAmount = 0;
+        }
+
+        const uniformSplit = uniformRate ? splitEvenlyWithResidual(thisMoney, active.length) : null;
+
+        for (const [idx, item] of rateSnapshots.entries()) {
+            const p = item.p;
+            const playerRate = Number(item.playerRate ?? 0);
+            const commissionRate = roundMix1(item.commissionRate ?? 0);
+            const perBaseYuan = uniformRate
+                ? uniformSplit?.base ?? 0
+                : distributeRoundedMoney(thisMoney, active.length)[idx] ?? 0;
+            const expectedCalculated = uniformRate
+                ? roundMix1(perBaseYuan * playerRate)
+                : roundMix1(perBaseYuan * playerRate);
             const settlementType = order.settlementType ?? 'REGULAR';
+            const clubEarnings = roundMix1(perBaseYuan - expectedCalculated + (uniformRate && idx === 0 ? (uniformSplit?.residual ?? 0) : 0));
 
             settlements.push({
                 orderId: order.id,
@@ -172,9 +214,10 @@ export const computeBillingHours = (order: any) => {
                 // ✅ 业绩辅助字段
                 ownerRoleType: 'PLAYER',
                 contributionBaseAmount: roundMix1(perBaseYuan),
-                commissionRate: roundMix1(commissionRate ?? 0),
+                commissionRate,
                 grossPerformanceAmount: roundMix1(perBaseYuan),
                 netIncomeAmount: roundMix1(expectedCalculated),
+                clubEarnings,
             });
         }
     }
@@ -189,13 +232,7 @@ export const computeBillingHours = (order: any) => {
  */
 export const computeBillingGuaranteed = (order: any) => {
     const settlements: any[] = [];
-    const {
-        status,
-        paidAmount,
-        receivableAmount,
-        baseAmountWan,
-        projectSnapshot,
-    } = order;
+    const { status, baseAmountWan, projectSnapshot } = order;
 
     if (!['COMPLETED', 'COMPLETED_PENDING_CONFIRM'].includes(status)) {
         throw new BadRequestException(`订单状态异常，无法完成核算`);
@@ -205,14 +242,15 @@ export const computeBillingGuaranteed = (order: any) => {
         (a, b) => (a.round ?? 0) - (b.round ?? 0),
     );
 
-    let lastPaidAmount = Number(order.isGifted ? receivableAmount : paidAmount) || 0;
-    const orderPaidAmount = order.isGifted ? receivableAmount : paidAmount;
+    const settlementBaseAmount = getSettlementBaseAmount(order);
+    let lastPaidAmount = settlementBaseAmount || 0;
+    const orderPaidAmount = settlementBaseAmount || 0;
 
     const orderRatio = lastPaidAmount > 0 ? Number(baseAmountWan) / lastPaidAmount : 0;
     const includeCustomerServiceRate = order?.dispatcher?.userType === 'CUSTOMER_SERVICE';
 
     for (const d of dispatches) {
-        const active = getSettlementParticipants(d);
+        const active = sortSettlementParticipants(getSettlementParticipants(d));
         const inactive = (d.participants ?? []).filter((p: any) => p.rejectedAt);
 
         if (!active.length) {
@@ -247,10 +285,25 @@ export const computeBillingGuaranteed = (order: any) => {
             }
         }
 
-        const completedRoundShareList =
-            d.status === DispatchStatus.COMPLETED ? distributeRoundedMoney(lastPaidAmount, active.length) : null;
+        const completedUniformSplit =
+            d.status === DispatchStatus.COMPLETED ? splitEvenlyWithResidual(lastPaidAmount, active.length) : null;
+        const archivedUniformSplit =
+            d.status === DispatchStatus.ARCHIVED ? splitEvenlyWithResidual(0, active.length) : null;
 
-        for (const p of active) {
+        const rateSnapshots = active.map((p: any) => ({
+            p,
+            ...getPlayerRate(
+                order.customClubRate,
+                projectSnapshot?.clubRate,
+                p.user?.staffRating?.rate,
+                { includeCustomerServiceRate },
+            ),
+        }));
+        const uniformRate = rateSnapshots.length > 0
+            && rateSnapshots.every((item) => Math.abs(Number(item.playerRate ?? 0) - Number(rateSnapshots[0].playerRate ?? 0)) < 1e-9);
+
+        for (const [idx, item] of rateSnapshots.entries()) {
+            const p = item.p;
             let contributionBaseAmount = 0;
             let finalMoney = 0;
             let commissionRate = 0;
@@ -262,14 +315,8 @@ export const computeBillingGuaranteed = (order: any) => {
                 lastPaidAmount = round2(lastPaidAmount - thisMoney);
 
                 if (progressBaseWan > 0) {
-                    const rateRes = getPlayerRate(
-                        order.customClubRate,
-                        projectSnapshot?.clubRate,
-                        p.user?.staffRating?.rate,
-                        { includeCustomerServiceRate },
-                    );
-                    const playerRate = Number(rateRes.playerRate ?? 0);
-                    commissionRate = roundMix1(rateRes.commissionRate ?? 0);
+                    const playerRate = Number(item.playerRate ?? 0);
+                    commissionRate = roundMix1(item.commissionRate ?? 0);
 
                     contributionBaseAmount = thisMoney;
                     finalMoney = thisMoney * playerRate;
@@ -282,22 +329,23 @@ export const computeBillingGuaranteed = (order: any) => {
             }
 
             if (d.status === DispatchStatus.COMPLETED) {
-                const rateRes = getPlayerRate(
-                    order.customClubRate,
-                    projectSnapshot?.clubRate,
-                    p.user?.staffRating?.rate,
-                    { includeCustomerServiceRate },
-                );
-                const playerRate = Number(rateRes.playerRate ?? 0);
-                commissionRate = roundMix1(rateRes.commissionRate ?? 0);
+                const playerRate = Number(item.playerRate ?? 0);
+                commissionRate = roundMix1(item.commissionRate ?? 0);
 
-                const perBaseYuanList = completedRoundShareList ?? [];
-                const currentIndex = active.indexOf(p);
-                contributionBaseAmount = perBaseYuanList[currentIndex] ?? (active.length > 0 ? lastPaidAmount / active.length : 0);
-                finalMoney = contributionBaseAmount * playerRate;
+                if (uniformRate && completedUniformSplit) {
+                    contributionBaseAmount = completedUniformSplit.base;
+                    finalMoney = roundMix1(contributionBaseAmount * playerRate);
+                } else {
+                    const perBaseYuanList = distributeRoundedMoney(lastPaidAmount, active.length);
+                    contributionBaseAmount = perBaseYuanList[idx] ?? (active.length > 0 ? lastPaidAmount / active.length : 0);
+                    finalMoney = contributionBaseAmount * playerRate;
+                }
             }
 
             const settlementType = order.settlementType ?? 'REGULAR';
+            const clubEarnings = uniformRate && d.status === DispatchStatus.COMPLETED && completedUniformSplit
+                ? roundMix1(contributionBaseAmount - finalMoney + (idx === 0 ? completedUniformSplit.residual : 0))
+                : roundMix1(contributionBaseAmount - finalMoney);
 
             settlements.push({
                 orderId: order.id,
@@ -315,6 +363,7 @@ export const computeBillingGuaranteed = (order: any) => {
                 commissionRate: roundMix1(commissionRate ?? 0),
                 grossPerformanceAmount: roundMix1(contributionBaseAmount),
                 netIncomeAmount: roundMix1(finalMoney),
+                clubEarnings,
             });
         }
 
@@ -333,12 +382,7 @@ export const computeBillingGuaranteed = (order: any) => {
  */
 export const computeBillingMODEPLAY = (order: any, modePlayAllocList: any) => {
     const settlements: any[] = [];
-    const {
-        status,
-        projectSnapshot,
-        paidAmount,
-        receivableAmount,
-    } = order;
+    const { status, projectSnapshot } = order;
 
     if (!['COMPLETED', 'COMPLETED_PENDING_CONFIRM'].includes(status)) {
         throw new BadRequestException(`订单状态异常，无法完成核算`);
@@ -352,11 +396,11 @@ export const computeBillingMODEPLAY = (order: any, modePlayAllocList: any) => {
         modePlayAllocList?.map((x: any) => [Number(x.dispatchId), Number(x.income)]) ?? [],
     );
 
-    const orderPaidAmount = order.isGifted ? receivableAmount : paidAmount;
+    const orderPaidAmount = getSettlementBaseAmount(order);
     const includeCustomerServiceRate = order?.dispatcher?.userType === 'CUSTOMER_SERVICE';
 
     for (const d of dispatches) {
-        const active = getSettlementParticipants(d);
+        const active = sortSettlementParticipants(getSettlementParticipants(d));
         const inactive = (d.participants ?? []).filter((p: any) => p.rejectedAt);
 
         if (!active.length) {
@@ -392,21 +436,30 @@ export const computeBillingMODEPLAY = (order: any, modePlayAllocList: any) => {
         }
 
         const roundIncomeNum = Number(allocMap.get(Number(d.id)) ?? 0);
-        const baseShareList = distributeRoundedMoney(roundIncomeNum, active.length);
-
-        for (const [idx, p] of active.entries()) {
-            const contributionBaseAmount = baseShareList[idx] ?? 0;
-
-            const { playerRate, commissionRate } = getPlayerRate(
+        const uniformSplit = splitEvenlyWithResidual(roundIncomeNum, active.length);
+        const rateSnapshots = active.map((p: any) => ({
+            p,
+            ...getPlayerRate(
                 order.customClubRate,
                 projectSnapshot?.clubRate,
                 p.user?.staffRating?.rate,
                 { includeCustomerServiceRate },
-            );
+            ),
+        }));
+        const uniformRate = rateSnapshots.length > 0
+            && rateSnapshots.every((item) => Math.abs(Number(item.playerRate ?? 0) - Number(rateSnapshots[0].playerRate ?? 0)) < 1e-9);
 
-            const thisMoney = roundMix1(
-                contributionBaseAmount * Number(playerRate ?? 0),
-            );
+        for (const [idx, item] of rateSnapshots.entries()) {
+            const p = item.p;
+            const contributionBaseAmount = uniformRate
+                ? uniformSplit.base
+                : (distributeRoundedMoney(roundIncomeNum, active.length)[idx] ?? 0);
+            const playerRate = Number(item.playerRate ?? 0);
+            const commissionRate = roundMix1(item.commissionRate ?? 0);
+            const thisMoney = roundMix1(contributionBaseAmount * playerRate);
+            const clubEarnings = uniformRate
+                ? roundMix1(contributionBaseAmount - thisMoney + (idx === 0 ? uniformSplit.residual : 0))
+                : roundMix1(contributionBaseAmount - thisMoney);
 
             const settlementType = order.settlementType ?? 'REGULAR';
 
@@ -423,9 +476,10 @@ export const computeBillingMODEPLAY = (order: any, modePlayAllocList: any) => {
 
                 ownerRoleType: 'PLAYER',
                 contributionBaseAmount: roundMix1(contributionBaseAmount),
-                commissionRate: roundMix1(commissionRate ?? 0),
+                commissionRate,
                 grossPerformanceAmount: roundMix1(contributionBaseAmount),
                 netIncomeAmount: roundMix1(thisMoney),
+                clubEarnings,
             });
         }
     }
@@ -467,12 +521,12 @@ export const getPlayerRate = (
 
     const n = Number(pick);
     const baseCommissionRate = Number.isFinite(n) ? Math.max(0, Math.min(1, n > 1 ? n / 100 : n)) : 0;
-    const extraCustomerServiceRate = options?.includeCustomerServiceRate
-        ? Number.isFinite(Number(options?.extraCustomerServiceRate))
-            ? Math.max(0, Number(options?.extraCustomerServiceRate))
-            : CUSTOMER_SERVICE_SHARE_RATE
-        : 0;
-    const commissionRate = Math.max(0, Math.min(1, baseCommissionRate + extraCustomerServiceRate));
+    /**
+     * 客服分红是独立成本，不并入打手抽成率。
+     * 这里的 commissionRate 只表示打手侧抽成。
+     * 客服 1% 在结算函数中单独生成 CUSTOMER_SERVICE 记录。
+     */
+    const commissionRate = Math.max(0, Math.min(1, baseCommissionRate));
 
     return {
         commissionRate,

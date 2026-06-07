@@ -858,22 +858,54 @@ export class UsersService {
     });
   }
 
+  async updatePlayerWorkMode(id: number, workMode: 'ONLINE' | 'OFFLINE') {
+    const payload = this.normalizeWorkModePayload({
+      workMode,
+      offlineJoinedAt: workMode === 'OFFLINE' ? new Date() : null,
+    });
+
+    return this.prisma.user.update({
+      where: { id },
+      data: payload,
+      select: {
+        id: true,
+        name: true,
+        phone: true,
+        workMode: true,
+        offlineJoinedAt: true,
+      },
+    });
+  }
+
 //  获取空闲的打手
-  async getPlayerOptions(params: { keyword?: string; onlyIdle?: boolean }) {
-    const { keyword, onlyIdle = true } = params || {};
+  async getPlayerOptions(params: {
+    keyword?: string;
+    onlyIdle?: boolean;
+    limit?: number;
+    page?: number;
+    paginate?: boolean;
+    onlyOnline?: boolean;
+  }) {
+    const { keyword, onlyIdle = true, limit, page, paginate, onlyOnline = false } = params || {};
     const where: any = { userType: UserType.STAFF };
     if (onlyIdle) where.workStatus = PlayerWorkStatus.IDLE;
+    if (onlyOnline) where.workMode = 'ONLINE';
 
     if (keyword) {
       where.OR = [{ name: { contains: keyword } }, { phone: { contains: keyword } }];
     }
 
-    const users = await this.prisma.user.findMany({
+    const take = Number(limit ?? 100);
+    const pageNo = Number.isFinite(Number(page)) && Number(page) > 0 ? Number(page) : 1;
+    const pageSize = Number.isFinite(take) && take > 0 ? take : 100;
+    const allUsers = await this.prisma.user.findMany({
       where,
       select: {
         id: true,
         name: true,
         phone: true,
+        workMode: true,
+        offlineJoinedAt: true,
         workStatus: true,
         rating: true,
         staffRating: {           // ✅ 关联等级表
@@ -882,13 +914,16 @@ export class UsersService {
           },
         },
       },
-      take: 100,
+      orderBy: [
+        { rating: 'desc' },
+        { id: 'asc' },
+      ],
     });
     const now = new Date();
     const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
     const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
 
-    const ids = users.map((u) => u.id);
+    const ids = allUsers.map((u) => u.id);
     let countMap: Record<number, number> = {};
     if (ids.length) {
       const grouped = await this.prisma.orderParticipant.groupBy({
@@ -913,7 +948,7 @@ export class UsersService {
       }, {});
     }
 
-    return users
+    const rows = allUsers
         .map((u) => ({ ...u,
           ratingName: u?.staffRating?.name ?? '-',   // ✅ 等级名称
           todayHandledCount: countMap[Number(u.id)] ?? 0}))
@@ -926,6 +961,22 @@ export class UsersService {
           if (rb !== ra) return rb - ra;
           return Number(a.id) - Number(b.id);
         });
+
+    if (paginate) {
+      const currentPage = pageNo;
+      const currentLimit = pageSize;
+      const total = rows.length;
+      const start = (currentPage - 1) * currentLimit;
+      return {
+        data: rows.slice(start, start + currentLimit),
+        total,
+        page: currentPage,
+        limit: currentLimit,
+        totalPages: Math.max(1, Math.ceil(total / currentLimit)),
+      };
+    }
+
+    return rows;
   }
 
 }

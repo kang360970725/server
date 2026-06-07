@@ -26,6 +26,16 @@ export class CreateOrderDto {
     @Min(0)
     paidAmount: number;
 
+    @IsOptional()
+    @IsNumber()
+    @Min(0)
+    settlementAmount?: number;
+
+    @IsOptional()
+    @IsNumber()
+    @Min(0)
+    settlementBaseAmount?: number;
+
     @IsNumber()
     @Min(1)
     orderQuantity: number;

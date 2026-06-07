@@ -30,6 +30,26 @@ export class FinanceController {
         return this.financeService.dashboardCostStructure(body);
     }
 
+    @Post('dashboard/daily-overview')
+    @Permissions('orders:detail:page', 'finance:dashboard:view')
+    async dashboardDailyOverview(@Body() body: { startDate?: string; endDate?: string }) {
+        return this.financeService.dashboardDailyOverview(body);
+    }
+
+    @Post('dashboard/reconciliation')
+    @Permissions('orders:detail:page', 'finance:dashboard:view')
+    async dashboardReconciliation(@Body() body: { startDate?: string; endDate?: string }) {
+        return this.financeService.dashboardReconciliation(body);
+    }
+
+    @Post('dashboard/shift-overview')
+    @Permissions('orders:detail:page', 'finance:dashboard:view')
+    async dashboardShiftOverview(
+        @Body() body: { date: string; dispatcherId?: number; currentOrderId?: number },
+    ) {
+        return this.financeService.dashboardShiftOverview(body);
+    }
+
     @Post('records/list')
     @Permissions('finance:records:list')
     async recordsList(@Body() body: FinanceRecordListDto) {

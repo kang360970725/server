@@ -32,6 +32,7 @@ import {computeSettlementFreezeTime} from "../utils/orderDispatches/settlement-f
 import { NotificationsService } from '../notifications/notifications.service';
 import { PenaltiesService } from '../penalties/penalties.service';
 import { SystemConfigService } from '../system-config/system-config.service';
+import { WechatPayService } from '../mini/wechat-pay.service';
 
 type OrderCreateScene = 'ADMIN' | 'MINIAPP' | 'OFFICIAL_ACCOUNT';
 type CreateOrderContext = {
@@ -58,6 +59,7 @@ export class OrdersService {
         private notificationsService: NotificationsService,
         private penaltiesService: PenaltiesService,
         private systemConfigService: SystemConfigService,
+        private wechatPayService: WechatPayService,
     ) {
     }
 
@@ -137,6 +139,10 @@ export class OrdersService {
      */
     private toAmount2(value: number) {
         return Number(Number(value || 0).toFixed(2));
+    }
+
+    private toAmountFen(value: number) {
+        return Math.max(0, Math.round(Number(value || 0) * 100));
     }
 
     // 按 0.1 元精度均摊金额（对齐钱包余额精度），保证分摊和等于总额
@@ -261,9 +267,16 @@ export class OrdersService {
         const hasOrderTipPayload = params.orderTipEnabled !== undefined || Array.isArray(params.orderTipUserIds);
         const orderTipEnabled = hasOrderTipPayload ? Boolean(params.orderTipEnabled) : false;
         const requestedTipUserIds = this.normalizeIdArray(params.orderTipUserIds);
-        const orderPaidAmount = Number(order?.isGifted ? order?.receivableAmount : order?.paidAmount) || 0;
+        const orderPaidAmount = this.getSettlementBaseAmountFromOrder(order);
         const tipPoolTotal = roundMix1(orderPaidAmount * 0.03);
         const csPoolTotal = roundMix1(orderPaidAmount * 0.01);
+        const orderCutRaw = Number.isFinite(Number(order?.customClubRate))
+            ? order.customClubRate
+            : null;
+        const projectCutRaw = Number.isFinite(Number(order?.projectSnapshot?.clubRate))
+            ? order.projectSnapshot.clubRate
+            : (Number.isFinite(Number(order?.project?.clubRate)) ? order.project?.clubRate : null);
+        const hasFixedClubRate = orderCutRaw !== null || projectCutRaw !== null;
 
         const playerRows = settlementsToCreate.filter((s: any) => String(s?.settlementType || '') !== 'CUSTOMER_SERVICE');
         const adjustablePlayerRows = playerRows.filter((s: any) => String(s?.settlementType || '') !== 'CARRY_COMPENSATION');
@@ -465,7 +478,7 @@ export class OrdersService {
             });
         }
 
-        // 4) CS 1% 从玩家收益池扣除，按“扣前的玩家收益”权重分摊
+        // 4) CS 1% 独立生成，不再从玩家收益池里扣
         const allWeights = rowStates.map((r) => {
             const adj = rowAdjustments.get(r.key);
             const preCs = roundMix1(
@@ -494,7 +507,9 @@ export class OrdersService {
                 + Number(adjust.tipAmount ?? 0),
             );
             const playerGrossBeforeCs = roundMix1(Math.max(0, preCsFinal));
-            const finalEarnings = roundMix1(Math.max(0, playerGrossBeforeCs - csAmount));
+            const finalEarnings = hasFixedClubRate
+                ? roundMix1(Math.max(0, playerGrossBeforeCs - csAmount))
+                : roundMix1(playerGrossBeforeCs);
             const clubEarnings = roundMix1(
                 Math.max(
                     0,
@@ -619,11 +634,21 @@ export class OrdersService {
         return c === 'WECHAT' || c === 'BALANCE';
     }
 
-    private isManualRefundOrder(order: { isPaid?: boolean | null; latestPayment?: { channel?: string | null } | null }) {
-        if (!order?.isPaid) return false;
+    private shouldAutoRefundWithWechat(order: {
+        orderSource?: string | null;
+        latestPayment?: {
+            channel?: string | null;
+            status?: string | null;
+            transactionId?: string | null;
+            paymentNo?: string | null;
+            amount?: any;
+        } | null;
+    }) {
+        const orderSource = String(order?.orderSource || '').trim().toUpperCase();
+        if (orderSource !== 'MINIAPP_SELF_SERVICE') return false;
         const channel = String(order?.latestPayment?.channel || '').trim().toUpperCase();
-        if (!channel) return true; // 历史已收款但无支付流水，视为人工渠道
-        return !this.isAutoRefundSupportedChannel(channel);
+        const status = String(order?.latestPayment?.status || '').trim().toUpperCase();
+        return channel === 'WECHAT' && status === OrderPayStatus.SUCCESS;
     }
 
     private getDefaultOrderSourceByScene(scene?: OrderCreateScene) {
@@ -808,6 +833,13 @@ export class OrdersService {
 
         // 赠送金额口径（本期统一为“按应收承担成本”）
         const originalAmount = this.toAmount2(Number(dto.receivableAmount ?? 0));
+        const settlementAmountInput = dto.settlementAmount != null
+            ? Number(dto.settlementAmount)
+            : (dto.settlementBaseAmount != null
+                ? Number(dto.settlementBaseAmount)
+                : (dto.paidAmount != null ? Number(dto.paidAmount) : Number(dto.receivableAmount ?? 0)));
+        const settlementAmount = this.toAmount2(settlementAmountInput);
+        const effectiveSettlementAmount = settlementAmount > 0 ? settlementAmount : originalAmount;
         const giftedAmount = isGifted ? originalAmount : 0;
         const isPaid = dto.isGifted ? false : Boolean(dto.isPaid);
 
@@ -887,6 +919,7 @@ export class OrdersService {
                 // ✅ 赠送单不可强制清零金额，清零后结算会产生错误
                 receivableAmount: dto.receivableAmount,
                 paidAmount: dto.paidAmount,
+                settlementBaseAmount: effectiveSettlementAmount,
 
                 // ✅ 赠送单一般不应有付款时间（也可以按业务改成 now）
                 paymentTime: isGifted || isPaid ? null : (dto.paymentTime ? new Date(dto.paymentTime) : null),
@@ -1391,10 +1424,6 @@ export class OrdersService {
         const forbidden = new Set(['COMPLETED', 'REFUNDED']);
         if (forbidden.has(String(order.status))) {
             throw new BadRequestException('当前订单状态不可取消');
-        }
-
-        if (this.isManualRefundOrder(order as any)) {
-            throw new BadRequestException('支付渠道不正确，需要人工手动退款');
         }
 
         const updated = await this.prisma.order.update({
@@ -2164,17 +2193,37 @@ export class OrdersService {
                     },
                 },
                 settlements: {select: {id: true, userId: true, paymentStatus: true, calculatedEarnings: true, finalEarnings: true}},
-                latestPayment: { select: { id: true, channel: true, status: true } },
+                latestPayment: { select: { id: true, channel: true, status: true, amount: true, transactionId: true, paymentNo: true } },
             },
         });
         if (!order) throw new NotFoundException('订单不存在');
 
-        if (this.isManualRefundOrder(order as any)) {
-            throw new BadRequestException('支付渠道不正确，需要人工手动退款');
-        }
-
         // 已退款幂等
         if (order.status === OrderStatus.REFUNDED) return this.getOrderDetail(orderId);
+
+        const shouldAutoRefund = this.shouldAutoRefundWithWechat(order as any);
+        const latestPaymentAmountFen = this.toAmountFen(
+            Number(
+                (order as any)?.latestPayment?.amount ??
+                order.paidAmount ??
+                order.receivableAmount ??
+                order.finalPayableAmount ??
+                0,
+            ),
+        );
+        if (shouldAutoRefund && latestPaymentAmountFen <= 0) {
+            throw new BadRequestException('订单支付金额异常，无法发起微信退款');
+        }
+        const autoRefundTrace = shouldAutoRefund
+            ? await this.wechatPayService.refundTransaction({
+                  outTradeNo: String((order as any)?.latestPayment?.paymentNo || '').trim(),
+                  transactionId: String((order as any)?.latestPayment?.transactionId || '').trim() || undefined,
+                  outRefundNo: `REFUND-${orderId}-${Date.now()}`,
+                  amountFen: latestPaymentAmountFen,
+                  totalFen: latestPaymentAmountFen,
+                  reason: remark ? String(remark).trim().slice(0, 80) : '订单退款',
+              })
+            : null;
 
         const settlementUserIds = Array.from(
             new Set(
@@ -2266,20 +2315,19 @@ export class OrdersService {
                 },
             });
 
-            // 2.1) 退款后释放本单参与打手工作状态，避免“已接单但退款后仍卡 WORKING”
+            // 2.1) 退款后刷新本单相关参与者工作状态，避免“已接单但退款后仍卡 WORKING”
             const refundParticipantUserIds = Array.from(
                 new Set(
-                    (order.dispatches || [])
-                        .flatMap((d: any) => d?.participants || [])
+                    [
+                        ...((order.dispatches || []).flatMap((d: any) => d?.participants || []) as any[]),
+                        ...((order.settlements || []).map((s: any) => ({userId: s?.userId})) as any[]),
+                    ]
                         .map((p: any) => Number(p?.userId || 0))
                         .filter((n: number) => Number.isFinite(n) && n > 0),
                 ),
             );
             if (refundParticipantUserIds.length > 0) {
-                await tx.user.updateMany({
-                    where: { id: { in: refundParticipantUserIds } },
-                    data: { workStatus: PlayerWorkStatus.IDLE as any },
-                });
+                await this.refreshPlayerWorkStatusByActiveAcceptedDispatches(tx, refundParticipantUserIds);
             }
 
             // 3) 若已经结单产生 settlements：清零陪玩收益（finalEarnings=0，manualAdjustment = -calculatedEarnings）
@@ -2297,17 +2345,18 @@ export class OrdersService {
                         },
                     });
                 }
-
-                // 同步汇总
-                await tx.order.update({
-                    where: {id: orderId},
-                    data: {
-                        totalPlayerEarnings: 0,
-                    },
-                });
-                // ✅ 4) 钱包冲正
-                await this.wallet.reverseOrderSettlementEarnings({orderId}, tx);
             }
+
+            // 同步汇总
+            await tx.order.update({
+                where: {id: orderId},
+                data: {
+                    totalPlayerEarnings: 0,
+                },
+            });
+
+            // ✅ 4) 钱包冲正：无论是否已有 settlements，只要订单曾产生收益流水都要回滚
+            await this.wallet.reverseOrderSettlementEarnings({orderId}, tx);
         });
 
         // 5) 退款后处罚（不阻断退款主流程）
@@ -2344,6 +2393,13 @@ export class OrdersService {
 
         await this.logOrderAction(operatorId, orderId, 'REFUND_ORDER', {
             remark: remark ?? null,
+            autoRefundTriggered: shouldAutoRefund,
+            autoRefundResult: autoRefundTrace
+                ? {
+                      refundId: autoRefundTrace.refundId,
+                      status: autoRefundTrace.status,
+                  }
+                : null,
             clearedSettlements: (order.settlements?.length ?? 0) > 0,
             clearedCount: order.settlements?.length ?? 0,
             staffLiable,
@@ -2392,6 +2448,13 @@ export class OrdersService {
             orderQuantity: dto.orderQuantity != null ? Number(dto.orderQuantity) : undefined,
             receivableAmount: dto.receivableAmount != null ? Number(dto.receivableAmount) : undefined,
             paidAmount: dto.paidAmount != null ? Number(dto.paidAmount) : undefined,
+            settlementBaseAmount: dto.settlementAmount != null
+                ? Number(dto.settlementAmount)
+                : (dto.settlementBaseAmount != null
+                    ? Number(dto.settlementBaseAmount)
+                    : (dto.paidAmount != null
+                        ? Number(dto.paidAmount)
+                        : (dto.receivableAmount != null ? Number(dto.receivableAmount) : undefined))),
             baseAmountWan: dto.baseAmountWan != null ? Number(dto.baseAmountWan) : undefined,
             customerGameId: dto.customerGameId ?? undefined,
             orderTime: dto.orderTime ? new Date(dto.orderTime) : undefined,
@@ -3485,6 +3548,7 @@ export class OrdersService {
         dto?: {
             remark?: string;
             paidAmount?: number;
+            settlementBaseMode?: 'PAID_AMOUNT' | 'SETTLEMENT_BASE_AMOUNT' | string;
             confirmPaid?: any;
             modePlayAllocList?: any;
             playerEvaluations?: any[];
@@ -3578,6 +3642,31 @@ export class OrdersService {
                 orderId,
                 scope: 'COMPLETED_AND_ARCHIVED',
             });
+
+            const settlementBaseMode = this.normalizeSettlementBaseMode(dto?.settlementBaseMode);
+            const chosenSettlementBaseAmount = this.getSettlementBaseAmountForConfirmation(
+                latestOrder,
+                settlementBaseMode,
+            );
+
+            if (!Number.isFinite(chosenSettlementBaseAmount) || chosenSettlementBaseAmount <= 0) {
+                throw new BadRequestException('订单结算基数非法');
+            }
+
+            const latestSettlementBaseAmount = Number((latestOrder as any).settlementBaseAmount ?? 0);
+            if (
+                settlementBaseMode === 'PAID_AMOUNT' ||
+                !Number.isFinite(latestSettlementBaseAmount) ||
+                Math.abs(latestSettlementBaseAmount - chosenSettlementBaseAmount) > 1e-9
+            ) {
+                await tx.order.update({
+                    where: {id: orderId},
+                    data: {
+                        settlementBaseAmount: chosenSettlementBaseAmount,
+                    },
+                });
+                (latestOrder as any).settlementBaseAmount = chosenSettlementBaseAmount;
+            }
 
             if (!this.isOrderEffectivelyPaidOrGifted(latestOrder as any)) {
                 throw new BadRequestException('未收款订单不允许最终确认结单');
@@ -5055,9 +5144,15 @@ export class OrdersService {
 
         const isHourly = billingMode === BillingMode.HOURLY;
 
-        // paidAmount 仍要校验（旧口径也依赖它）
+        // 结算金额：默认取 settlementBaseAmount；历史老单兜底到 paidAmount / receivableAmount / originalAmount
+        const settlementBaseAmount = this.getSettlementBaseAmountFromOrder(order);
+        if (!Number.isFinite(settlementBaseAmount) || settlementBaseAmount <= 0) {
+            throw new BadRequestException('订单结算基数非法');
+        }
+
+        // 现金实收：仍保留用于财务对账 / 现金核对
         const paidAmount = Number((order as any).paidAmount ?? 0);
-        if (!Number.isFinite(paidAmount) || paidAmount <= 0) {
+        if (!Number.isFinite(paidAmount) || paidAmount < 0) {
             throw new BadRequestException('订单 paidAmount 非法');
         }
 
@@ -5130,7 +5225,7 @@ export class OrdersService {
                 throw new BadRequestException('订单 baseAmountWan 非法-01');
             }
 
-            rateWanPerYuan = roundMix1(baseAmountWan / paidAmount);
+            rateWanPerYuan = roundMix1(baseAmountWan / settlementBaseAmount);
             grossRmb = roundMix1(dispatchProgressWan / rateWanPerYuan);
 
             // ✅ carry/pool 聚合
@@ -5158,7 +5253,7 @@ export class OrdersService {
             carryPaid = roundMix1(carryPaid);
 
             carryRemaining = Math.max(0, roundMix1(carryDebt - carryPaid));
-            remainingPaidPool = Math.max(0, roundMix1(paidAmount - consumedPaidPool));
+            remainingPaidPool = Math.max(0, roundMix1(settlementBaseAmount - consumedPaidPool));
 
             // ✅ gross 拆分：repay + normalGross
             if (grossRmb < 0) {
@@ -5419,7 +5514,7 @@ export class OrdersService {
 
         // ===========================
         if (!isCsExcluded && mode === 'COMPLETE' && CUSTOMER_SERVICE_SHARE_RATE > 0 && order.dispatcherId) {
-            const csAmount = roundMix1((order.paidAmount ?? 0) * CUSTOMER_SERVICE_SHARE_RATE);
+            const csAmount = roundMix1(settlementBaseAmount * CUSTOMER_SERVICE_SHARE_RATE);
             if (csAmount > 0) {
                 const csFound = await tx.orderSettlement.findUnique({
                     where: {
@@ -5831,14 +5926,14 @@ export class OrdersService {
      * - 这里先提供最小实现，让编译通过，并保持“可替换点集中”
      */
     private calcPlayerEarning(params: {
-        order: { paidAmount: number };
+        order: { paidAmount: number; settlementBaseAmount?: number; receivableAmount?: number; originalAmount?: number };
         participantsCount: number;
         ratio?: number;
         _dbg?: { orderId?: number; dispatchId?: number; userId?: number };
     }) {
         const {order, participantsCount, ratio, _dbg} = params;
 
-        const paid = Number(order?.paidAmount || 0);
+        const paid = this.getSettlementBaseAmountFromOrder(order);
         const count = Math.max(1, Number(participantsCount || 1));
 
         // ✅ ratioMap 里 ratio 的语义是“份额 share（总和=1）”
@@ -6045,6 +6140,55 @@ export class OrdersService {
         return Number(order?.customerUserId ?? 0) || null;
     }
 
+    private getSettlementBaseAmountFromOrder(order: any): number {
+        const explicit = Number(order?.settlementBaseAmount ?? 0);
+        if (Number.isFinite(explicit) && explicit > 0) return this.toDecimal2(explicit);
+
+        const paid = Number(order?.paidAmount ?? 0);
+        if (Number.isFinite(paid) && paid > 0) return this.toDecimal2(paid);
+
+        const receivable = Number(order?.receivableAmount ?? 0);
+        if (Number.isFinite(receivable) && receivable > 0) return this.toDecimal2(receivable);
+
+        const original = Number(order?.originalAmount ?? 0);
+        if (Number.isFinite(original) && original > 0) return this.toDecimal2(original);
+
+        return 0;
+    }
+
+    private normalizeSettlementBaseMode(
+        mode?: string | null,
+    ): 'PAID_AMOUNT' | 'SETTLEMENT_BASE_AMOUNT' {
+        const normalized = String(mode ?? '').trim().toUpperCase();
+        if (normalized === 'PAID_AMOUNT' || normalized === 'PAID') {
+            return 'PAID_AMOUNT';
+        }
+        if (
+            normalized === 'SETTLEMENT_BASE_AMOUNT' ||
+            normalized === 'SETTLEMENT_BASE' ||
+            normalized === 'ORDER_BASE'
+        ) {
+            return 'SETTLEMENT_BASE_AMOUNT';
+        }
+        return 'SETTLEMENT_BASE_AMOUNT';
+    }
+
+    private getSettlementBaseAmountForConfirmation(
+        order: any,
+        mode: 'PAID_AMOUNT' | 'SETTLEMENT_BASE_AMOUNT',
+    ): number {
+        if (mode === 'PAID_AMOUNT') {
+            const paidAmount = Number(
+                (order as any)?.isGifted === true
+                    ? (order as any)?.receivableAmount ?? 0
+                    : (order as any)?.paidAmount ?? 0,
+            );
+            return this.toDecimal2(Math.max(0, paidAmount));
+        }
+
+        return this.getSettlementBaseAmountFromOrder(order);
+    }
+
     private getBizLineFromOrder(order: any): string | null {
         const snapshot: any = order?.projectSnapshot || {};
         return snapshot?.bizLine ?? snapshot?.businessType ?? null;
@@ -6101,11 +6245,7 @@ export class OrdersService {
             const isCs = settlementType === 'CUSTOMER_SERVICE';
 
             const orderGrossAmount = this.toDecimal2(
-                Number(
-                    order?.paidAmount ??
-                    order?.receivableAmount ??
-                    0
-                ),
+                this.getSettlementBaseAmountFromOrder(order),
             );
 
             const gross = this.toDecimal2(
@@ -6289,6 +6429,7 @@ export class OrdersService {
         const paidAmount = this.toDecimal2(
             Number(order?.isGifted ? order?.receivableAmount ?? 0 : order?.paidAmount ?? 0),
         );
+        const settlementBaseAmount = this.toDecimal2(this.getSettlementBaseAmountFromOrder(order));
 
         /**
          * 当前折扣口径：
@@ -6344,6 +6485,7 @@ export class OrdersService {
 
             receivableAmount,
             paidAmount,
+            settlementBaseAmount,
             discountAmount,
             couponDiscountAmount: 0,
             otherDiscountAmount: 0,
@@ -6404,6 +6546,7 @@ export class OrdersService {
                 id: true,
                 receivableAmount: true,
                 paidAmount: true,
+                settlementBaseAmount: true,
                 createdAt: true,
                 updatedAt: true,
                 paymentTime: true,

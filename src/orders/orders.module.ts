@@ -6,6 +6,7 @@ import { WalletModule } from '../wallet/wallet.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PenaltiesModule } from '../penalties/penalties.module';
 import { SystemConfigModule } from '../system-config/system-config.module';
+import { WechatPayService } from '../mini/wechat-pay.service';
 
 /**
  * OrdersModule
@@ -15,7 +16,7 @@ import { SystemConfigModule } from '../system-config/system-config.module';
 @Module({
     imports: [WalletModule, NotificationsModule, PenaltiesModule, SystemConfigModule],
     controllers: [OrdersController],
-    providers: [OrdersService, PrismaService],
+    providers: [OrdersService, PrismaService, WechatPayService],
     exports: [OrdersService],
 })
 export class OrdersModule {}

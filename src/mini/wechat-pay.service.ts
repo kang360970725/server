@@ -199,4 +199,56 @@ export class WechatPayService {
     const path = `/v3/pay/transactions/out-trade-no/${encodeURIComponent(String(outTradeNo).trim())}?mchid=${encodeURIComponent(config.mchId)}`;
     return this.requestWechat('GET', path, config);
   }
+
+  async refundTransaction(input: {
+    outTradeNo?: string;
+    transactionId?: string | null;
+    outRefundNo: string;
+    amountFen: number;
+    totalFen: number;
+    reason?: string;
+  }) {
+    const config = await this.getRuntimeConfig();
+    const missing: string[] = [];
+    if (!config.mchId) missing.push('WECHAT_PAY_MCHID');
+    if (!config.serialNo) missing.push('WECHAT_PAY_SERIAL_NO');
+    if (!config.privateKey) missing.push('WECHAT_PAY_PRIVATE_KEY');
+    if (!config.apiV3Key) missing.push('WECHAT_PAY_API_V3_KEY');
+    if (missing.length) {
+      throw new BadRequestException(`微信支付配置不完整：${missing.join(', ')}`);
+    }
+
+    const outRefundNo = String(input.outRefundNo || '').trim();
+    if (!outRefundNo) throw new BadRequestException('缺少 out_refund_no');
+
+    const amountFen = Math.max(1, Math.floor(Number(input.amountFen || 0)));
+    const totalFen = Math.max(amountFen, Math.floor(Number(input.totalFen || 0)));
+    const transactionId = String(input.transactionId || '').trim();
+    const outTradeNo = String(input.outTradeNo || '').trim();
+    if (!transactionId && !outTradeNo) {
+      throw new BadRequestException('缺少 transaction_id / out_trade_no');
+    }
+
+    const body: any = {
+      out_refund_no: outRefundNo,
+      reason: String(input.reason || '订单退款').trim().slice(0, 80),
+      amount: {
+        refund: amountFen,
+        total: totalFen,
+        currency: 'CNY',
+      },
+    };
+    if (transactionId) {
+      body.transaction_id = transactionId;
+    } else {
+      body.out_trade_no = outTradeNo;
+    }
+
+    const data = await this.requestWechat('POST', '/v3/refund/domestic/refunds', config, body);
+    return {
+      refundId: String(data?.refund_id || '').trim(),
+      status: String(data?.status || '').trim(),
+      raw: data,
+    };
+  }
 }

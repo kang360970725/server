@@ -37,6 +37,7 @@
     "wallet:repair-snapshots:batch:dry": "ts-node --transpile-only scripts/repair-wallet-snapshots.ts --batchSize=1000 --maxBatches=500",
     "wallet:repair-snapshots:batch:apply": "ts-node --transpile-only scripts/repair-wallet-snapshots.ts --apply --batchSize=1000 --maxBatches=500",
     "wallet:audit-overpay": "ts-node --transpile-only scripts/audit-wallet-overpay.ts",
+    "wallet:audit-anomalies": "ts-node --transpile-only scripts/audit-wallet-anomalies.ts",
     "penalty:ensure-tables": "ts-node --transpile-only scripts/ensure-penalty-tables.ts"
   },
   "prisma": {

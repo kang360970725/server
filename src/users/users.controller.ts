@@ -135,6 +135,16 @@ export class UsersController {
     return this.usersService.getPlayerOptions(body);
   }
 
+  @Patch('players/:id/work-mode')
+  @UseGuards(PermissionsGuard)
+  @Permissions('orders:detail:page', 'users:staff:page')
+  updatePlayerWorkMode(
+      @Param('id', ParseIntPipe) id: number,
+      @Body() body: { workMode?: 'ONLINE' | 'OFFLINE' },
+  ) {
+    return this.usersService.updatePlayerWorkMode(id, (body?.workMode ?? 'ONLINE') as 'ONLINE' | 'OFFLINE');
+  }
+
   // users.controller.ts 里新增一个接口（保持 @UseGuards(JwtAuthGuard) 生效即可）
   @Post('me/password')
   updateMyPassword(@Body() body: { newPassword: string }, @Request() req) {

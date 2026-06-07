@@ -340,7 +340,13 @@ export class WalletWithdrawalsService {
             }
 
             // =========================
-            // Step 6：提现冻结流水
+            // Step 6：创建提现申请号
+            // =========================
+            const requestNo = this.genRequestNo();
+            const reserveSourceType = `WITHDRAWAL_REQUEST_DRAFT:${requestNo}`;
+
+            // =========================
+            // Step 7：提现冻结流水
             // =========================
             const reserveTx = await tx.walletTransaction.create({
                 data: {
@@ -349,7 +355,7 @@ export class WalletWithdrawalsService {
                     bizType: 'WITHDRAW_RESERVE',
                     amount: withdrawAmount,
                     status: 'FROZEN',
-                    sourceType: 'WITHDRAWAL_REQUEST',
+                    sourceType: reserveSourceType,
                     sourceId: 0,
                     availableAfter: round2(Number(accountAfterUpdate.availableBalance || 0)),
                     frozenAfter: round2(Number(accountAfterUpdate.frozenBalance || 0)),
@@ -357,9 +363,8 @@ export class WalletWithdrawalsService {
             });
 
             // =========================
-            // Step 7：创建提现申请
+            // Step 8：创建提现申请
             // =========================
-            const requestNo = this.genRequestNo();
 
             const request = await tx.walletWithdrawalRequest.create({
                 data: {
