@@ -10,7 +10,13 @@ import { WalletService } from '../wallet/wallet.service';
 
 @Injectable()
 export class UsersService {
+  static readonly PLAYER_ONLINE_LEASE_MS = 2 * 60 * 60 * 1000;
+
   constructor(private prisma: PrismaService, private wallet: WalletService) {}
+
+  private buildPlayerOnlineLeaseExpiresAt(base: Date = new Date()) {
+    return new Date(base.getTime() + UsersService.PLAYER_ONLINE_LEASE_MS);
+  }
 
   private getActorAllowedUserTypes(actor?: { userType?: UserType; permissions?: string[] }): UserType[] | null {
     const permissions = Array.isArray(actor?.permissions) ? actor!.permissions! : [];
@@ -61,6 +67,7 @@ export class UsersService {
     return {
       workMode,
       offlineJoinedAt: workMode === 'OFFLINE' ? offlineJoinedAt : null,
+      workOnlineExpiresAt: workMode === 'ONLINE' ? this.buildPlayerOnlineLeaseExpiresAt() : null,
     };
   }
 
@@ -858,6 +865,19 @@ export class UsersService {
     });
   }
 
+  async touchPlayerOnlineLease(id: number) {
+    return this.prisma.user.updateMany({
+      where: {
+        id,
+        userType: UserType.STAFF,
+        workMode: 'ONLINE',
+      },
+      data: {
+        workOnlineExpiresAt: this.buildPlayerOnlineLeaseExpiresAt(),
+      },
+    });
+  }
+
   async updatePlayerWorkMode(id: number, workMode: 'ONLINE' | 'OFFLINE') {
     const payload = this.normalizeWorkModePayload({
       workMode,
@@ -873,6 +893,7 @@ export class UsersService {
         phone: true,
         workMode: true,
         offlineJoinedAt: true,
+        workOnlineExpiresAt: true,
       },
     });
   }
@@ -887,9 +908,30 @@ export class UsersService {
     onlyOnline?: boolean;
   }) {
     const { keyword, onlyIdle = true, limit, page, paginate, onlyOnline = false } = params || {};
+    const leaseNow = new Date();
+    await this.prisma.user.updateMany({
+      where: {
+        userType: UserType.STAFF,
+        workMode: 'ONLINE',
+        OR: [
+          { workOnlineExpiresAt: null },
+          { workOnlineExpiresAt: { lte: leaseNow } },
+        ],
+      },
+      data: {
+        workMode: 'OFFLINE',
+        workStatus: PlayerWorkStatus.IDLE,
+        offlineJoinedAt: leaseNow,
+        workOnlineExpiresAt: null,
+      },
+    });
+
     const where: any = { userType: UserType.STAFF };
     if (onlyIdle) where.workStatus = PlayerWorkStatus.IDLE;
-    if (onlyOnline) where.workMode = 'ONLINE';
+    if (onlyOnline) {
+      where.workMode = 'ONLINE';
+      where.workOnlineExpiresAt = { gt: leaseNow };
+    }
 
     if (keyword) {
       where.OR = [{ name: { contains: keyword } }, { phone: { contains: keyword } }];
@@ -906,6 +948,7 @@ export class UsersService {
         phone: true,
         workMode: true,
         offlineJoinedAt: true,
+        workOnlineExpiresAt: true,
         workStatus: true,
         rating: true,
         staffRating: {           // ✅ 关联等级表
@@ -919,9 +962,9 @@ export class UsersService {
         { id: 'asc' },
       ],
     });
-    const now = new Date();
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+    const dayNow = new Date();
+    const start = new Date(dayNow.getFullYear(), dayNow.getMonth(), dayNow.getDate(), 0, 0, 0, 0);
+    const end = new Date(dayNow.getFullYear(), dayNow.getMonth(), dayNow.getDate(), 23, 59, 59, 999);
 
     const ids = allUsers.map((u) => u.id);
     let countMap: Record<number, number> = {};

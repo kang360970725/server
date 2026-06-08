@@ -279,7 +279,9 @@ export class OrdersService {
         const hasFixedClubRate = orderCutRaw !== null || projectCutRaw !== null;
 
         const playerRows = settlementsToCreate.filter((s: any) => String(s?.settlementType || '') !== 'CUSTOMER_SERVICE');
-        const adjustablePlayerRows = playerRows.filter((s: any) => String(s?.settlementType || '') !== 'CARRY_COMPENSATION');
+        const regularPlayerRows = playerRows.filter((s: any) => String(s?.settlementType || '') !== 'CARRY_COMPENSATION');
+        const carryCompRows = playerRows.filter((s: any) => String(s?.settlementType || '') === 'CARRY_COMPENSATION');
+        const adjustablePlayerRows = regularPlayerRows;
         const csRows = settlementsToCreate.filter((s: any) => String(s?.settlementType || '') === 'CUSTOMER_SERVICE');
 
         if (!adjustablePlayerRows.length) {
@@ -348,7 +350,11 @@ export class OrdersService {
             const baseAmount = roundMix1(Number(row.contributionBaseAmount ?? 0));
             const currentFinal = roundMix1(Number(row.finalEarnings ?? 0));
             const base65 = roundMix1(baseAmount * 0.65);
-            const baseFinalBeforeExtras = evalItem.ratingLabel === 'GOOD' ? currentFinal : base65;
+            // 炸单轮：保持订单基础比例算出来的原始负数，不允许被评级/段位改写。
+            const isBombLoss = currentFinal < 0;
+            const baseFinalBeforeExtras = isBombLoss
+                ? currentFinal
+                : (evalItem.ratingLabel === 'GOOD' ? currentFinal : base65);
             return {
                 key,
                 row,
@@ -357,6 +363,7 @@ export class OrdersService {
                 currentFinal,
                 base65,
                 baseFinalBeforeExtras,
+                isBombLoss,
                 userId: Number(row.userId),
                 dispatchId: Number(row.dispatchId),
             };
@@ -498,6 +505,35 @@ export class OrdersService {
             const row = playerRowsByKey.get(st.key);
             if (!row) return;
 
+            // 炸单轮直接沿用原始负数结算，不参与评级/段位/打赏/责任扣款改写。
+            if (st.isBombLoss) {
+                row.calculatedEarnings = roundMix1(st.currentFinal);
+                row.manualAdjustment = 0;
+                row.finalEarnings = roundMix1(st.currentFinal);
+                row.clubEarnings = 0;
+                row.csEarnings = 0;
+                row.inviteEarnings = 0;
+
+                evaluationRows.push({
+                    key: st.key,
+                    dispatchId: st.dispatchId,
+                    playerUserId: st.userId,
+                    score: st.evalItem.score,
+                    ratingLabel: st.evalItem.ratingLabel,
+                    afterSaleHandled: Boolean(st.evalItem.afterSaleHandled),
+                    afterSaleAction: st.evalItem.afterSaleAction,
+                    responsibleUserIds: st.evalItem.responsibleUserIds || [],
+                    tippedUserIds: [],
+                    tipPoolAmount: null,
+                    tipAmount: 0,
+                    penaltyAmount: 0,
+                    maintenanceFeeAmount: 0,
+                    reviewRemark: st.evalItem.reviewRemark || null,
+                    playerName: row.userName,
+                });
+                return;
+            }
+
             const adjust = rowAdjustments.get(st.key) || { tipAmount: 0, penaltyAmount: 0, maintenanceFeeAmount: 0 };
             const csAmount = roundMix1(Number(csShares[idx] ?? 0));
             const preCsFinal = roundMix1(
@@ -506,9 +542,11 @@ export class OrdersService {
                     - Number(adjust.maintenanceFeeAmount ?? 0))
                 + Number(adjust.tipAmount ?? 0),
             );
-            const playerGrossBeforeCs = roundMix1(Math.max(0, preCsFinal));
+            // 炸单轮必须保留负数结算值，不能在这里钳成 0。
+            // 负数意味着该轮需要作为补单/炸单损耗进入后续结算与钱包冲正链路。
+            const playerGrossBeforeCs = roundMix1(preCsFinal);
             const finalEarnings = hasFixedClubRate
-                ? roundMix1(Math.max(0, playerGrossBeforeCs - csAmount))
+                ? roundMix1(playerGrossBeforeCs - csAmount)
                 : roundMix1(playerGrossBeforeCs);
             const clubEarnings = roundMix1(
                 Math.max(
@@ -551,30 +589,85 @@ export class OrdersService {
 
         // 5) CS settlement 行保持其自身收益，不参与评级扣款
         const playerBaseTotal = roundMix1(
-            playerRows.reduce((sum, st: any) => sum + Number(st.contributionBaseAmount ?? 0), 0),
+            regularPlayerRows.reduce((sum, st: any) => sum + Number(st.contributionBaseAmount ?? 0), 0),
         );
+        // 结算总额只看实际要入钱包/发放的 finalEarnings，clubEarnings 只是内部拆账，不参与总额校验。
         const playerTotalBeforeCs = roundMix1(
-            playerRows.reduce((sum, st: any) => sum + Number(st.finalEarnings ?? 0) + Number(st.clubEarnings ?? 0), 0),
+            regularPlayerRows.reduce((sum, st: any) => sum + Number(st.finalEarnings ?? 0), 0)
+            + carryCompRows.reduce((sum, st: any) => sum + Number(st.finalEarnings ?? 0), 0),
+        );
+        // 炸单补单额度：
+        // - 直接按“评级调整前的原始结算值”中出现的负数轮次绝对值求和
+        // - 不能用 regularPlayerRows.finalEarnings，因为上面的评级/客服分红逻辑可能已经把负数清零
+        // - 这里必须使用 rowStates.currentFinal，它保留了原始结算值
+        const bombLossAllowance = roundMix1(
+            rowStates.reduce((sum, st: any) => {
+                const v = Number(st.currentFinal ?? 0);
+                return v < 0 ? sum + (-v) : sum;
+            }, 0),
         );
         const csRowTotal = roundMix1(
             csRows.reduce((sum, r: any) => sum + Number(r.finalEarnings ?? r.calculatedEarnings ?? 0), 0),
         );
 
+        // 实际已支出总额：
+        // - 普通打手的实际发放金额
+        // - 加上客服 1% 分红
+        // 注意：这里不把 clubEarnings 算进去，clubEarnings 只是内部拆账，不是实际支出。
         const settledTotal = round2(playerTotalBeforeCs + csRowTotal);
-        const paidTotal = round2(orderPaidAmount);
-        const totalShortfall = round2(paidTotal - settledTotal);
-        const allowedShortfall = round2(paidTotal * 0.05);
-        const baseTotal = round2(playerBaseTotal);
-        const baseShortfall = round2(paidTotal - baseTotal);
-        const baseMismatch = baseTotal - paidTotal > 0.1 || baseShortfall - allowedShortfall > 0.1;
-        const totalMismatch = settledTotal - paidTotal > 0.1 || totalShortfall - allowedShortfall > 0.1;
-        const totalWithinTolerance = totalShortfall >= 0 && totalShortfall <= allowedShortfall + 0.1;
 
-        if (baseMismatch && !skipValidation) {
-            throw new BadRequestException(`订单结算基数与实付金额不一致，无法结单：orderId=${order.id}`);
-        }
+        // 订单原始实付金额：
+        // - 主要用于财务对账、现金核对
+        // - 不是当前结单总额校验的直接基准
+        const paidTotal = round2(orderPaidAmount);
+
+        // 订单结算基数：
+        // - 结单时的基础结算金额
+        // - 老数据为空/0 时会回退到实付金额
+        // - 这是本单允许支出的基础上限
+        const settlementBasisTotal = round2(this.getSettlementBaseAmountFromOrder(order));
+
+        // 允许支出上限：
+        // = 订单结算金额
+        // + 炸单补单额度（负数轮次的绝对值）
+        // + 客服分红
+        // 只要实际支出不超过这个值，就允许结单。
+        const totalSettlementAllowance = round2(settlementBasisTotal + bombLossAllowance + csRowTotal);
+
+        // 允许额度下的剩余空间：
+        // = 允许支出上限 - 实际已支出总额
+        // 为正表示还没用满额度
+        // 为 0 表示刚好用满
+        // 为负表示已经超支
+        const totalShortfall = round2(totalSettlementAllowance - settledTotal);
+
+        // 打手基础总额：
+        // - 只统计普通打手行的 contributionBaseAmount
+        // - 这是“基础分摊金额”的汇总
+        const baseTotal = round2(playerBaseTotal);
+
+        // 基础短缺：
+        // = 结算基数 - 当前已分到的基础金额
+        // 这个值主要用于调试/对账，不直接作为结单失败条件
+        const baseShortfall = round2(settlementBasisTotal - baseTotal);
+
+        // 基础金额是否超出结算基数：
+        // - true 表示基础分摊已经超过订单结算基数
+        // - 这里只做诊断输出，不再作为硬拦截
+        const baseMismatch = baseTotal - settlementBasisTotal > 0.1;
+
+        // 总支出是否超出允许上限：
+        // - true 表示实际支出已经超过：结算基数 + 炸单补单 + 客服分红
+        // - 这是当前真正的硬拦截条件
+        const totalMismatch = settledTotal - totalSettlementAllowance > 0.1;
+
+        // 是否在允许范围内：
+        // - 只是一个结果标记，方便预览/调试
+        // - 不直接参与 throw
+        const totalWithinTolerance = settledTotal <= totalSettlementAllowance + 0.1;
+
         if (totalMismatch && !skipValidation) {
-            throw new BadRequestException(`订单结算总额异常，无法结单：orderId=${order.id}，允许误差为实付金额的5%以内且不得超付`);
+            throw new BadRequestException(`订单支出总额超出结算金额，无法结单：orderId=${order.id}`);
         }
 
         for (const csRow of csRows) {
@@ -594,14 +687,16 @@ export class OrdersService {
             validation: {
                 orderPaidAmount,
                 playerBaseTotal,
+                bombLossAllowance,
                 baseTotal,
                 baseShortfall,
                 playerTotalBeforeCs,
                 csRowTotal,
                 settledTotal,
+                totalSettlementAllowance,
                 paidTotal,
+                settlementBasisTotal,
                 totalShortfall,
-                allowedShortfall,
                 baseMismatch,
                 totalMismatch,
                 totalWithinTolerance,
@@ -770,8 +865,13 @@ export class OrdersService {
                 orderId: number;
                 updatedAt: Date | null;
                 paidAmount: number;
+                settlementBaseAmount: number;
                 status: any;
                 dispatchCount: number;
+                modePlayAllocList?: any[];
+                playerEvaluations?: any[];
+                orderTipEnabled?: boolean;
+                orderTipUserIds?: number[];
             };
         }
     >();;
@@ -2804,6 +2904,7 @@ export class OrdersService {
 
                 receivableAmount: true,
                 paidAmount: true,
+                settlementBaseAmount: true,
                 isPaid: true,
                 isGifted: true,
                 giftedAmount: true,
@@ -3777,7 +3878,11 @@ export class OrdersService {
                 };
             } catch (err: any) {
                 const errMsg = String(err?.message || err || '');
-                if (err instanceof BadRequestException && errMsg.includes('订单结算基数与实付金额不一致')) {
+                if (
+                    err instanceof BadRequestException &&
+                    (errMsg.includes('订单结算基数与实付金额不一致') ||
+                        errMsg.includes('订单结算基数与结算金额不一致'))
+                ) {
                     const preview = await this.buildSettlementPlanFromOrder({
                         order: latestOrder,
                         modePlayAllocList: dto?.modePlayAllocList,
@@ -4074,6 +4179,7 @@ export class OrdersService {
         reason?: string;
         dryRun?: boolean;
         applyRepair?: boolean;
+        settlementBaseAmount?: number;
         type?: '' | 'RECALCULATE';
         scope?: 'COMPLETED_AND_ARCHIVED' | 'COMPLETED_ONLY' | 'ARCHIVED_ONLY';
         modePlayAllocList?: any;
@@ -4088,11 +4194,17 @@ export class OrdersService {
             dryRun = false,
             applyRepair = false,
             scope = 'COMPLETED_AND_ARCHIVED',
+            settlementBaseAmount,
             modePlayAllocList,
             playerEvaluations,
             orderTipEnabled,
             orderTipUserIds,
         } = params;
+        const parsedSettlementBaseAmount = Number(settlementBaseAmount ?? 0);
+        const hasExplicitSettlementBaseAmount = Number.isFinite(parsedSettlementBaseAmount) && parsedSettlementBaseAmount > 0;
+        const explicitSettlementBaseAmount = hasExplicitSettlementBaseAmount
+            ? this.toDecimal2(parsedSettlementBaseAmount)
+            : null;
 
         const normalizePlayerEvaluations = (rows: any[] = []) => {
             return (Array.isArray(rows) ? rows : [])
@@ -4140,11 +4252,19 @@ export class OrdersService {
                 scope,
             });
 
+            const resolvedRepairSettlementBaseAmount = explicitSettlementBaseAmount
+                ?? this.toDecimal2(this.getSettlementBaseAmountFromOrder(order));
+
+            const repairOrder = {
+                ...order,
+                settlementBaseAmount: resolvedRepairSettlementBaseAmount,
+            };
+
             /**
              * Step 2：dryRun / applyRepair 共用 settlement 计划
              */
             const { billingMode, settlementsToCreate } = await this.buildSettlementPlanFromOrder({
-                order,
+                order: repairOrder,
                 modePlayAllocList,
                 playerEvaluations,
                 orderTipEnabled,
@@ -4163,6 +4283,7 @@ export class OrdersService {
                         orderId: Number(order.id),
                         updatedAt: order.updatedAt,
                         paidAmount: Number(order.paidAmount ?? 0),
+                        settlementBaseAmount: Number(resolvedRepairSettlementBaseAmount ?? 0),
                         status: order.status,
                         dispatchCount: Number(order.dispatches?.length ?? 0),
                         modePlayAllocList: normalizeModePlayAlloc(modePlayAllocList),
@@ -4213,6 +4334,7 @@ export class OrdersService {
                     orderId: number;
                     updatedAt: Date | null;
                     paidAmount: number;
+                    settlementBaseAmount: number;
                     status: any;
                     dispatchCount: number;
                     modePlayAllocList?: any[];
@@ -4233,6 +4355,7 @@ export class OrdersService {
                 if (
                     Number(snap?.orderId ?? 0) !== Number(order.id) ||
                     Number(snap?.paidAmount ?? 0) !== Number(order.paidAmount ?? 0) ||
+                    Number(snap?.settlementBaseAmount ?? 0) !== Number(resolvedRepairSettlementBaseAmount ?? 0) ||
                     String(snap?.status ?? '') !== String(order.status ?? '') ||
                     Number(snap?.dispatchCount ?? 0) !== Number(order.dispatches?.length ?? 0) ||
                     currentUpdatedAt !== cachedUpdatedAt ||
@@ -4245,6 +4368,13 @@ export class OrdersService {
                 }
 
                 planToApply = cached.settlementsToCreate;
+            }
+
+            if (explicitSettlementBaseAmount) {
+                await tx.order.update({
+                    where: { id: orderId },
+                    data: { settlementBaseAmount: explicitSettlementBaseAmount },
+                });
             }
 
             /**

@@ -46,14 +46,14 @@ const getSettlementBaseAmount = (order: any) => {
     const explicit = Number(order?.settlementBaseAmount ?? 0);
     if (Number.isFinite(explicit) && explicit > 0) return roundMix1(explicit);
 
+    const paid = Number(order?.paidAmount ?? 0);
+    if (Number.isFinite(paid) && paid > 0) return roundMix1(paid);
+
     const receivable = Number(order?.receivableAmount ?? 0);
     if (Number.isFinite(receivable) && receivable > 0) return roundMix1(receivable);
 
     const original = Number(order?.originalAmount ?? 0);
     if (Number.isFinite(original) && original > 0) return roundMix1(original);
-
-    const paid = Number(order?.paidAmount ?? 0);
-    if (Number.isFinite(paid) && paid > 0) return roundMix1(paid);
 
     return 0;
 };
@@ -310,22 +310,25 @@ export const computeBillingGuaranteed = (order: any) => {
 
             if (d.status === DispatchStatus.ARCHIVED) {
                 // 存单：按本轮 progressBaseWan 占订单保底比例换算
+                // - 正数：按抽成率结算，并从后续可分配池扣减
+                // - 负数：炸单/补单，保留原始负数，不受抽成率影响；同时回灌到后续可分配池
                 const progressBaseWan = Number(p.progressBaseWan ?? 0);
                 const thisMoney = orderRatio > 0 ? progressBaseWan / orderRatio : 0;
-                lastPaidAmount = round2(lastPaidAmount - thisMoney);
 
+                contributionBaseAmount = thisMoney;
                 if (progressBaseWan > 0) {
                     const playerRate = Number(item.playerRate ?? 0);
                     commissionRate = roundMix1(item.commissionRate ?? 0);
-
-                    contributionBaseAmount = thisMoney;
                     finalMoney = thisMoney * playerRate;
                 } else {
-                    // ✅ 炸单/负收益，直接保留原值（通常为负）
-                    contributionBaseAmount = thisMoney;
                     finalMoney = thisMoney;
                     commissionRate = 0;
                 }
+
+                // 这里统一做“扣减/回灌”：
+                // - 正数轮次：扣减后续可分配池
+                // - 负数轮次：回灌后续可分配池
+                lastPaidAmount = round2(lastPaidAmount - thisMoney);
             }
 
             if (d.status === DispatchStatus.COMPLETED) {
@@ -456,10 +459,15 @@ export const computeBillingMODEPLAY = (order: any, modePlayAllocList: any) => {
                 : (distributeRoundedMoney(roundIncomeNum, active.length)[idx] ?? 0);
             const playerRate = Number(item.playerRate ?? 0);
             const commissionRate = roundMix1(item.commissionRate ?? 0);
-            const thisMoney = roundMix1(contributionBaseAmount * playerRate);
-            const clubEarnings = uniformRate
-                ? roundMix1(contributionBaseAmount - thisMoney + (idx === 0 ? uniformSplit.residual : 0))
-                : roundMix1(contributionBaseAmount - thisMoney);
+            const isBombLoss = roundMix1(roundIncomeNum) < 0 || roundMix1(contributionBaseAmount) < 0;
+            const thisMoney = isBombLoss
+                ? roundMix1(contributionBaseAmount)
+                : roundMix1(contributionBaseAmount * playerRate);
+            const clubEarnings = isBombLoss
+                ? 0
+                : (uniformRate
+                    ? roundMix1(contributionBaseAmount - thisMoney + (idx === 0 ? uniformSplit.residual : 0))
+                    : roundMix1(contributionBaseAmount - thisMoney));
 
             const settlementType = order.settlementType ?? 'REGULAR';
 

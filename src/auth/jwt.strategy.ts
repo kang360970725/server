@@ -32,6 +32,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         roleId: true,
         userType: true,
         name: true,
+        workStatus: true,
+        offlineJoinedAt: true,
+        workMode: true,
+        workOnlineExpiresAt: true,
         Role: {
           select: {
             name: true,
@@ -45,6 +49,46 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
     const permissions = user.Role?.permissions?.map((p) => p.key) || [];
     const roleName = String(user.Role?.name || '').trim();
+    const leaseNow = new Date();
+    const leaseExpiresAt = user.workOnlineExpiresAt ? new Date(user.workOnlineExpiresAt) : null;
+    const isStaff = String(user.userType || '').toUpperCase() === 'STAFF';
+    const isOnline = String(user.workMode || '').toUpperCase() === 'ONLINE';
+
+    if (isStaff && isOnline) {
+      if (leaseExpiresAt && leaseExpiresAt > leaseNow) {
+        const nextExpiresAt = new Date(leaseNow.getTime() + 2 * 60 * 60 * 1000);
+        await this.prisma.user.updateMany({
+          where: {
+            id: user.id,
+            userType: 'STAFF',
+            workMode: 'ONLINE',
+            workOnlineExpiresAt: { gt: leaseNow },
+          },
+          data: {
+            workOnlineExpiresAt: nextExpiresAt,
+          },
+        });
+        user.workOnlineExpiresAt = nextExpiresAt;
+      } else {
+        await this.prisma.user.updateMany({
+          where: {
+            id: user.id,
+            userType: 'STAFF',
+            workMode: 'ONLINE',
+          },
+          data: {
+            workMode: 'OFFLINE',
+            workStatus: 'IDLE',
+            offlineJoinedAt: leaseNow,
+            workOnlineExpiresAt: null,
+          },
+        });
+        user.workMode = 'OFFLINE';
+        user.workStatus = 'IDLE';
+        user.offlineJoinedAt = leaseNow;
+        user.workOnlineExpiresAt = null;
+      }
+    }
 
     return {
       id: user.id,
@@ -55,6 +99,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       roleId: user.roleId,
       roleName,
       userType: user.userType,
+      workStatus: user.workStatus,
+      offlineJoinedAt: user.offlineJoinedAt,
+      workMode: user.workMode,
+      workOnlineExpiresAt: user.workOnlineExpiresAt,
       permissions,
     };
   }

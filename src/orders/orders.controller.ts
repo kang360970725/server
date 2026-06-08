@@ -387,6 +387,7 @@ export class OrdersController {
             scope?: any;
             dryRun?: boolean;
             applyRepair?: boolean;
+            settlementBaseAmount?: number;
             modePlayAllocList?: any;
             playerEvaluations?: any;
             orderTipEnabled?: boolean;
@@ -406,6 +407,7 @@ export class OrdersController {
             scope: body?.scope ?? 'COMPLETED_AND_ARCHIVED',
             dryRun: body?.dryRun ?? true, // ✅ 默认 dryRun（防误操作）
             applyRepair: body?.applyRepair ?? false, // ✅ 默认 applyRepair（防误操作）
+            settlementBaseAmount: body?.settlementBaseAmount,
             modePlayAllocList: body?.modePlayAllocList,
             playerEvaluations: body?.playerEvaluations,
             orderTipEnabled: body?.orderTipEnabled,

@@ -8,27 +8,27 @@ datasource db {
 }
 
 model GameProject {
-  id          Int           @id @default(autoincrement())
-  name        String
-  price       Float
-  originPrice Float?
-  type        OrderType
-  gameType    String?       @db.VarChar(64)
-  projectType String?       @db.Text
-  category    String?       @db.VarChar(64)
-  richContent String?       @db.LongText
-  showInMenuList Boolean    @default(true)
+  id             Int             @id @default(autoincrement())
+  name           String
+  price          Float
+  originPrice    Float?
+  type           OrderType
+  gameType       String?         @db.VarChar(64)
+  projectType    String?         @db.Text
+  category       String?         @db.VarChar(64)
+  richContent    String?         @db.LongText
+  showInMenuList Boolean         @default(true)
   /// 计费模式：小时单 / 保底单/ 玩法单（你已落地）
-  billingMode BillingMode   @default(GUARANTEED)
-  baseAmount  Float?
-  clubRate    Float?
-  coverImage  String?
-  description String?
-  status      ProjectStatus @default(ACTIVE)
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
-  orders      Order[]
-  reviews     ProductReview[]
+  billingMode    BillingMode     @default(GUARANTEED)
+  baseAmount     Float?
+  clubRate       Float?
+  coverImage     String?
+  description    String?
+  status         ProjectStatus   @default(ACTIVE)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  orders         Order[]
+  reviews        ProductReview[]
 }
 
 model Role {
@@ -58,114 +58,116 @@ model Permission {
 }
 
 model User {
-  id                       Int                        @id @default(autoincrement())
-  phone                    String                     @unique
-  password                 String
-  name                     String?
-  email                    String?
-  userType                 UserType                   @default(REGISTERED_USER)
-  status                   UserStatus                 @default(ACTIVE)
-  realName                 String?
-  idCard                   String?
-  avatar                   String?
-  album                    Json?
-  rating                   Int?
-  level                    Int                        @default(1)
-  balance                  Float                      @default(0)
-  needResetPwd             Boolean                    @default(false)
-  lastLoginAt              DateTime?
-  createdAt                DateTime                   @default(now())
-  updatedAt                DateTime                   @updatedAt
-  roleId                   Int?
+  id                          Int                        @id @default(autoincrement())
+  phone                       String                     @unique
+  password                    String
+  name                        String?
+  email                       String?
+  userType                    UserType                   @default(REGISTERED_USER)
+  status                      UserStatus                 @default(ACTIVE)
+  realName                    String?
+  idCard                      String?
+  avatar                      String?
+  album                       Json?
+  rating                      Int?
+  level                       Int                        @default(1)
+  balance                     Float                      @default(0)
+  needResetPwd                Boolean                    @default(false)
+  lastLoginAt                 DateTime?
+  createdAt                   DateTime                   @default(now())
+  updatedAt                   DateTime                   @updatedAt
+  roleId                      Int?
   /// 陪玩接单状态（仅对 userType=STAFF/PLAYER 生效，v0.1.1 先不强约束）
-  workStatus               PlayerWorkStatus           @default(IDLE)
+  workStatus                  PlayerWorkStatus           @default(IDLE)
   /// 提现收款二维码（对象存储 key）
-  withdrawQrCodeKey        String?                    @db.VarChar(255)
+  withdrawQrCodeKey           String?                    @db.VarChar(255)
   /// 上传时间（用于审计 / 防重复）
-  withdrawQrCodeUploadedAt DateTime?
-  canWithdraw              Boolean                    @default(true)
-  depositLimit             Decimal                    @default(2000.00) @db.Decimal(10, 2)
-  workMode                 StaffWorkMode              @default(ONLINE)
-  offlineJoinedAt          DateTime?
-  dispatchedOrders         Order[]                    @relation("OrderDispatcher")
-  customerOrders           Order[]                    @relation("OrderCustomer")
-  offlineFeeBills          OfflineFeeBill[]
-  offlineFeePayments       OfflineFeeBillPayment[]
-  announcementsCreated     SystemAnnouncement[]      @relation("AnnouncementCreator")
-  announcementReads        SystemAnnouncementRead[]
-  notifications            UserNotification[]
-  csDutySchedules          CsDutySchedule[]
-  csDutyLeaves             CsDutyLeave[]            @relation("CsDutyLeaveUser")
-  csDutySubstituteLeaves   CsDutyLeave[]            @relation("CsDutyLeaveSubstitute")
-  csDutyLeaveCreated       CsDutyLeave[]            @relation("CsDutyLeaveCreator")
-  orderParticipants        OrderParticipant[]
-  orderSettlements         OrderSettlement[]
-  orderPlayerEvaluations    OrderPlayerEvaluation[] @relation("OrderPlayerEvaluationPlayer")
-  orderPlayerEvaluationsGiven OrderPlayerEvaluation[] @relation("OrderPlayerEvaluationEvaluator")
-  recharges                Recharge[]
-  createdBatches           SettlementBatch[]          @relation("BatchCreator")
-  depositTransactions      WalletDepositTransaction[]
-  userLogs                 UserLog[]
-  staffRating              StaffRating?               @relation(fields: [rating], references: [id])
-  Role                     Role?                      @relation(fields: [roleId], references: [id])
-  walletAccount            WalletAccount?
-  walletHolds              WalletHold[]
-  walletTransactions       WalletTransaction[]
-  walletWithdrawalRequests WalletWithdrawalRequest[]
-  createdPenaltyRules      PenaltyRule[]             @relation("PenaltyRuleCreator")
-  penaltyTickets           PenaltyTicket[]           @relation("PenaltyTicketUser")
-  createdPenaltyTickets    PenaltyTicket[]           @relation("PenaltyTicketCreator")
-  reviewedPenaltyTickets   PenaltyTicket[]           @relation("PenaltyTicketReviewer")
-  penaltyAppeals           PenaltyAppeal[]           @relation("PenaltyAppealUser")
-  reviewedPenaltyAppeals   PenaltyAppeal[]           @relation("PenaltyAppealReviewer")
-  penaltyFundFlows         PenaltyFundFlow[]
-  userCoupons              UserCoupon[]
-  chestRedeemedCodes       ChestRedeemCode[] @relation("ChestRedeemByUser")
-  chestAccount             ChestUserAccount?
-  chestOpenRecords         ChestOpenRecord[]
-  chestPromoClaims         ChestPromoBundleItem[] @relation("ChestPromoClaimUser")
-  productReviews           ProductReview[]
-  wechatBindings           UserWechatBinding[]
-  memberProfile            MemberProfile?
-  memberPointAccount       MemberPointAccount?
-  memberPointTransactions  MemberPointTransaction[]
-  memberRechargeOrders     MemberRechargeOrder[]
+  withdrawQrCodeUploadedAt    DateTime?
+  canWithdraw                 Boolean                    @default(true)
+  depositLimit                Decimal                    @default(2000.00) @db.Decimal(10, 2)
+  workMode                    StaffWorkMode              @default(ONLINE)
+  offlineJoinedAt             DateTime?
+  workOnlineExpiresAt         DateTime?
+  dispatchedOrders            Order[]                    @relation("OrderDispatcher")
+  customerOrders              Order[]                    @relation("OrderCustomer")
+  offlineFeeBills             OfflineFeeBill[]
+  offlineFeePayments          OfflineFeeBillPayment[]
+  announcementsCreated        SystemAnnouncement[]       @relation("AnnouncementCreator")
+  announcementReads           SystemAnnouncementRead[]
+  notifications               UserNotification[]
+  csDutySchedules             CsDutySchedule[]
+  csDutyLeaves                CsDutyLeave[]              @relation("CsDutyLeaveUser")
+  csDutySubstituteLeaves      CsDutyLeave[]              @relation("CsDutyLeaveSubstitute")
+  csDutyLeaveCreated          CsDutyLeave[]              @relation("CsDutyLeaveCreator")
+  orderParticipants           OrderParticipant[]
+  orderSettlements            OrderSettlement[]
+  orderPlayerEvaluations      OrderPlayerEvaluation[]    @relation("OrderPlayerEvaluationPlayer")
+  orderPlayerEvaluationsGiven OrderPlayerEvaluation[]    @relation("OrderPlayerEvaluationEvaluator")
+  recharges                   Recharge[]
+  createdBatches              SettlementBatch[]          @relation("BatchCreator")
+  depositTransactions         WalletDepositTransaction[]
+  userLogs                    UserLog[]
+  staffRating                 StaffRating?               @relation(fields: [rating], references: [id])
+  Role                        Role?                      @relation(fields: [roleId], references: [id])
+  walletAccount               WalletAccount?
+  walletHolds                 WalletHold[]
+  walletTransactions          WalletTransaction[]
+  walletWithdrawalRequests    WalletWithdrawalRequest[]
+  createdPenaltyRules         PenaltyRule[]              @relation("PenaltyRuleCreator")
+  penaltyTickets              PenaltyTicket[]            @relation("PenaltyTicketUser")
+  createdPenaltyTickets       PenaltyTicket[]            @relation("PenaltyTicketCreator")
+  reviewedPenaltyTickets      PenaltyTicket[]            @relation("PenaltyTicketReviewer")
+  penaltyAppeals              PenaltyAppeal[]            @relation("PenaltyAppealUser")
+  reviewedPenaltyAppeals      PenaltyAppeal[]            @relation("PenaltyAppealReviewer")
+  penaltyFundFlows            PenaltyFundFlow[]
+  userCoupons                 UserCoupon[]
+  chestRedeemedCodes          ChestRedeemCode[]          @relation("ChestRedeemByUser")
+  chestAccount                ChestUserAccount?
+  chestOpenRecords            ChestOpenRecord[]
+  chestPromoClaims            ChestPromoBundleItem[]     @relation("ChestPromoClaimUser")
+  productReviews              ProductReview[]
+  wechatBindings              UserWechatBinding[]
+  memberProfile               MemberProfile?
+  memberPointAccount          MemberPointAccount?
+  memberPointTransactions     MemberPointTransaction[]
+  memberRechargeOrders        MemberRechargeOrder[]
 
   @@index([workStatus])
   @@index([workMode, offlineJoinedAt])
+  @@index([workMode, workOnlineExpiresAt])
   @@index([rating], map: "users_rating_fkey")
   @@index([roleId], map: "users_roleId_fkey")
   @@map("users")
 }
 
 model ChestPromoBundle {
-  id         Int      @id @default(autoincrement())
-  promoCode  String   @unique @db.VarChar(64)
-  promoType  String   @default("CHEST_PROMO") @db.VarChar(32)
-  codeCount  Int
-  totalKeys  Int
-  active     Boolean  @default(true)
-  expireAt   DateTime
-  createdBy  Int?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-  items      ChestPromoBundleItem[]
+  id        Int                    @id @default(autoincrement())
+  promoCode String                 @unique @db.VarChar(64)
+  promoType String                 @default("CHEST_PROMO") @db.VarChar(32)
+  codeCount Int
+  totalKeys Int
+  active    Boolean                @default(true)
+  expireAt  DateTime
+  createdBy Int?
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+  items     ChestPromoBundleItem[]
 
   @@index([promoType, active, expireAt], map: "idx_chest_promo_bundle_type_status")
   @@map("chest_promo_bundles")
 }
 
 model ChestPromoBundleItem {
-  id               Int      @id @default(autoincrement())
+  id               Int              @id @default(autoincrement())
   bundleId         Int
   redeemCodeId     Int
-  redeemCode       String   @db.VarChar(64)
-  keyCount         Int      @default(1)
+  redeemCode       String           @db.VarChar(64)
+  keyCount         Int              @default(1)
   assignedUserId   Int?
-  assignedDeviceId String?  @db.VarChar(128)
+  assignedDeviceId String?          @db.VarChar(128)
   assignedAt       DateTime?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
   bundle           ChestPromoBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
   redeemCodeRef    ChestRedeemCode  @relation(fields: [redeemCodeId], references: [id], onDelete: Cascade)
   assignedUser     User?            @relation("ChestPromoClaimUser", fields: [assignedUserId], references: [id], onDelete: SetNull)
@@ -178,39 +180,39 @@ model ChestPromoBundleItem {
 }
 
 model ChestActivityConfig {
-  id              Int      @id @default(autoincrement())
-  activityKey     String   @unique @db.VarChar(64)
-  title           String   @db.VarChar(120)
-  enabled         Boolean  @default(false)
-  defaultKeyCount Int      @default(1)
+  id              Int               @id @default(autoincrement())
+  activityKey     String            @unique @db.VarChar(64)
+  title           String            @db.VarChar(120)
+  enabled         Boolean           @default(false)
+  defaultKeyCount Int               @default(1)
   launchAt        DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
   rewardItems     ChestRewardItem[]
 
   @@map("chest_activity_configs")
 }
 
 model ChestRewardItem {
-  id           Int      @id @default(autoincrement())
-  activityKey  String   @db.VarChar(64)
-  name         String   @db.VarChar(120)
-  type         String   @db.VarChar(32)
-  quantity     Int      @default(1)
-  weight       Int      @default(1)
-  stock        Int?
-  enabled      Boolean  @default(true)
-  sortOrder    Int      @default(100)
-  minDrawCount Int      @default(0)
+  id              Int                 @id @default(autoincrement())
+  activityKey     String              @db.VarChar(64)
+  name            String              @db.VarChar(120)
+  type            String              @db.VarChar(32)
+  quantity        Int                 @default(1)
+  weight          Int                 @default(1)
+  stock           Int?
+  enabled         Boolean             @default(true)
+  sortOrder       Int                 @default(100)
+  minDrawCount    Int                 @default(0)
   blockBeforeDays Int?
-  rampEveryDays Int?
-  rampStep Int?
-  rampMaxExtra Int?
-  dynamicMode  String?  @db.VarChar(64)
-  publicRuleText String? @db.VarChar(255)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  activity     ChestActivityConfig @relation(fields: [activityKey], references: [activityKey], onDelete: Cascade)
+  rampEveryDays   Int?
+  rampStep        Int?
+  rampMaxExtra    Int?
+  dynamicMode     String?             @db.VarChar(64)
+  publicRuleText  String?             @db.VarChar(255)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  activity        ChestActivityConfig @relation(fields: [activityKey], references: [activityKey], onDelete: Cascade)
 
   @@index([activityKey, enabled], map: "idx_chest_reward_item_activity_enabled")
   @@index([activityKey, sortOrder], map: "idx_chest_reward_item_activity_sort")
@@ -218,21 +220,21 @@ model ChestRewardItem {
 }
 
 model ChestRedeemCode {
-  id           Int       @id @default(autoincrement())
-  code         String    @unique @db.VarChar(64)
-  keyCount     Int       @default(1)
-  redeemedCount Int      @default(0)
-  active       Boolean   @default(true)
-  expireAt     DateTime?
-  createdBy    Int?
-  redeemedBy   Int?
-  redeemedAt   DateTime?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
-  redeemedUser User?     @relation("ChestRedeemByUser", fields: [redeemedBy], references: [id], onDelete: SetNull)
-  openRecords  ChestOpenRecord[]
-  lastRedeemByAccounts ChestUserAccount[] @relation("ChestAccountLastRedeemCode")
-  promoBundleItems ChestPromoBundleItem[]
+  id                   Int                    @id @default(autoincrement())
+  code                 String                 @unique @db.VarChar(64)
+  keyCount             Int                    @default(1)
+  redeemedCount        Int                    @default(0)
+  active               Boolean                @default(true)
+  expireAt             DateTime?
+  createdBy            Int?
+  redeemedBy           Int?
+  redeemedAt           DateTime?
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+  redeemedUser         User?                  @relation("ChestRedeemByUser", fields: [redeemedBy], references: [id], onDelete: SetNull)
+  openRecords          ChestOpenRecord[]
+  lastRedeemByAccounts ChestUserAccount[]     @relation("ChestAccountLastRedeemCode")
+  promoBundleItems     ChestPromoBundleItem[]
 
   @@index([active, expireAt], map: "idx_chest_redeem_code_active_expire")
   @@index([redeemedBy], map: "idx_chest_redeem_code_redeemed_by")
@@ -240,30 +242,30 @@ model ChestRedeemCode {
 }
 
 model ChestUserAccount {
-  id        Int      @id @default(autoincrement())
-  userId    Int      @unique
-  keyCount  Int      @default(0)
+  id               Int              @id @default(autoincrement())
+  userId           Int              @unique
+  keyCount         Int              @default(0)
   lastRedeemCodeId Int?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  lastRedeemCode ChestRedeemCode? @relation("ChestAccountLastRedeemCode", fields: [lastRedeemCodeId], references: [id], onDelete: SetNull)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lastRedeemCode   ChestRedeemCode? @relation("ChestAccountLastRedeemCode", fields: [lastRedeemCodeId], references: [id], onDelete: SetNull)
 
   @@map("chest_user_accounts")
 }
 
 model ChestOpenRecord {
-  id         Int      @id @default(autoincrement())
-  userId     Int
-  costKeys   Int      @default(1)
-  redeemCodeId Int?
-  redeemCode   String?  @db.VarChar(64)
-  verifiedAt DateTime?
-  verifiedBy Int?
-  verifyRemark String? @db.VarChar(255)
-  rewardJson Json?
-  createdAt  DateTime @default(now())
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id            Int              @id @default(autoincrement())
+  userId        Int
+  costKeys      Int              @default(1)
+  redeemCodeId  Int?
+  redeemCode    String?          @db.VarChar(64)
+  verifiedAt    DateTime?
+  verifiedBy    Int?
+  verifyRemark  String?          @db.VarChar(255)
+  rewardJson    Json?
+  createdAt     DateTime         @default(now())
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   redeemCodeRef ChestRedeemCode? @relation(fields: [redeemCodeId], references: [id], onDelete: SetNull)
 
   @@index([userId, createdAt], map: "idx_chest_open_record_user_time")
@@ -272,27 +274,27 @@ model ChestOpenRecord {
 }
 
 model SystemConfig {
-  id        Int      @id @default(autoincrement())
-  key       String   @unique @db.VarChar(64)
-  value     String   @db.Text
+  id        Int             @id @default(autoincrement())
+  key       String          @unique @db.VarChar(64)
+  value     String          @db.Text
   valueType ConfigValueType @default(STRING)
-  remark    String?  @db.VarChar(255)
-  enabled   Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  remark    String?         @db.VarChar(255)
+  enabled   Boolean         @default(true)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
 
   @@index([enabled])
   @@map("system_configs")
 }
 
 model MiniappProtocolCategory {
-  id          Int      @id @default(autoincrement())
-  name        String   @db.VarChar(120)
-  description String?  @db.VarChar(255)
-  sort        Int      @default(0)
-  enabled     Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id          Int               @id @default(autoincrement())
+  name        String            @db.VarChar(120)
+  description String?           @db.VarChar(255)
+  sort        Int               @default(0)
+  enabled     Boolean           @default(true)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
   protocols   MiniappProtocol[]
 
   @@index([enabled, sort], map: "idx_miniapp_protocol_category_enabled_sort")
@@ -300,43 +302,43 @@ model MiniappProtocolCategory {
 }
 
 model MiniappProtocol {
-  id          Int      @id @default(autoincrement())
-  categoryId  Int
-  key         String   @unique @db.VarChar(64)
-  title       String   @db.VarChar(120)
-  coverImage  String?  @db.Text
-  content     String   @db.LongText
-  enabled     Boolean  @default(true)
-  remark      String?  @db.VarChar(255)
-  sort        Int      @default(0)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  category    MiniappProtocolCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  id         Int                     @id @default(autoincrement())
+  categoryId Int
+  key        String                  @unique @db.VarChar(64)
+  title      String                  @db.VarChar(120)
+  coverImage String?                 @db.Text
+  content    String                  @db.LongText
+  enabled    Boolean                 @default(true)
+  remark     String?                 @db.VarChar(255)
+  sort       Int                     @default(0)
+  createdAt  DateTime                @default(now())
+  updatedAt  DateTime                @updatedAt
+  category   MiniappProtocolCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
 
   @@index([categoryId, enabled, sort], map: "idx_miniapp_protocol_category_sort")
   @@map("miniapp_protocols")
 }
 
 model CouponTemplate {
-  id                Int                  @id @default(autoincrement())
-  name              String               @db.VarChar(120)
-  type              CouponTemplateType
-  discountValue     Decimal?             @db.Decimal(10, 2)
-  thresholdAmount   Decimal?             @db.Decimal(10, 2)
-  maxDiscountAmount Decimal?             @db.Decimal(10, 2)
-  applicableScope   CouponScope          @default(ALL)
+  id                   Int                  @id @default(autoincrement())
+  name                 String               @db.VarChar(120)
+  type                 CouponTemplateType
+  discountValue        Decimal?             @db.Decimal(10, 2)
+  thresholdAmount      Decimal?             @db.Decimal(10, 2)
+  maxDiscountAmount    Decimal?             @db.Decimal(10, 2)
+  applicableScope      CouponScope          @default(ALL)
   /// 当 applicableScope=PROJECT 时，存项目ID数组
   applicableProjectIds Json?
-  status            CouponTemplateStatus @default(DRAFT)
-  startAt           DateTime?
-  endAt             DateTime?
-  totalLimit        Int?
-  perUserLimit      Int?
-  issuedCount       Int                  @default(0)
-  usedCount         Int                  @default(0)
-  createdAt         DateTime             @default(now())
-  updatedAt         DateTime             @updatedAt
-  userCoupons       UserCoupon[]
+  status               CouponTemplateStatus @default(DRAFT)
+  startAt              DateTime?
+  endAt                DateTime?
+  totalLimit           Int?
+  perUserLimit         Int?
+  issuedCount          Int                  @default(0)
+  usedCount            Int                  @default(0)
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  userCoupons          UserCoupon[]
 
   @@index([status, startAt, endAt], map: "idx_coupon_template_status_time")
   @@index([applicableScope], map: "idx_coupon_template_scope")
@@ -344,42 +346,42 @@ model CouponTemplate {
 }
 
 model UserCoupon {
-  id         Int             @id @default(autoincrement())
+  id         Int              @id @default(autoincrement())
   userId     Int
   templateId Int
   status     UserCouponStatus @default(UNUSED)
-  receivedAt DateTime        @default(now())
+  receivedAt DateTime         @default(now())
   usedAt     DateTime?
   expiresAt  DateTime?
   orderId    Int?
-  createdAt  DateTime        @default(now())
-  updatedAt  DateTime        @updatedAt
-  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  template   CouponTemplate  @relation(fields: [templateId], references: [id], onDelete: Cascade)
-  order      Order?          @relation("OrderAppliedUserCoupon", fields: [orderId], references: [id], onDelete: SetNull)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  template   CouponTemplate   @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  order      Order?           @relation("OrderAppliedUserCoupon", fields: [orderId], references: [id], onDelete: SetNull)
 
+  @@unique([orderId], map: "uniq_user_coupon_order")
   @@index([userId, status, expiresAt], map: "idx_user_coupon_user_status_expire")
   @@index([templateId, status], map: "idx_user_coupon_template_status")
   @@index([orderId], map: "idx_user_coupon_order")
-  @@unique([orderId], map: "uniq_user_coupon_order")
   @@map("user_coupons")
 }
 
 model SystemAnnouncement {
-  id          Int                      @id @default(autoincrement())
-  title       String                   @db.VarChar(120)
-  content     String                   @db.Text
-  audience    AnnouncementAudience     @default(ALL)
-  forceRead   Boolean                  @default(false)
-  enabled     Boolean                  @default(true)
-  publishAt   DateTime?
-  expireAt    DateTime?
-  notifiedAt  DateTime?
-  createdBy   Int?
-  createdAt   DateTime                 @default(now())
-  updatedAt   DateTime                 @updatedAt
-  creator     User?                    @relation("AnnouncementCreator", fields: [createdBy], references: [id], onDelete: SetNull)
-  reads       SystemAnnouncementRead[]
+  id         Int                      @id @default(autoincrement())
+  title      String                   @db.VarChar(120)
+  content    String                   @db.Text
+  audience   AnnouncementAudience     @default(ALL)
+  forceRead  Boolean                  @default(false)
+  enabled    Boolean                  @default(true)
+  publishAt  DateTime?
+  expireAt   DateTime?
+  notifiedAt DateTime?
+  createdBy  Int?
+  createdAt  DateTime                 @default(now())
+  updatedAt  DateTime                 @updatedAt
+  creator    User?                    @relation("AnnouncementCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  reads      SystemAnnouncementRead[]
 
   @@index([enabled, publishAt, expireAt], map: "idx_announcement_publish")
   @@index([forceRead], map: "idx_announcement_force_read")
@@ -417,17 +419,17 @@ model UserNotification {
 }
 
 model CsDutySchedule {
-  id          Int      @id @default(autoincrement())
-  userId      Int
-  weekday     Int
-  weekdaysMask Int     @default(0)
-  startMinute Int
-  endMinute   Int
-  enabled     Boolean  @default(true)
-  remark      String?  @db.VarChar(255)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id           Int      @id @default(autoincrement())
+  userId       Int
+  weekday      Int
+  weekdaysMask Int      @default(0)
+  startMinute  Int
+  endMinute    Int
+  enabled      Boolean  @default(true)
+  remark       String?  @db.VarChar(255)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([weekday, enabled, startMinute, endMinute], map: "idx_cs_duty_shift")
   @@index([weekdaysMask, enabled], map: "idx_cs_duty_mask")
@@ -457,25 +459,25 @@ model CsDutyLeave {
 }
 
 model OfflineFeeBill {
-  id                    Int                  @id @default(autoincrement())
+  id                    Int                     @id @default(autoincrement())
   userId                Int
-  billMonth             String               @db.VarChar(7)
-  periodStart           DateTime             @db.Date
-  periodEnd             DateTime             @db.Date
-  performanceBaseAmount Decimal              @default(0.00) @db.Decimal(12, 2)
-  rate                  Decimal              @default(0.10) @db.Decimal(6, 4)
-  minAmount             Decimal              @default(0.00) @db.Decimal(12, 2)
-  capAmount             Decimal              @default(0.00) @db.Decimal(12, 2)
-  shouldPayAmount       Decimal              @default(0.00) @db.Decimal(12, 2)
-  paidAmount            Decimal              @default(0.00) @db.Decimal(12, 2)
-  remainingAmount       Decimal              @default(0.00) @db.Decimal(12, 2)
-  status                OfflineFeeBillStatus @default(UNPAID)
-  enforceFullPayment    Boolean              @default(false)
+  billMonth             String                  @db.VarChar(7)
+  periodStart           DateTime                @db.Date
+  periodEnd             DateTime                @db.Date
+  performanceBaseAmount Decimal                 @default(0.00) @db.Decimal(12, 2)
+  rate                  Decimal                 @default(0.10) @db.Decimal(6, 4)
+  minAmount             Decimal                 @default(0.00) @db.Decimal(12, 2)
+  capAmount             Decimal                 @default(0.00) @db.Decimal(12, 2)
+  shouldPayAmount       Decimal                 @default(0.00) @db.Decimal(12, 2)
+  paidAmount            Decimal                 @default(0.00) @db.Decimal(12, 2)
+  remainingAmount       Decimal                 @default(0.00) @db.Decimal(12, 2)
+  status                OfflineFeeBillStatus    @default(UNPAID)
+  enforceFullPayment    Boolean                 @default(false)
   lastRemindAt          DateTime?
-  generatedAt           DateTime             @default(now())
-  createdAt             DateTime             @default(now())
-  updatedAt             DateTime             @updatedAt
-  user                  User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  generatedAt           DateTime                @default(now())
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @updatedAt
+  user                  User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
   payments              OfflineFeeBillPayment[]
 
   @@unique([userId, billMonth], map: "uniq_offline_fee_bill_user_month")
@@ -532,20 +534,20 @@ model Recharge {
 }
 
 model UserWechatBinding {
-  id            Int                   @id @default(autoincrement())
-  userId        Int
-  platform      WechatBindingPlatform @default(MINIAPP)
-  appId         String                @db.VarChar(64)
-  openId        String                @db.VarChar(128)
-  unionId       String?               @db.VarChar(128)
-  sessionKey    String?               @db.VarChar(255)
-  nickname      String?               @db.VarChar(120)
-  avatarUrl     String?               @db.VarChar(255)
-  lastLoginAt   DateTime?
-  lastBindAt    DateTime              @default(now())
-  createdAt     DateTime              @default(now())
-  updatedAt     DateTime              @updatedAt
-  user          User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id          Int                   @id @default(autoincrement())
+  userId      Int
+  platform    WechatBindingPlatform @default(MINIAPP)
+  appId       String                @db.VarChar(64)
+  openId      String                @db.VarChar(128)
+  unionId     String?               @db.VarChar(128)
+  sessionKey  String?               @db.VarChar(255)
+  nickname    String?               @db.VarChar(120)
+  avatarUrl   String?               @db.VarChar(255)
+  lastLoginAt DateTime?
+  lastBindAt  DateTime              @default(now())
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+  user        User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([platform, appId, openId], map: "uniq_wechat_binding_openid")
   @@index([userId, platform], map: "idx_wechat_binding_user_platform")
@@ -554,65 +556,65 @@ model UserWechatBinding {
 }
 
 model MemberProfile {
-  id                  Int         @id @default(autoincrement())
-  userId              Int         @unique
-  memberCode          String      @unique @db.VarChar(32)
-  levelCode           String      @default("NONE") @db.VarChar(32)
-  totalRechargeAmount Decimal     @default(0.00) @db.Decimal(12, 2)
-  totalConsumeAmount  Decimal     @default(0.00) @db.Decimal(12, 2)
-  annualContribution  Int         @default(0)
+  id                  Int       @id @default(autoincrement())
+  userId              Int       @unique
+  memberCode          String    @unique @db.VarChar(32)
+  levelCode           String    @default("NONE") @db.VarChar(32)
+  totalRechargeAmount Decimal   @default(0.00) @db.Decimal(12, 2)
+  totalConsumeAmount  Decimal   @default(0.00) @db.Decimal(12, 2)
+  annualContribution  Int       @default(0)
   lastRechargeAt      DateTime?
-  createdAt           DateTime    @default(now())
-  updatedAt           DateTime    @updatedAt
-  user                User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([levelCode], map: "idx_member_profile_level_code")
   @@map("member_profiles")
 }
 
 model MemberLevelConfig {
-  id                       Int      @id @default(autoincrement())
-  code                     String   @unique @db.VarChar(32)
-  name                     String   @db.VarChar(64)
-  sortOrder                Int      @default(100)
-  minRechargeAmount        Decimal  @default(0.00) @db.Decimal(12, 2)
-  minAnnualContribution    Int      @default(0)
-  benefits                 Json?
-  description              String?  @db.VarChar(255)
-  enabled                  Boolean  @default(true)
-  isDefault                Boolean  @default(false)
-  createdAt                DateTime @default(now())
-  updatedAt                DateTime @updatedAt
+  id                    Int      @id @default(autoincrement())
+  code                  String   @unique @db.VarChar(32)
+  name                  String   @db.VarChar(64)
+  sortOrder             Int      @default(100)
+  minRechargeAmount     Decimal  @default(0.00) @db.Decimal(12, 2)
+  minAnnualContribution Int      @default(0)
+  benefits              Json?
+  description           String?  @db.VarChar(255)
+  enabled               Boolean  @default(true)
+  isDefault             Boolean  @default(false)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
 
   @@index([enabled, sortOrder], map: "idx_member_level_cfg_enabled_sort")
   @@map("member_level_configs")
 }
 
 model MemberPointAccount {
-  id               Int      @id @default(autoincrement())
-  userId           Int      @unique
-  availablePoints  Int      @default(0)
-  totalEarnedPoints Int     @default(0)
-  totalSpentPoints Int      @default(0)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                Int      @id @default(autoincrement())
+  userId            Int      @unique
+  availablePoints   Int      @default(0)
+  totalEarnedPoints Int      @default(0)
+  totalSpentPoints  Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("member_point_accounts")
 }
 
 model MemberPointTransaction {
-  id            Int                  @id @default(autoincrement())
-  userId        Int
-  direction     MemberPointDirection
-  bizType       MemberPointBizType
-  points        Int
-  balanceAfter  Int
-  sourceType    String               @db.VarChar(32)
-  sourceId      Int?
-  remark        String?              @db.VarChar(255)
-  createdAt     DateTime             @default(now())
-  user          User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id           Int                  @id @default(autoincrement())
+  userId       Int
+  direction    MemberPointDirection
+  bizType      MemberPointBizType
+  points       Int
+  balanceAfter Int
+  sourceType   String               @db.VarChar(32)
+  sourceId     Int?
+  remark       String?              @db.VarChar(255)
+  createdAt    DateTime             @default(now())
+  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt], map: "idx_member_point_tx_user_time")
   @@index([bizType, createdAt], map: "idx_member_point_tx_biz_time")
@@ -620,17 +622,17 @@ model MemberPointTransaction {
 }
 
 model MemberRechargePlan {
-  id             Int      @id @default(autoincrement())
-  title          String   @db.VarChar(64)
-  amount         Decimal  @db.Decimal(10, 2)
-  bonusAmount    Decimal  @default(0.00) @db.Decimal(10, 2)
-  giftPoints     Int      @default(0)
-  couponText     String?  @db.VarChar(120)
-  badgeText      String?  @db.VarChar(32)
-  sortOrder      Int      @default(100)
-  enabled        Boolean  @default(true)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id             Int                   @id @default(autoincrement())
+  title          String                @db.VarChar(64)
+  amount         Decimal               @db.Decimal(10, 2)
+  bonusAmount    Decimal               @default(0.00) @db.Decimal(10, 2)
+  giftPoints     Int                   @default(0)
+  couponText     String?               @db.VarChar(120)
+  badgeText      String?               @db.VarChar(32)
+  sortOrder      Int                   @default(100)
+  enabled        Boolean               @default(true)
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
   rechargeOrders MemberRechargeOrder[]
 
   @@index([enabled, sortOrder], map: "idx_member_recharge_plan_enabled_sort")
@@ -638,26 +640,26 @@ model MemberRechargePlan {
 }
 
 model MemberRechargeOrder {
-  id              Int                       @id @default(autoincrement())
-  rechargeNo      String                    @unique @db.VarChar(64)
-  userId          Int
-  planId          Int?
-  amount          Decimal                   @db.Decimal(10, 2)
-  bonusAmount     Decimal                   @default(0.00) @db.Decimal(10, 2)
-  grantedAmount   Decimal                   @default(0.00) @db.Decimal(10, 2)
-  giftPoints      Int                       @default(0)
-  payAmount       Decimal                   @db.Decimal(10, 2)
-  channel         String                    @default("WECHAT") @db.VarChar(20)
-  status          MemberRechargeOrderStatus @default(PENDING)
-  payerOpenid     String?                   @db.VarChar(128)
-  prepayId        String?                   @db.VarChar(128)
-  transactionId   String?                   @db.VarChar(128)
-  notifyRaw       Json?
-  paidAt          DateTime?
-  createdAt       DateTime                  @default(now())
-  updatedAt       DateTime                  @updatedAt
-  user            User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  plan            MemberRechargePlan?       @relation(fields: [planId], references: [id], onDelete: SetNull)
+  id            Int                       @id @default(autoincrement())
+  rechargeNo    String                    @unique @db.VarChar(64)
+  userId        Int
+  planId        Int?
+  amount        Decimal                   @db.Decimal(10, 2)
+  bonusAmount   Decimal                   @default(0.00) @db.Decimal(10, 2)
+  grantedAmount Decimal                   @default(0.00) @db.Decimal(10, 2)
+  giftPoints    Int                       @default(0)
+  payAmount     Decimal                   @db.Decimal(10, 2)
+  channel       String                    @default("WECHAT") @db.VarChar(20)
+  status        MemberRechargeOrderStatus @default(PENDING)
+  payerOpenid   String?                   @db.VarChar(128)
+  prepayId      String?                   @db.VarChar(128)
+  transactionId String?                   @db.VarChar(128)
+  notifyRaw     Json?
+  paidAt        DateTime?
+  createdAt     DateTime                  @default(now())
+  updatedAt     DateTime                  @updatedAt
+  user          User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan          MemberRechargePlan?       @relation(fields: [planId], references: [id], onDelete: SetNull)
 
   @@index([userId, status, createdAt], map: "idx_member_recharge_order_user_status")
   @@index([planId], map: "idx_member_recharge_order_plan")
@@ -686,97 +688,97 @@ model UserLog {
 }
 
 model Order {
-  id                  Int               @id @default(autoincrement())
+  id                     Int                     @id @default(autoincrement())
   /// 自动单号：建议 YYYYMMDD-0001（由代码生成，不靠 DB 自增）
-  autoSerial          String            @unique
+  autoSerial             String                  @unique
   /// 金额：手工录入（已确认 Q1=A）
-  receivableAmount    Float
-  paidAmount          Float
+  receivableAmount       Float
+  paidAmount             Float
   /// 结算基数：默认等于应收，用于分佣，不受优惠券/实收波动影响
-  settlementBaseAmount Float @default(0)
+  settlementBaseAmount   Float                   @default(0)
   /// 时间字段：
-  orderTime           DateTime?
-  paymentTime         DateTime?
-  openedAt            DateTime          @default(now())
+  orderTime              DateTime?
+  paymentTime            DateTime?
+  openedAt               DateTime                @default(now())
   /// 保底数额（单位：万）
   /// 仅保底/护航类项目使用；小时单可为空
-  baseAmountWan       Float?
+  baseAmountWan          Float?
   /// 小时单“总小时”不再需要手填：
   /// 因为你要求用 接单时间 -> 存/结单时间 自动计算 billableHours
   /// 所以小时单的小时数最终落在 OrderDispatch.billableHours 上
-  orderQuantity       Int               @default(1)
+  orderQuantity          Int                     @default(1)
   /// 关联项目：仍用 GameProject（必选）
-  projectId           Int
+  projectId              Int
   /// 项目快照：记录当时项目配置（项目可能随时调整）
   /// 建议存：name/type/billingMode/baseAmount/clubRate/price 等
-  projectSnapshot     Json
+  projectSnapshot        Json
   /// 客户游戏 ID / 昵称：用于查询消费记录
-  customerGameId      String?
+  customerGameId         String?
   /// 下单客户（用于小程序/公众号等自助来源回溯客户信息）
-  customerUserId      Int?
+  customerUserId         Int?
   /// 派单客服：默认录单人
-  dispatcherId        Int?
+  dispatcherId           Int?
   /// 订单渠道来源（字符串，支持后台维护）
-  orderSource         String?           @db.VarChar(40)
+  orderSource            String?                 @db.VarChar(40)
   /// 回访登记：文本 + 状态
-  revisitDetail       String?
-  revisitStatus       RevisitStatus     @default(NOT_REVISITED)
+  revisitDetail          String?
+  revisitStatus          RevisitStatus           @default(NOT_REVISITED)
   /// 分佣比例（可调）
-  csRate              Float?
-  inviteRate          Float?
-  inviter             String?
+  csRate                 Float?
+  inviteRate             Float?
+  inviter                String?
   /// 俱乐部抽成比例（订单级固定抽成）
-  customClubRate      Float?
-  clubRate            Float?
+  customClubRate         Float?
+  clubRate               Float?
   /// 结算汇总（可选，结单自动结算后写入，用于对账与校验）
-  clubEarnings        Float?
-  totalPlayerEarnings Float?
+  clubEarnings           Float?
+  totalPlayerEarnings    Float?
   /// 订单状态（用于筛选）
-  status              OrderStatus       @default(WAIT_ASSIGN)
+  status                 OrderStatus             @default(WAIT_ASSIGN)
   /// 当前派单批次（为了快速查“这一轮派单/状态”）
-  currentDispatchId   Int?
-  createdAt           DateTime          @default(now())
-  updatedAt           DateTime          @updatedAt
+  currentDispatchId      Int?
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
   /// 是否赠送单：赠送单不收款，但仍正常结算/分红；
   /// ⚠️ 日账单/营收统计需排除 isGifted=true 的订单
-  isGifted            Boolean           @default(false)
+  isGifted               Boolean                 @default(false)
   /// 赠送金额（用于统计活动成本/赠送成本）
   /// - 前端不传
   /// - 后端创建订单时：isGifted=true => giftedAmount = paidAmount（或订单价值口径）
-  giftedAmount        Decimal?          @db.Decimal(10, 2)
+  giftedAmount           Decimal?                @db.Decimal(10, 2)
   /// 是否已确认收款（人工确认）
   /// - 先打后付场景：结单后可能仍未收款
   /// - 确认收款接�����会同时写入 paymentTime=now() 与 paidAmount（允许修正）
-  isPaid              Boolean           @default(false)
+  isPaid                 Boolean                 @default(false)
   /// 订单支付状态（与支付流水联动）
-  payStatus           OrderPayStatus    @default(PENDING)
+  payStatus              OrderPayStatus          @default(PENDING)
   /// 订单优惠汇总（统一优惠口径）
   /// - originalAmount：优惠前基准金额（通常=应收）
   /// - discountAmount：总优惠（可由多来源叠加）
   /// - finalPayableAmount：最终应付（优惠后）
-  originalAmount        Decimal           @default(0) @db.Decimal(10, 2)
-  discountAmount        Decimal           @default(0) @db.Decimal(10, 2)
-  couponDiscountAmount  Decimal           @default(0) @db.Decimal(10, 2)
-  activityDiscountAmount Decimal          @default(0) @db.Decimal(10, 2)
-  giftDiscountAmount    Decimal           @default(0) @db.Decimal(10, 2)
-  manualAdjustAmount    Decimal           @default(0) @db.Decimal(10, 2)
-  finalPayableAmount    Decimal           @default(0) @db.Decimal(10, 2)
-  marketingCostAmount   Decimal           @default(0) @db.Decimal(10, 2)
+  originalAmount         Decimal                 @default(0) @db.Decimal(10, 2)
+  discountAmount         Decimal                 @default(0) @db.Decimal(10, 2)
+  couponDiscountAmount   Decimal                 @default(0) @db.Decimal(10, 2)
+  activityDiscountAmount Decimal                 @default(0) @db.Decimal(10, 2)
+  giftDiscountAmount     Decimal                 @default(0) @db.Decimal(10, 2)
+  manualAdjustAmount     Decimal                 @default(0) @db.Decimal(10, 2)
+  finalPayableAmount     Decimal                 @default(0) @db.Decimal(10, 2)
+  marketingCostAmount    Decimal                 @default(0) @db.Decimal(10, 2)
   /// 优惠类型：NONE / COUPON / ACTIVITY / GIFT / MANUAL / MIXED
-  discountType          String?           @db.VarChar(20)
-  appliedUserCoupon     UserCoupon?       @relation("OrderAppliedUserCoupon")
-  latestPaymentId       Int?
-  currentDispatch     OrderDispatch?    @relation("OrderCurrentDispatch", fields: [currentDispatchId], references: [id])
-  dispatcher          User?             @relation("OrderDispatcher", fields: [dispatcherId], references: [id])
-  customerUser        User?             @relation("OrderCustomer", fields: [customerUserId], references: [id])
-  project             GameProject       @relation(fields: [projectId], references: [id])
-  dispatches          OrderDispatch[]   @relation("OrderDispatches")
-  settlements         OrderSettlement[]
-  discountDetails     OrderDiscount[]
-  review              ProductReview?
-  playerEvaluations   OrderPlayerEvaluation[]
-  latestPayment       OrderPayment?     @relation("OrderLatestPayment", fields: [latestPaymentId], references: [id])
-  payments            OrderPayment[]    @relation("OrderPayments")
+  discountType           String?                 @db.VarChar(20)
+  appliedUserCoupon      UserCoupon?             @relation("OrderAppliedUserCoupon")
+  latestPaymentId        Int?
+  currentDispatch        OrderDispatch?          @relation("OrderCurrentDispatch", fields: [currentDispatchId], references: [id])
+  dispatcher             User?                   @relation("OrderDispatcher", fields: [dispatcherId], references: [id])
+  customerUser           User?                   @relation("OrderCustomer", fields: [customerUserId], references: [id])
+  project                GameProject             @relation(fields: [projectId], references: [id])
+  dispatches             OrderDispatch[]         @relation("OrderDispatches")
+  settlements            OrderSettlement[]
+  discountDetails        OrderDiscount[]
+  review                 ProductReview?
+  playerEvaluations      OrderPlayerEvaluation[]
+  latestPayment          OrderPayment?           @relation("OrderLatestPayment", fields: [latestPaymentId], references: [id])
+  payments               OrderPayment[]          @relation("OrderPayments")
 
   @@index([projectId])
   @@index([dispatcherId])
@@ -789,22 +791,22 @@ model Order {
 }
 
 model OrderPayment {
-  id               Int              @id @default(autoincrement())
-  orderId          Int
-  paymentNo        String           @unique @db.VarChar(64)
-  channel          String           @db.VarChar(20) // WECHAT/BALANCE/MANUAL
-  status           OrderPayStatus   @default(PENDING)
-  amount           Decimal          @db.Decimal(10, 2)
-  currency         String           @default("CNY") @db.VarChar(8)
-  prepayId         String?          @db.VarChar(128)
-  transactionId    String?          @db.VarChar(128)
-  payerOpenid      String?          @db.VarChar(64)
-  notifyRaw        Json?
-  paidAt           DateTime?
-  createdAt        DateTime         @default(now())
-  updatedAt        DateTime         @updatedAt
-  order            Order            @relation("OrderPayments", fields: [orderId], references: [id], onDelete: Cascade)
-  latestForOrder   Order[]          @relation("OrderLatestPayment")
+  id             Int            @id @default(autoincrement())
+  orderId        Int
+  paymentNo      String         @unique @db.VarChar(64)
+  channel        String         @db.VarChar(20) // WECHAT/BALANCE/MANUAL
+  status         OrderPayStatus @default(PENDING)
+  amount         Decimal        @db.Decimal(10, 2)
+  currency       String         @default("CNY") @db.VarChar(8)
+  prepayId       String?        @db.VarChar(128)
+  transactionId  String?        @db.VarChar(128)
+  payerOpenid    String?        @db.VarChar(64)
+  notifyRaw      Json?
+  paidAt         DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  order          Order          @relation("OrderPayments", fields: [orderId], references: [id], onDelete: Cascade)
+  latestForOrder Order[]        @relation("OrderLatestPayment")
 
   @@index([orderId, status, createdAt], map: "idx_order_payment_order_status_time")
   @@index([transactionId], map: "idx_order_payment_txn")
@@ -812,20 +814,20 @@ model OrderPayment {
 }
 
 model ProductReview {
-  id           Int      @id @default(autoincrement())
+  id           Int         @id @default(autoincrement())
   projectId    Int
-  orderId      Int      @unique
+  orderId      Int         @unique
   userId       Int
   score        Int
   tags         Json?
-  content      String?  @db.Text
-  anonymous    Boolean  @default(false)
-  isHidden     Boolean  @default(false)
-  hiddenReason String?  @db.VarChar(255)
+  content      String?     @db.Text
+  anonymous    Boolean     @default(false)
+  isHidden     Boolean     @default(false)
+  hiddenReason String?     @db.VarChar(255)
   hiddenBy     Int?
   hiddenAt     DateTime?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
   project      GameProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
   order        Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
   user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -856,14 +858,14 @@ model OrderDiscount {
 }
 
 model OrderDispatch {
-  id                 Int                  @id @default(autoincrement())
+  id                 Int                     @id @default(autoincrement())
   /// 属于哪个订单
   orderId            Int
   /// 第几轮派单（从 1 开始递增）
   /// 规则：只有上一轮 ARCHIVED 才允许创建下一轮
   round              Int
   /// 本轮状态：待派 -> 待接 -> 已接 -> 存单/结单
-  status             DispatchStatus       @default(WAIT_ASSIGN)
+  status             DispatchStatus          @default(WAIT_ASSIGN)
   /// 时间：
   /// assignedAt：派单时间（客服执行派单时写入）
   /// acceptedAllAt：全员接单完成时间（当本轮所有 participant.acceptedAt 非空时写入）
@@ -885,8 +887,8 @@ model OrderDispatch {
   billableHours      Float?
   /// 本轮备注：可存 “换号/异常/说明”
   remark             String?
-  currentForOrders   Order[]              @relation("OrderCurrentDispatch")
-  order              Order                @relation("OrderDispatches", fields: [orderId], references: [id], onDelete: Cascade)
+  currentForOrders   Order[]                 @relation("OrderCurrentDispatch")
+  order              Order                   @relation("OrderDispatches", fields: [orderId], references: [id], onDelete: Cascade)
   participants       OrderParticipant[]
   settlements        OrderSettlement[]
   playerEvaluations  OrderPlayerEvaluation[]
@@ -972,28 +974,28 @@ model OrderSettlement {
 }
 
 model OrderPlayerEvaluation {
-  id                Int      @id @default(autoincrement())
-  orderId           Int
-  dispatchId        Int
-  playerUserId      Int
-  evaluatorId       Int
-  score             Int
-  ratingLabel       String   @db.VarChar(20)
-  afterSaleHandled  Boolean  @default(false)
-  afterSaleAction   String?  @db.VarChar(40)
-  responsibleUserIds Json?
-  tippedUserIds     Json?
-  tipPoolAmount     Decimal? @db.Decimal(10, 2)
-  tipAmount         Decimal? @db.Decimal(10, 2)
-  penaltyAmount     Decimal? @db.Decimal(10, 2)
-  maintenanceFeeAmount Decimal? @db.Decimal(10, 2)
-  reviewRemark      String?  @db.VarChar(255)
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-  order             Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  dispatch          OrderDispatch @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
-  player            User     @relation("OrderPlayerEvaluationPlayer", fields: [playerUserId], references: [id], onDelete: Cascade)
-  evaluator         User     @relation("OrderPlayerEvaluationEvaluator", fields: [evaluatorId], references: [id], onDelete: Cascade)
+  id                   Int           @id @default(autoincrement())
+  orderId              Int
+  dispatchId           Int
+  playerUserId         Int
+  evaluatorId          Int
+  score                Int
+  ratingLabel          String        @db.VarChar(20)
+  afterSaleHandled     Boolean       @default(false)
+  afterSaleAction      String?       @db.VarChar(40)
+  responsibleUserIds   Json?
+  tippedUserIds        Json?
+  tipPoolAmount        Decimal?      @db.Decimal(10, 2)
+  tipAmount            Decimal?      @db.Decimal(10, 2)
+  penaltyAmount        Decimal?      @db.Decimal(10, 2)
+  maintenanceFeeAmount Decimal?      @db.Decimal(10, 2)
+  reviewRemark         String?       @db.VarChar(255)
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  order                Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  dispatch             OrderDispatch @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
+  player               User          @relation("OrderPlayerEvaluationPlayer", fields: [playerUserId], references: [id], onDelete: Cascade)
+  evaluator            User          @relation("OrderPlayerEvaluationEvaluator", fields: [evaluatorId], references: [id], onDelete: Cascade)
 
   @@unique([orderId, dispatchId, playerUserId], map: "uniq_order_player_eval_dispatch_player")
   @@index([orderId, createdAt], map: "idx_order_player_eval_order_created")
@@ -1468,11 +1470,11 @@ enum AnnouncementAudience {
 /// =========================
 
 enum PerformanceOwnerRoleType {
-  PLAYER     // 陪玩 / 打手
-  CS         // 客服
-  OPERATION  // 运营
-  CHANNEL    // 渠道 / 推广平台
-  LEADER     // 团长 / 介绍人（先预留）
+  PLAYER // 陪玩 / 打手
+  CS // 客服
+  OPERATION // 运营
+  CHANNEL // 渠道 / 推广平台
+  LEADER // 团长 / 介绍人（先预留）
 }
 
 enum PerformanceRecordStatus {
@@ -1547,47 +1549,47 @@ model PerformanceRecord {
   id Int @id @default(autoincrement())
 
   /// 关联信息
-  orderId Int
-  dispatchId Int?
+  orderId      Int
+  dispatchId   Int?
   settlementId Int?
 
   /// 归属对象
-  ownerUserId Int
+  ownerUserId   Int
   ownerRoleType PerformanceOwnerRoleType
 
   /// 时间归属（用于日/月统计）
-  statsDate DateTime @db.Date
-  statsMonth String @db.VarChar(7) // 例如：2026-03
+  statsDate  DateTime @db.Date
+  statsMonth String   @db.VarChar(7) // 例如：2026-03
 
   /// 订单 / 项目分类（尽量存结果型维度，避免大量联表）
   billingMode BillingMode?
-  orderType OrderType?
-  projectId Int?
-  bizLine String? @db.VarChar(50)
+  orderType   OrderType?
+  projectId   Int?
+  bizLine     String?      @db.VarChar(50)
 
   /// 金额结果
   grossPerformanceAmount Decimal @db.Decimal(12, 2) // 抽成前业绩
-  netIncomeAmount Decimal @db.Decimal(12, 2) // 抽成后收益
-  negativeIncomeAmount Decimal @default(0) @db.Decimal(12, 2) // 负收益金额
+  netIncomeAmount        Decimal @db.Decimal(12, 2) // 抽成后收益
+  negativeIncomeAmount   Decimal @default(0) @db.Decimal(12, 2) // 负收益金额
 
   /// 贡献辅助
   contributionBaseAmount Decimal? @db.Decimal(12, 2)
-  commissionRate Decimal? @db.Decimal(6, 4)
+  commissionRate         Decimal? @db.Decimal(6, 4)
 
   /// 行为标记
-  isAccepted Boolean @default(false)
-  isArchived Boolean @default(false)
-  isCompleted Boolean @default(false)
-  isBombed Boolean @default(false)
+  isAccepted   Boolean @default(false)
+  isArchived   Boolean @default(false)
+  isCompleted  Boolean @default(false)
+  isBombed     Boolean @default(false)
   isComplained Boolean @default(false)
-  isAfterSale Boolean @default(false)
-  isCancelled Boolean @default(false)
+  isAfterSale  Boolean @default(false)
+  isCancelled  Boolean @default(false)
 
   /// 投诉辅助金额（当前先预留）
-  complaintOrderAmount Decimal @default(0) @db.Decimal(12, 2)
+  complaintOrderAmount   Decimal @default(0) @db.Decimal(12, 2)
   complaintPenaltyAmount Decimal @default(0) @db.Decimal(12, 2)
 
-  remark String? @db.VarChar(255)
+  remark String?                 @db.VarChar(255)
   status PerformanceRecordStatus @default(EFFECTIVE)
 
   createdAt DateTime @default(now())
@@ -1614,44 +1616,44 @@ model OrderFinanceRecord {
   id Int @id @default(autoincrement())
 
   /// 关联信息
-  orderId Int @unique
+  orderId        Int  @unique
   customerUserId Int?
 
   /// 时间归属
-  statsDate DateTime @db.Date
-  statsMonth String @db.VarChar(7) // 例如：2026-03
+  statsDate  DateTime @db.Date
+  statsMonth String   @db.VarChar(7) // 例如：2026-03
 
   /// 订单 / 项目分类
   billingMode BillingMode?
-  orderType OrderType?
-  projectId Int?
-  bizLine String? @db.VarChar(50)
+  orderType   OrderType?
+  projectId   Int?
+  bizLine     String?      @db.VarChar(50)
 
   /// 收入口径
-  receivableAmount Decimal @default(0) @db.Decimal(12, 2) // 应收
-  paidAmount Decimal @default(0) @db.Decimal(12, 2) // 实收
+  receivableAmount     Decimal @default(0) @db.Decimal(12, 2) // 应收
+  paidAmount           Decimal @default(0) @db.Decimal(12, 2) // 实收
   settlementBaseAmount Decimal @default(0) @db.Decimal(12, 2) // 结算基数
-  discountAmount Decimal @default(0) @db.Decimal(12, 2) // 总优惠
+  discountAmount       Decimal @default(0) @db.Decimal(12, 2) // 总优惠
   couponDiscountAmount Decimal @default(0) @db.Decimal(12, 2) // 优惠券优惠
-  otherDiscountAmount Decimal @default(0) @db.Decimal(12, 2) // 其他优惠
+  otherDiscountAmount  Decimal @default(0) @db.Decimal(12, 2) // 其他优惠
 
   /// 支出口径
-  playerCostAmount Decimal @default(0) @db.Decimal(12, 2)
-  csCostAmount Decimal @default(0) @db.Decimal(12, 2)
-  operationCostAmount Decimal @default(0) @db.Decimal(12, 2)
-  channelCostAmount Decimal @default(0) @db.Decimal(12, 2)
+  playerCostAmount       Decimal @default(0) @db.Decimal(12, 2)
+  csCostAmount           Decimal @default(0) @db.Decimal(12, 2)
+  operationCostAmount    Decimal @default(0) @db.Decimal(12, 2)
+  channelCostAmount      Decimal @default(0) @db.Decimal(12, 2)
   complaintPenaltyAmount Decimal @default(0) @db.Decimal(12, 2)
-  afterSaleCostAmount Decimal @default(0) @db.Decimal(12, 2)
+  afterSaleCostAmount    Decimal @default(0) @db.Decimal(12, 2)
 
   /// 结果口径
   grossProfitAmount Decimal @default(0) @db.Decimal(12, 2)
 
   /// 辅助标记（当前先预留）
   isComplained Boolean @default(false)
-  isAfterSale Boolean @default(false)
-  isCancelled Boolean @default(false)
+  isAfterSale  Boolean @default(false)
+  isCancelled  Boolean @default(false)
 
-  remark String? @db.VarChar(255)
+  remark String?             @db.VarChar(255)
   status FinanceRecordStatus @default(EFFECTIVE)
 
   createdAt DateTime @default(now())
@@ -1670,18 +1672,18 @@ model OrderFinanceRecord {
 }
 
 model PenaltyRule {
-  id          Int                 @id @default(autoincrement())
-  code        String              @unique @db.VarChar(32)
-  name        String              @db.VarChar(120)
-  category    PenaltyRuleCategory
-  amount      Decimal             @db.Decimal(10, 2)
-  description String?             @db.VarChar(255)
-  enabled     Boolean             @default(true)
-  sortOrder   Int                 @default(0)
-  createdBy   Int?
-  createdAt   DateTime            @default(now())
-  updatedAt   DateTime            @updatedAt
-  creator     User?               @relation("PenaltyRuleCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  id            Int                   @id @default(autoincrement())
+  code          String                @unique @db.VarChar(32)
+  name          String                @db.VarChar(120)
+  category      PenaltyRuleCategory
+  amount        Decimal               @db.Decimal(10, 2)
+  description   String?               @db.VarChar(255)
+  enabled       Boolean               @default(true)
+  sortOrder     Int                   @default(0)
+  createdBy     Int?
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+  creator       User?                 @relation("PenaltyRuleCreator", fields: [createdBy], references: [id], onDelete: SetNull)
   ticketDetails PenaltyTicketDetail[]
 
   @@index([enabled, sortOrder], map: "idx_penalty_rule_enabled_sort")
@@ -1690,29 +1692,29 @@ model PenaltyRule {
 }
 
 model PenaltyTicket {
-  id               Int                @id @default(autoincrement())
-  ticketNo         String             @unique @db.VarChar(32)
-  userId           Int
-  creatorId        Int?
-  appealReviewerId Int?
-  status           PenaltyTicketStatus @default(PENDING_CONFIRM)
-  appealStatus     PenaltyAppealStatus @default(NONE)
-  ruleAmount       Decimal            @db.Decimal(10, 2)
-  finalAmount      Decimal            @db.Decimal(10, 2)
-  deductedAmount   Decimal            @default(0.00) @db.Decimal(10, 2)
-  deductedAt       DateTime?
-  deductWalletTxId Int?
-  reason           String?            @db.VarChar(255)
+  id                Int                   @id @default(autoincrement())
+  ticketNo          String                @unique @db.VarChar(32)
+  userId            Int
+  creatorId         Int?
+  appealReviewerId  Int?
+  status            PenaltyTicketStatus   @default(PENDING_CONFIRM)
+  appealStatus      PenaltyAppealStatus   @default(NONE)
+  ruleAmount        Decimal               @db.Decimal(10, 2)
+  finalAmount       Decimal               @db.Decimal(10, 2)
+  deductedAmount    Decimal               @default(0.00) @db.Decimal(10, 2)
+  deductedAt        DateTime?
+  deductWalletTxId  Int?
+  reason            String?               @db.VarChar(255)
   sameCategoryStats Json?
-  confirmAt        DateTime?
-  createdAt        DateTime           @default(now())
-  updatedAt        DateTime           @updatedAt
-  user             User               @relation("PenaltyTicketUser", fields: [userId], references: [id], onDelete: Cascade)
-  creator          User?              @relation("PenaltyTicketCreator", fields: [creatorId], references: [id], onDelete: SetNull)
-  appealReviewer   User?              @relation("PenaltyTicketReviewer", fields: [appealReviewerId], references: [id], onDelete: SetNull)
-  details          PenaltyTicketDetail[]
-  appeals          PenaltyAppeal[]
-  fundFlows        PenaltyFundFlow[]
+  confirmAt         DateTime?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  user              User                  @relation("PenaltyTicketUser", fields: [userId], references: [id], onDelete: Cascade)
+  creator           User?                 @relation("PenaltyTicketCreator", fields: [creatorId], references: [id], onDelete: SetNull)
+  appealReviewer    User?                 @relation("PenaltyTicketReviewer", fields: [appealReviewerId], references: [id], onDelete: SetNull)
+  details           PenaltyTicketDetail[]
+  appeals           PenaltyAppeal[]
+  fundFlows         PenaltyFundFlow[]
 
   @@index([userId, status, createdAt], map: "idx_penalty_ticket_user_status")
   @@index([status, createdAt], map: "idx_penalty_ticket_status")
@@ -1722,17 +1724,17 @@ model PenaltyTicket {
 }
 
 model PenaltyTicketDetail {
-  id                   Int               @id @default(autoincrement())
+  id                   Int                 @id @default(autoincrement())
   ticketId             Int
   ruleId               Int?
-  ruleCodeSnapshot     String?           @db.VarChar(32)
-  ruleNameSnapshot     String            @db.VarChar(120)
+  ruleCodeSnapshot     String?             @db.VarChar(32)
+  ruleNameSnapshot     String              @db.VarChar(120)
   ruleCategorySnapshot PenaltyRuleCategory
-  amount               Decimal           @db.Decimal(10, 2)
-  descriptionSnapshot  String?           @db.VarChar(255)
-  createdAt            DateTime          @default(now())
-  ticket               PenaltyTicket     @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  rule                 PenaltyRule?      @relation(fields: [ruleId], references: [id], onDelete: SetNull)
+  amount               Decimal             @db.Decimal(10, 2)
+  descriptionSnapshot  String?             @db.VarChar(255)
+  createdAt            DateTime            @default(now())
+  ticket               PenaltyTicket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  rule                 PenaltyRule?        @relation(fields: [ruleId], references: [id], onDelete: SetNull)
 
   @@index([ticketId], map: "idx_penalty_ticket_detail_ticket")
   @@index([ruleCategorySnapshot], map: "idx_penalty_ticket_detail_category")
@@ -1740,19 +1742,19 @@ model PenaltyTicketDetail {
 }
 
 model PenaltyAppeal {
-  id           Int                @id @default(autoincrement())
-  ticketId     Int                @unique
+  id           Int                 @id @default(autoincrement())
+  ticketId     Int                 @unique
   userId       Int
-  content      String             @db.Text
+  content      String              @db.Text
   status       PenaltyAppealStatus @default(PENDING)
   reviewedBy   Int?
   reviewedAt   DateTime?
-  reviewRemark String?            @db.VarChar(255)
-  createdAt    DateTime           @default(now())
-  updatedAt    DateTime           @updatedAt
-  ticket       PenaltyTicket      @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  user         User               @relation("PenaltyAppealUser", fields: [userId], references: [id], onDelete: Cascade)
-  reviewer     User?              @relation("PenaltyAppealReviewer", fields: [reviewedBy], references: [id], onDelete: SetNull)
+  reviewRemark String?             @db.VarChar(255)
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+  ticket       PenaltyTicket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user         User                @relation("PenaltyAppealUser", fields: [userId], references: [id], onDelete: Cascade)
+  reviewer     User?               @relation("PenaltyAppealReviewer", fields: [reviewedBy], references: [id], onDelete: SetNull)
 
   @@index([userId, createdAt], map: "idx_penalty_appeal_user")
   @@index([status, createdAt], map: "idx_penalty_appeal_status")
@@ -1772,22 +1774,22 @@ model PenaltyFundPool {
 }
 
 model PenaltyFundFlow {
-  id            Int                @id @default(autoincrement())
-  poolId         Int                @default(1)
-  ticketId       Int?
-  userId         Int?
-  direction      PenaltyFundDirection
-  bizType        PenaltyFundBizType
-  amount         Decimal            @db.Decimal(10, 2)
-  beforeBalance  Decimal            @db.Decimal(12, 2)
-  afterBalance   Decimal            @db.Decimal(12, 2)
-  walletTxId     Int?
-  operatorId     Int?
-  remark         String?            @db.VarChar(255)
-  createdAt      DateTime           @default(now())
-  pool           PenaltyFundPool    @relation(fields: [poolId], references: [id], onDelete: Cascade)
-  ticket         PenaltyTicket?     @relation(fields: [ticketId], references: [id], onDelete: SetNull)
-  user           User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  id            Int                  @id @default(autoincrement())
+  poolId        Int                  @default(1)
+  ticketId      Int?
+  userId        Int?
+  direction     PenaltyFundDirection
+  bizType       PenaltyFundBizType
+  amount        Decimal              @db.Decimal(10, 2)
+  beforeBalance Decimal              @db.Decimal(12, 2)
+  afterBalance  Decimal              @db.Decimal(12, 2)
+  walletTxId    Int?
+  operatorId    Int?
+  remark        String?              @db.VarChar(255)
+  createdAt     DateTime             @default(now())
+  pool          PenaltyFundPool      @relation(fields: [poolId], references: [id], onDelete: Cascade)
+  ticket        PenaltyTicket?       @relation(fields: [ticketId], references: [id], onDelete: SetNull)
+  user          User?                @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@unique([ticketId, bizType], map: "uniq_penalty_flow_ticket_biz")
   @@index([createdAt], map: "idx_penalty_fund_flow_created")
