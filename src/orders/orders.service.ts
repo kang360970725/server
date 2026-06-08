@@ -305,7 +305,7 @@ export class OrdersService {
                     tipAmount: 0,
                     penaltyAmount: 0,
                     maintenanceFeeAmount: 0,
-                    reviewRemark: 'SYSTEM_AUTO_CONFIRM_24H',
+                    reviewRemark: 'SYSTEM_AUTO_CONFIRM_72H',
                 });
             }
         }
@@ -3854,8 +3854,8 @@ export class OrdersService {
                     orderId,
                     operatorId,
                     settlements: result.settlements || [],
-                    action: isAutoConfirm ? 'SYSTEM_AUTO_CONFIRM_COMPLETE_ORDER_24H' : 'CONFIRM_COMPLETE_ORDER_V3',
-                    remark: remark || (isAutoConfirm ? '系统24小时自动确认结单' : '客服确认最终结单'),
+                    action: isAutoConfirm ? 'SYSTEM_AUTO_CONFIRM_COMPLETE_ORDER_72H' : 'CONFIRM_COMPLETE_ORDER_V3',
+                    remark: remark || (isAutoConfirm ? '系统72小时自动确认结单' : '客服确认最终结单'),
                     orderStatusToUpdate: OrderStatus.COMPLETED,
                     logExtra: {
                         settlementBatchId: result.settlementBatchId,
@@ -3916,7 +3916,7 @@ export class OrdersService {
 
     @Cron('0 */10 * * * *', { timeZone: 'Asia/Shanghai' })
     async autoConfirmPendingOrders() {
-        const thresholdMs = 24 * 60 * 60 * 1000;
+        const thresholdMs = 72 * 60 * 60 * 1000;
         const now = Date.now();
 
         const systemActor = await this.prisma.user.findFirst({
@@ -3978,7 +3978,7 @@ export class OrdersService {
             try {
                 this.logger.log(`[auto-confirm] start orderId=${order.id}, anchorAt=${anchorAt.toISOString()}`);
                 await this.confirmCompleteOrder(Number(order.id), systemActor.id, {
-                    remark: 'SYSTEM_AUTO_CONFIRM_24H',
+                    remark: 'SYSTEM_AUTO_CONFIRM_72H',
                     autoConfirm: true,
                 });
                 this.logger.log(`[auto-confirm] success orderId=${order.id}`);
