@@ -138,12 +138,30 @@ export class AuthService {
       throw new ForbiddenException('账号已禁用，禁止登录');
     }
     // ✅ 登录成功
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: {
-        lastLoginAt: new Date(),
-      },
-    });
+    const isStaff = String(user.userType || '').toUpperCase() === 'STAFF';
+    if (isStaff) {
+      const leaseExpiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          lastLoginAt: new Date(),
+          workMode: 'ONLINE',
+          workOnlineExpiresAt: leaseExpiresAt,
+          offlineJoinedAt: null,
+        },
+      });
+      user.workMode = 'ONLINE';
+      user.workOnlineExpiresAt = leaseExpiresAt;
+      user.offlineJoinedAt = null;
+    }
+    if (!isStaff) {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          lastLoginAt: new Date(),
+        },
+      });
+    }
     const access_token = this.signAccessToken(user);
 
     // 返回用户信息（不包含密码）
@@ -155,6 +173,9 @@ export class AuthService {
       user: {
         ...userWithoutPassword,
         lastLoginAt: new Date(),
+        workMode: (user as any).workMode ?? undefined,
+        workOnlineExpiresAt: (user as any).workOnlineExpiresAt ?? undefined,
+        offlineJoinedAt: (user as any).offlineJoinedAt ?? undefined,
       },
     };
   }
