@@ -43,14 +43,12 @@ export class MiniOrdersController {
     const playerId = Number(rawPlayerIds[0] ?? body?.dispatcherId ?? body?.playerId ?? 0);
     if (!playerId) return [];
 
-    const now = new Date();
     const player = await this.prisma.user.findFirst({
       where: {
         id: playerId,
         userType: UserType.STAFF,
         workStatus: PlayerWorkStatus.IDLE,
         workMode: 'ONLINE',
-        workOnlineExpiresAt: { gt: now },
       },
       select: { id: true },
     });

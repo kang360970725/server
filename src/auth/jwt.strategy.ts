@@ -5,6 +5,9 @@ import { PrismaService } from '../prisma.service';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
+  // 临时策略：仅保留手动离线/登录上线，不再因租约过期自动离线。
+  private readonly autoOfflineDisabled = true;
+
   constructor(private prisma: PrismaService) {
     super({
       // 支持 SSE 场景：EventSource 无法自定义 Authorization header，允许 query.token 透传
@@ -55,7 +58,23 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     const isOnline = String(user.workMode || '').toUpperCase() === 'ONLINE';
 
     if (isStaff && isOnline) {
-      if (leaseExpiresAt && leaseExpiresAt > leaseNow) {
+      if (this.autoOfflineDisabled) {
+        if (leaseExpiresAt && leaseExpiresAt > leaseNow) {
+          const nextExpiresAt = new Date(leaseNow.getTime() + 2 * 60 * 60 * 1000);
+          await this.prisma.user.updateMany({
+            where: {
+              id: user.id,
+              userType: 'STAFF',
+              workMode: 'ONLINE',
+              workOnlineExpiresAt: { gt: leaseNow },
+            },
+            data: {
+              workOnlineExpiresAt: nextExpiresAt,
+            },
+          });
+          user.workOnlineExpiresAt = nextExpiresAt;
+        }
+      } else if (leaseExpiresAt && leaseExpiresAt > leaseNow) {
         const nextExpiresAt = new Date(leaseNow.getTime() + 2 * 60 * 60 * 1000);
         await this.prisma.user.updateMany({
           where: {

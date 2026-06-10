@@ -10,6 +10,9 @@ import { WalletService } from '../wallet/wallet.service';
 
 @Injectable()
 export class UsersService {
+  // 临时屏蔽自动离线，仅保留手动离线/登录上线。
+  private readonly autoOfflineDisabled = true;
+
   static readonly PLAYER_ONLINE_LEASE_MS = 2 * 60 * 60 * 1000;
 
   constructor(private prisma: PrismaService, private wallet: WalletService) {}
@@ -909,28 +912,29 @@ export class UsersService {
   }) {
     const { keyword, onlyIdle = true, limit, page, paginate, onlyOnline = false } = params || {};
     const leaseNow = new Date();
-    await this.prisma.user.updateMany({
-      where: {
-        userType: UserType.STAFF,
-        workMode: 'ONLINE',
-        OR: [
-          { workOnlineExpiresAt: null },
-          { workOnlineExpiresAt: { lte: leaseNow } },
-        ],
-      },
-      data: {
-        workMode: 'OFFLINE',
-        workStatus: PlayerWorkStatus.IDLE,
-        offlineJoinedAt: leaseNow,
-        workOnlineExpiresAt: null,
-      },
-    });
+    if (!this.autoOfflineDisabled) {
+      await this.prisma.user.updateMany({
+        where: {
+          userType: UserType.STAFF,
+          workMode: 'ONLINE',
+          OR: [
+            { workOnlineExpiresAt: null },
+            { workOnlineExpiresAt: { lte: leaseNow } },
+          ],
+        },
+        data: {
+          workMode: 'OFFLINE',
+          workStatus: PlayerWorkStatus.IDLE,
+          offlineJoinedAt: leaseNow,
+          workOnlineExpiresAt: null,
+        },
+      });
+    }
 
     const where: any = { userType: UserType.STAFF };
     if (onlyIdle) where.workStatus = PlayerWorkStatus.IDLE;
     if (onlyOnline) {
       where.workMode = 'ONLINE';
-      where.workOnlineExpiresAt = { gt: leaseNow };
     }
 
     if (keyword) {
