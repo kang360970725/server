@@ -1,5 +1,5 @@
 import { BadRequestException, Body, Controller, Get, Param, ParseIntPipe, Post, Query, Req } from '@nestjs/common';
-import { OrderStatus } from '@prisma/client';
+import { OrderStatus, PlayerWorkStatus, UserType, WalletBizType, WalletDirection, WalletTxStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { OrdersService } from '../orders/orders.service';
 import { miniOk } from './mini.response';
@@ -9,6 +9,7 @@ import { WechatPayService } from './wechat-pay.service';
 import { getWechatOrderNotifyUrlFromConfig } from './wechat-callback.util';
 import { SystemConfigService } from '../system-config/system-config.service';
 import { MemberService } from '../member/member.service';
+import { WalletService } from '../wallet/wallet.service';
 
 @ApiTags('mini-orders')
 @ApiBearerAuth()
@@ -20,6 +21,7 @@ export class MiniOrdersController {
     private readonly wechatPayService: WechatPayService,
     private readonly systemConfigService: SystemConfigService,
     private readonly memberService: MemberService,
+    private readonly walletService: WalletService,
   ) {}
 
   private ownOrderWhere(uid: number, id?: number) {
@@ -30,6 +32,34 @@ export class MiniOrdersController {
         { dispatcherId: uid },
       ],
     } as any;
+  }
+
+  private async resolveMiniOrderPlayerIds(body: any) {
+    const rawPlayerIds = Array.isArray(body?.playerIds) ? body.playerIds : [];
+    if (rawPlayerIds.length > 1) {
+      throw new BadRequestException('指定陪玩师仅支持选择 1 名');
+    }
+
+    const playerId = Number(rawPlayerIds[0] ?? body?.dispatcherId ?? body?.playerId ?? 0);
+    if (!playerId) return [];
+
+    const now = new Date();
+    const player = await this.prisma.user.findFirst({
+      where: {
+        id: playerId,
+        userType: UserType.STAFF,
+        workStatus: PlayerWorkStatus.IDLE,
+        workMode: 'ONLINE',
+        workOnlineExpiresAt: { gt: now },
+      },
+      select: { id: true },
+    });
+
+    if (!player) {
+      throw new BadRequestException('指定陪玩师当前不可接单');
+    }
+
+    return [player.id];
   }
 
   private buildPaymentNo(prefix: string, orderId: number) {
@@ -219,7 +249,7 @@ export class MiniOrdersController {
     schema: {
       type: 'object',
       required: ['projectId', 'paidAmount'],
-      properties: {
+        properties: {
         projectId: { type: 'number', example: 1 },
         paidAmount: { type: 'number', example: 128 },
         receivableAmount: { type: 'number', example: 128 },
@@ -230,6 +260,7 @@ export class MiniOrdersController {
         isGifted: { type: 'boolean', example: false },
         isPaid: { type: 'boolean', example: false },
         userCouponId: { type: 'number', example: 12 },
+        dispatcherId: { type: 'number', example: 10086, description: '指定陪玩师ID' },
       },
     },
   })
@@ -241,6 +272,7 @@ export class MiniOrdersController {
   async create(@Req() req: any, @Body() body: any) {
     const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
     await this.memberService.assertMiniPhoneBound(uid);
+    const playerIds = await this.resolveMiniOrderPlayerIds(body);
     const payload = {
       projectId: Number(body?.projectId),
       receivableAmount: Number(body?.receivableAmount ?? body?.paidAmount ?? 0),
@@ -252,6 +284,7 @@ export class MiniOrdersController {
       isGifted: Boolean(body?.isGifted),
       isPaid: Boolean(body?.isPaid),
       userCouponId: body?.userCouponId == null ? undefined : Number(body.userCouponId),
+      ...(playerIds.length ? { playerIds } : {}),
     };
 
     if (!payload.projectId) throw new BadRequestException('projectId 必填');
@@ -289,6 +322,30 @@ export class MiniOrdersController {
     return miniOk(data, '订单已取消');
   }
 
+  @Post(':id/refund')
+  @ApiOperation({ summary: '重新申请退款' })
+  @ApiParam({ name: 'id', example: 1001 })
+  @ApiOkResponse({
+    schema: {
+      example: { code: 0, message: '退款处理成功', data: { success: true } },
+    },
+  })
+  async refund(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: any) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    const own = await this.prisma.order.findFirst({
+      where: this.ownOrderWhere(uid, id),
+      select: {
+        id: true,
+        status: true,
+        isPaid: true,
+        latestPayment: { select: { channel: true, status: true } },
+      },
+    });
+    if (!own) throw new BadRequestException('订单不存在或无权限操作');
+    const data = await this.ordersService.refundOrder(id, uid, body?.remark ? String(body.remark) : '用户重新申请退款');
+    return miniOk(data, '退款处理成功');
+  }
+
   @Post(':id/pay-confirm')
   @ApiOperation({ summary: '确认支付（业务确认）' })
   @ApiParam({ name: 'id', example: 1001 })
@@ -323,6 +380,13 @@ export class MiniOrdersController {
       select: { id: true, isPaid: true },
     });
     if (!own) throw new BadRequestException('订单不存在或无权限操作');
+    if (own.isPaid) {
+      return miniOk({
+        id,
+        isPaid: true,
+        alreadyPaid: true,
+      }, '该订单已支付');
+    }
 
     const paidAmount = Number(body?.paidAmount ?? 0);
     if (!Number.isFinite(paidAmount) || paidAmount < 0) {
@@ -330,6 +394,38 @@ export class MiniOrdersController {
     }
 
     const data = await this.prisma.$transaction(async (tx) => {
+      await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', Number(id));
+      await tx.$queryRawUnsafe('SELECT userId FROM `wallet_accounts` WHERE userId = ? FOR UPDATE', Number(uid));
+
+      const currentOrder = await tx.order.findUnique({
+        where: { id },
+        select: { id: true, isPaid: true },
+      });
+      if (!currentOrder) throw new BadRequestException('订单不存在或无权限操作');
+      if (currentOrder.isPaid) {
+        return tx.order.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            autoSerial: true,
+            isPaid: true,
+            payStatus: true,
+            paidAmount: true,
+            paymentTime: true,
+          },
+        });
+      }
+
+      await this.walletService.ensureWalletAccount(uid, tx as any);
+      const account = await tx.walletAccount.findUnique({
+        where: { userId: uid },
+        select: { availableBalance: true, frozenBalance: true },
+      });
+      const availableBalance = Number(account?.availableBalance ?? 0);
+      if (availableBalance < paidAmount) {
+        throw new BadRequestException('余额不足');
+      }
+
       const payment = await tx.orderPayment.create({
         data: {
           orderId: id,
@@ -339,8 +435,36 @@ export class MiniOrdersController {
           amount: paidAmount,
           paidAt: new Date(),
         },
-        select: { id: true },
+        select: { id: true, paymentNo: true },
       });
+
+      const accountAfter = await tx.walletAccount.update({
+        where: { userId: uid },
+        data: {
+          availableBalance: { decrement: paidAmount },
+        },
+        select: {
+          availableBalance: true,
+          frozenBalance: true,
+        },
+      });
+
+      await tx.walletTransaction.create({
+        data: {
+          userId: uid,
+          direction: WalletDirection.OUT,
+          bizType: WalletBizType.MEMBER_ORDER_CONSUME,
+          amount: paidAmount,
+          status: WalletTxStatus.AVAILABLE,
+          // 余额支付单独标识，便于和微信支付/其他渠道区分
+          sourceType: 'ORDER_PAYMENT_BALANCE',
+          sourceId: payment.id,
+          orderId: id,
+          availableAfter: Number(accountAfter?.availableBalance ?? 0),
+          frozenAfter: Number(accountAfter?.frozenBalance ?? 0),
+        } as any,
+      });
+
       return tx.order.update({
         where: { id },
         data: {
@@ -357,6 +481,13 @@ export class MiniOrdersController {
           payStatus: true,
           paidAmount: true,
           paymentTime: true,
+          latestPayment: {
+            select: {
+              channel: true,
+              status: true,
+              amount: true,
+            },
+          },
         },
       });
     });

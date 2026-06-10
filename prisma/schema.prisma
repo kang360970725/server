@@ -89,6 +89,7 @@ model User {
   offlineJoinedAt             DateTime?
   workOnlineExpiresAt         DateTime?
   dispatchedOrders            Order[]                    @relation("OrderDispatcher")
+  initiallyDispatchedOrders   Order[]                    @relation("OrderInitialDispatcher")
   customerOrders              Order[]                    @relation("OrderCustomer")
   offlineFeeBills             OfflineFeeBill[]
   offlineFeePayments          OfflineFeeBillPayment[]
@@ -716,8 +717,10 @@ model Order {
   customerGameId         String?
   /// 下单客户（用于小程序/公众号等自助来源回溯客户信息）
   customerUserId         Int?
-  /// 派单客服：默认录单人
+  /// 当前客服/当前归属客服：允许在重新派单时更新
   dispatcherId           Int?
+  /// 初始客服：创建订单时固化，结单客服分红按该字段结算
+  initialDispatcherId    Int?
   /// 订单渠道来源（字符串，支持后台维护）
   orderSource            String?                 @db.VarChar(40)
   /// 回访登记：文本 + 状态
@@ -770,6 +773,7 @@ model Order {
   latestPaymentId        Int?
   currentDispatch        OrderDispatch?          @relation("OrderCurrentDispatch", fields: [currentDispatchId], references: [id])
   dispatcher             User?                   @relation("OrderDispatcher", fields: [dispatcherId], references: [id])
+  initialDispatcher      User?                   @relation("OrderInitialDispatcher", fields: [initialDispatcherId], references: [id])
   customerUser           User?                   @relation("OrderCustomer", fields: [customerUserId], references: [id])
   project                GameProject             @relation(fields: [projectId], references: [id])
   dispatches             OrderDispatch[]         @relation("OrderDispatches")
@@ -782,6 +786,7 @@ model Order {
 
   @@index([projectId])
   @@index([dispatcherId])
+  @@index([initialDispatcherId])
   @@index([customerUserId])
   @@index([status])
   @@index([orderSource])

@@ -5,6 +5,7 @@ import { Public } from '../auth/decorators/public.decorator';
 import { MiniappProtocolsService } from './miniapp-protocols.service';
 import { UpsertMiniappProtocolDto } from './dto/upsert-miniapp-protocol.dto';
 import { UpsertMiniappProtocolCategoryDto } from './dto/upsert-miniapp-protocol-category.dto';
+import { miniOk } from '../mini/mini.response';
 
 @Controller('miniapp-protocols')
 export class MiniappProtocolsController {
@@ -55,12 +56,18 @@ export class MiniappProtocolsController {
   @Public()
   @Get('public/list-by-category')
   async listPublicByCategory(@Query('category') category: string) {
-    return this.service.listPublicByCategoryName(category);
+    return miniOk(await this.service.listPublicByCategoryName(category));
+  }
+
+  @Public()
+  @Post('public')
+  async listPublicByKeys(@Body() body: { keys?: string | string[] }) {
+    return miniOk(await this.service.listPublicByKeys(body?.keys || []));
   }
 
   @Public()
   @Get('public/:key')
   async getPublic(@Param('key') key: string) {
-    return this.service.getByKey(key);
+    return miniOk(await this.service.getByKey(key));
   }
 }

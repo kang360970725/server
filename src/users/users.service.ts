@@ -945,6 +945,7 @@ export class UsersService {
       select: {
         id: true,
         name: true,
+        realName: true,
         phone: true,
         workMode: true,
         offlineJoinedAt: true,
@@ -993,6 +994,7 @@ export class UsersService {
 
     const rows = allUsers
         .map((u) => ({ ...u,
+          displayName: String(u?.name || '').trim() || `#${u.id}`,
           ratingName: u?.staffRating?.name ?? '-',   // ✅ 等级名称
           todayHandledCount: countMap[Number(u.id)] ?? 0}))
         .sort((a, b) => {

@@ -40,6 +40,10 @@ type CreateOrderContext = {
     dispatcherId?: number | null;
     customerUserId?: number | null;
 };
+type AssignDispatchOptions = {
+    updateOrderDispatcherId?: boolean;
+    writeOperatorLog?: boolean;
+};
 
 const ORDER_SOURCE_DEFAULTS = [
     { value: 'TUTU_PLATFORM', label: '突突平台', enabled: true },
@@ -249,6 +253,27 @@ export class OrdersService {
 
     private buildPlayerEvaluationKey(dispatchId: number, playerUserId: number) {
         return `${Number(dispatchId)}_${Number(playerUserId)}`;
+    }
+
+    private resolveInitialDispatcher(order: {
+        initialDispatcherId?: number | null;
+        dispatcherId?: number | null;
+        initialDispatcher?: { id?: number | null; name?: string | null; userType?: string | null } | null;
+        dispatcher?: { id?: number | null; name?: string | null; userType?: string | null } | null;
+    }) {
+        const initialDispatcherId = Number(order?.initialDispatcherId ?? 0) || null;
+        if (initialDispatcherId) {
+            return {
+                userId: initialDispatcherId,
+                user: order?.initialDispatcher || null,
+            };
+        }
+
+        const dispatcherId = Number(order?.dispatcherId ?? 0) || null;
+        return {
+            userId: dispatcherId,
+            user: order?.dispatcher || null,
+        };
     }
 
     private async applyPlayerEvaluationAdjustmentsToSettlements(params: {
@@ -1038,6 +1063,7 @@ export class OrdersService {
                 customerUserId,
 
                 dispatcherId,
+                initialDispatcherId: dispatcherId,
                 orderSource,
 
                 csRate: dto.csRate ?? defaultCsRate,
@@ -1112,7 +1138,10 @@ export class OrdersService {
 
         if (playerIds.length > 0) {
             // 复用现有派单逻辑（包含防重复、参与者写入、日志等）
-            await this.assignDispatch(order.id, playerIds, operatorId, 'AUTO_CREATE');
+            await this.assignDispatch(order.id, playerIds, operatorId, 'AUTO_CREATE', {
+                updateOrderDispatcherId: scene !== 'MINIAPP',
+                writeOperatorLog: scene !== 'MINIAPP',
+            });
             // 派单后返回完整详情（带 currentDispatch/participants）
             return this.getOrderDetail(order.id);
         }
@@ -1280,6 +1309,7 @@ export class OrdersService {
                 },
                 latestPayment: {
                     select: {
+                        channel: true,
                         amount: true,
                         status: true,
                     },
@@ -1595,7 +1625,7 @@ export class OrdersService {
      * 派单 / 重新派单（创建新的派单批次）
      *  ARCHIVED 状态也允许再次派单；派单后状态流转与新建订单一致（WAIT_ACCEPT）
      * -----------------------------*/
-    async assignDispatch(orderId: number, playerIds: number[], operatorId: number, remark?: string) {
+    async assignDispatch(orderId: number, playerIds: number[], operatorId: number, remark?: string, options?: AssignDispatchOptions) {
         if (!orderId) throw new BadRequestException('orderId 必填');
         if (!Array.isArray(playerIds)) throw new BadRequestException('playerIds 必须为数组');
         if (playerIds.length < 1 || playerIds.length > 2) throw new BadRequestException('playerIds 必须为 1~2 个');
@@ -1658,17 +1688,19 @@ export class OrdersService {
         });
 
         // 更新订单状态 + currentDispatch 指针（状态流转与新建订单一致）
+        const updateOrderDispatcherId = options?.updateOrderDispatcherId !== false;
+
         await this.prisma.order.update({
             where: {id: orderId},
             data: {
                 status: 'WAIT_ACCEPT' as any,
                 currentDispatchId: dispatch.id,
-                dispatcherId: operatorId || order.dispatcherId,
+                ...(updateOrderDispatcherId ? { dispatcherId: operatorId || order.dispatcherId } : {}),
             },
         });
 
         // 记录日志
-        if (operatorId) {
+        if (options?.writeOperatorLog !== false && operatorId) {
             await this.prisma.userLog.create({
                 data: {
                     userId: operatorId,
@@ -2276,7 +2308,7 @@ export class OrdersService {
         const staffLiable = Boolean(options?.staffLiable);
         const hasCompensation = Boolean(options?.hasCompensation);
 
-        const order = await this.prisma.order.findUnique({
+        const order: any = await this.prisma.order.findUnique({
             where: {id: orderId},
             include: {
                 dispatches: {
@@ -2298,10 +2330,22 @@ export class OrdersService {
         });
         if (!order) throw new NotFoundException('订单不存在');
 
-        // 已退款幂等
-        if (order.status === OrderStatus.REFUNDED) return this.getOrderDetail(orderId);
+        if (order.status === OrderStatus.REFUNDED) {
+            throw new BadRequestException('订单已退款，禁止重复退款');
+        }
+
+        const latestPaymentChannel = String((order as any)?.latestPayment?.channel || '').trim().toUpperCase();
+        const latestPaymentStatus = String((order as any)?.latestPayment?.status || '').trim().toUpperCase();
+        if (latestPaymentStatus !== OrderPayStatus.SUCCESS) {
+            throw new BadRequestException('订单未支付完成，无法退款');
+        }
 
         const shouldAutoRefund = this.shouldAutoRefundWithWechat(order as any);
+        const shouldRefundBalance = latestPaymentChannel === 'BALANCE';
+        if (!shouldAutoRefund && !shouldRefundBalance) {
+            throw new BadRequestException('当前支付渠道暂不支持自动退款，请联系客服处理');
+        }
+
         const latestPaymentAmountFen = this.toAmountFen(
             Number(
                 (order as any)?.latestPayment?.amount ??
@@ -2311,9 +2355,12 @@ export class OrdersService {
                 0,
             ),
         );
-        if (shouldAutoRefund && latestPaymentAmountFen <= 0) {
-            throw new BadRequestException('订单支付金额异常，无法发起微信退款');
+        if ((shouldAutoRefund || shouldRefundBalance) && latestPaymentAmountFen <= 0) {
+            throw new BadRequestException('订单支付金额异常，无法发起退款');
         }
+        const refundAmount = this.toAmount2(Number(latestPaymentAmountFen / 100));
+        const refundReason = remark ? String(remark).trim().slice(0, 80) : '订单退款';
+
         const autoRefundTrace = shouldAutoRefund
             ? await this.wechatPayService.refundTransaction({
                   outTradeNo: String((order as any)?.latestPayment?.paymentNo || '').trim(),
@@ -2321,18 +2368,18 @@ export class OrdersService {
                   outRefundNo: `REFUND-${orderId}-${Date.now()}`,
                   amountFen: latestPaymentAmountFen,
                   totalFen: latestPaymentAmountFen,
-                  reason: remark ? String(remark).trim().slice(0, 80) : '订单退款',
+                  reason: refundReason,
               })
             : null;
 
-        const settlementUserIds = Array.from(
+        const settlementUserIds: number[] = Array.from(
             new Set(
                 (order.settlements || [])
                     .map((x) => Number((x as any).userId))
                     .filter((n) => Number.isFinite(n) && n > 0),
             ),
         );
-        const participantUserIds = Array.from(
+        const participantUserIds: number[] = Array.from(
             new Set(
                 (order.dispatches || [])
                     .flatMap((d: any) => d?.participants || [])
@@ -2344,7 +2391,7 @@ export class OrdersService {
             ),
         );
         const defaultLiableUserIds = settlementUserIds.length ? settlementUserIds : participantUserIds;
-        const customLiableUserIds = Array.isArray(options?.liableUserIds)
+        const customLiableUserIds: number[] = Array.isArray(options?.liableUserIds)
             ? Array.from(
                 new Set(
                     options.liableUserIds
@@ -2395,6 +2442,23 @@ export class OrdersService {
         const penaltyWarnings: string[] = [];
 
         await this.prisma.$transaction(async (tx) => {
+            if (shouldRefundBalance) {
+                const customerUserId = Number((order as any)?.customerUserId || 0);
+                if (!customerUserId) {
+                    throw new BadRequestException('订单缺少付款用户，无法退款');
+                }
+                await this.wallet.creditAvailableBalance(
+                    {
+                        userId: customerUserId,
+                        amount: refundAmount,
+                        bizType: WalletBizType.REFUND_REVERSAL,
+                        sourceType: 'ORDER_REFUND',
+                        sourceId: orderId,
+                    },
+                    tx as any,
+                );
+            }
+
             // 1) 订单状态置 REFUNDED（要“结单状态并标记退款”：这里用 REFUNDED 即“已结单且已退款”）
             await tx.order.update({
                 where: {id: orderId},
@@ -2928,7 +2992,15 @@ export class OrdersService {
                 },
 
                 dispatcherId: true,
+                initialDispatcherId: true,
                 dispatcher: {
+                    select: {
+                        id: true,
+                        name: true,
+                        userType: true,
+                    },
+                },
+                initialDispatcher: {
                     select: {
                         id: true,
                         name: true,
@@ -5186,7 +5258,23 @@ export class OrdersService {
         // 1️⃣ 读取订单 & 派单（必须用 tx）
         const order = await tx.order.findUnique({
             where: {id: orderId},
-            include: {project: true},
+            include: {
+                project: true,
+                dispatcher: {
+                    select: {
+                        id: true,
+                        name: true,
+                        userType: true,
+                    },
+                },
+                initialDispatcher: {
+                    select: {
+                        id: true,
+                        name: true,
+                        userType: true,
+                    },
+                },
+            },
         });
         if (!order) throw new NotFoundException('订单不存在');
 
@@ -5641,16 +5729,23 @@ export class OrdersService {
         const orderTypeForCs: any = ((order as any).projectSnapshot as any)?.type ?? ((order as any).project as any)?.type;
         const isCsExcluded =
             orderTypeForCs === OrderType.EXPERIENCE || orderTypeForCs === (OrderType as any).LUCKY_BAG;
+        const initialDispatcher = this.resolveInitialDispatcher(order);
 
         // ===========================
-        if (!isCsExcluded && mode === 'COMPLETE' && CUSTOMER_SERVICE_SHARE_RATE > 0 && order.dispatcherId) {
+        if (
+            !isCsExcluded
+            && mode === 'COMPLETE'
+            && CUSTOMER_SERVICE_SHARE_RATE > 0
+            && initialDispatcher.userId
+            && String(initialDispatcher.user?.userType || '') === 'CUSTOMER_SERVICE'
+        ) {
             const csAmount = roundMix1(settlementBaseAmount * CUSTOMER_SERVICE_SHARE_RATE);
             if (csAmount > 0) {
                 const csFound = await tx.orderSettlement.findUnique({
                     where: {
                         dispatchId_userId_settlementType: {
                             dispatchId,
-                            userId: order.dispatcherId,
+                            userId: initialDispatcher.userId,
                             settlementType: 'CUSTOMER_SERVICE',
                         },
                     },
@@ -5665,7 +5760,7 @@ export class OrdersService {
                         data: {
                             orderId,
                             dispatchId,
-                            userId: order.dispatcherId,
+                            userId: initialDispatcher.userId,
                             settlementType: 'CUSTOMER_SERVICE',
                             settlementBatchId,
 
@@ -5700,7 +5795,7 @@ export class OrdersService {
                 if (allowWalletSync) {
                     await this.wallet.syncSettlementEarningByFinalEarnings(
                         {
-                            userId: order.dispatcherId,
+                            userId: initialDispatcher.userId,
                             finalEarnings: csFinal,
                             unlockAt,
                             sourceType: 'ORDER_SETTLEMENT',
@@ -5736,7 +5831,7 @@ export class OrdersService {
         // 8️⃣ 操作日志（记录关键追溯字段）
         // ===========================
         await this.logOrderAction(
-            order.dispatcherId,
+            initialDispatcher.userId || order.dispatcherId,
             orderId,
             mode === 'ARCHIVE' ? 'SETTLE_ARCHIVE' : 'SETTLE_COMPLETE',
             {
@@ -6687,7 +6782,15 @@ export class OrdersService {
                 // customerUserId: true,
                 projectSnapshot: true,
                 dispatcherId: true,
+                initialDispatcherId: true,
                 dispatcher: {
+                    select: {
+                        id: true,
+                        name: true,
+                        userType: true,
+                    },
+                },
+                initialDispatcher: {
                     select: {
                         id: true,
                         name: true,

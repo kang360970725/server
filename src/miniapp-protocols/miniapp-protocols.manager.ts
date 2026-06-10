@@ -246,8 +246,6 @@ const DEFAULT_PROTOCOL_SEEDS: ProtocolSeed[] = [
 ];
 
 const SEED_BY_KEY = new Map(DEFAULT_PROTOCOL_SEEDS.map((item) => [item.key, item]));
-const KEY_SET = new Set<string>(MINIAPP_PROTOCOL_KEYS as readonly string[]);
-
 function normalizeText(value: any) {
   return String(value || '').trim();
 }
@@ -318,8 +316,17 @@ function sortProtocols(list: MiniappProtocolItem[]) {
   });
 }
 
-function isProtocolKey(value: string): value is MiniappProtocolKey {
-  return KEY_SET.has(value);
+function isValidProtocolKey(value: string) {
+  return /^[a-zA-Z0-9_-]{1,64}$/.test(normalizeText(value));
+}
+
+function normalizeKeyList(input: string | string[]) {
+  const raw = Array.isArray(input) ? input : [input];
+  const list = raw
+    .flatMap((item) => String(item || '').split(','))
+    .map((item) => normalizeText(item))
+    .filter(Boolean);
+  return Array.from(new Set(list));
 }
 
 @Injectable()
@@ -331,6 +338,49 @@ export class MiniappProtocolsService implements OnModuleInit {
 
   async onModuleInit() {
     await this.ensureSeed();
+  }
+
+  private async listLegacyProtocols() {
+    const [legacy, categories] = await Promise.all([
+      this.systemConfigService.getJson<any[]>(
+        SystemConfigService.KEYS.MINIAPP_PROTOCOLS,
+        [],
+      ),
+      this.prisma.miniappProtocolCategory.findMany(),
+    ]);
+
+    const categoryByName = new Map(
+      categories.map((item) => [normalizeText(item.name), normalizeCategory(item)]),
+    );
+
+    return (Array.isArray(legacy) ? legacy : [])
+      .map((raw) => {
+        const key = normalizeText(raw?.key);
+        if (!key || !isValidProtocolKey(key)) return null;
+
+        const seed = SEED_BY_KEY.get(key);
+        const title = normalizeText(raw?.title || seed?.title);
+        const content = normalizeText(raw?.content || seed?.content);
+        const categoryName = normalizeText(raw?.categoryName || seed?.categoryName);
+        const category = categoryByName.get(categoryName) || null;
+        const enabled = raw?.enabled === undefined ? seed?.enabled !== false : raw?.enabled !== false;
+
+        if (!enabled || !title || !content) return null;
+
+        return {
+          id: 0,
+          categoryId: Number(category?.id || 0),
+          category,
+          key,
+          title,
+          coverImage: normalizeText(raw?.coverImage || seed?.coverImage) || undefined,
+          content,
+          enabled: true,
+          remark: normalizeText(raw?.remark || seed?.remark) || undefined,
+          sort: Number.isFinite(Number(raw?.sort)) ? Number(raw.sort) : Number(seed?.sort || 0),
+        } as MiniappProtocolItem;
+      })
+      .filter(Boolean) as MiniappProtocolItem[];
   }
 
   private async ensureSeed() {
@@ -366,7 +416,7 @@ export class MiniappProtocolsService implements OnModuleInit {
     const rows = source
       .map((raw) => {
         const key = normalizeText(raw?.key);
-        if (!key || !isProtocolKey(key)) return null;
+        if (!key || !isValidProtocolKey(key)) return null;
         const seed = SEED_BY_KEY.get(key);
         const categoryName = normalizeText(raw?.categoryName || seed?.categoryName);
         const categoryId = Number(categoryIdByName.get(categoryName) || fallbackCategoryId || 0);
@@ -493,16 +543,56 @@ export class MiniappProtocolsService implements OnModuleInit {
 
   async getByKey(key: string) {
     const targetKey = normalizeText(key);
-    if (!targetKey || !isProtocolKey(targetKey)) return null;
+    if (!targetKey || !isValidProtocolKey(targetKey)) return null;
 
     const row = await this.prisma.miniappProtocol.findUnique({
       where: { key: targetKey },
       include: { category: true },
     });
 
-    if (!row || !row.enabled || !row.category?.enabled) return null;
-    if (!normalizeText(row.content)) return null;
-    return normalizeProtocol(row);
+    if (row && row.enabled && normalizeText(row.content)) {
+      return normalizeProtocol(row);
+    }
+
+    const legacy = (await this.listLegacyProtocols()).find((item) => normalizeText(item.key) === targetKey) || null;
+    return legacy;
+  }
+
+  async listPublicByKeys(keys: string | string[]) {
+    const targetKeys = normalizeKeyList(keys).filter((item) => isValidProtocolKey(item));
+    if (!targetKeys.length) return [];
+
+    const rows = await this.prisma.miniappProtocol.findMany({
+      where: {
+        key: { in: targetKeys },
+        enabled: true,
+      },
+      include: { category: true },
+      orderBy: [{ sort: 'asc' }, { id: 'asc' }],
+    });
+
+    const protocolMap = new Map(
+      rows
+        .filter((row) => normalizeText(row.content))
+        .map((row) => [normalizeText(row.key), normalizeProtocol(row)]),
+    );
+
+    const missingKeys = targetKeys.filter((key) => !protocolMap.has(key));
+    if (missingKeys.length) {
+      const legacyMap = new Map(
+        (await this.listLegacyProtocols()).map((item) => [normalizeText(item.key), item]),
+      );
+      missingKeys.forEach((key) => {
+        const legacy = legacyMap.get(key);
+        if (legacy) {
+          protocolMap.set(key, legacy);
+        }
+      });
+    }
+
+    return targetKeys
+      .map((key) => protocolMap.get(key) || null)
+      .filter(Boolean) as MiniappProtocolItem[];
   }
 
   async listPublicByCategoryName(categoryName: string) {
@@ -548,8 +638,11 @@ export class MiniappProtocolsService implements OnModuleInit {
     const categoryId = Number(dto.categoryId || 0);
     const enabled = dto.enabled !== false;
 
-    if (!isProtocolKey(key)) {
-      throw new BadRequestException(`不支持的协议键：${key}`);
+    if (!isValidProtocolKey(key)) {
+      throw new BadRequestException('协议键仅支持字母、数字、下划线、中划线，长度不超过 64');
+    }
+    if (originalKey && !isValidProtocolKey(originalKey)) {
+      throw new BadRequestException('原协议键格式无效');
     }
     if (!title) throw new BadRequestException('协议标题不能为空');
     if (!content) throw new BadRequestException('协议内容不能为空');

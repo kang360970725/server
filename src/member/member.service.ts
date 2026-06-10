@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { MemberPointBizType, MemberPointDirection, Prisma, PrismaClient, WechatBindingPlatform } from '@prisma/client';
+import { MemberPointBizType, MemberPointDirection, Prisma, PrismaClient, UserType, WechatBindingPlatform } from '@prisma/client';
 import { createHash } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
@@ -945,6 +945,7 @@ export class MemberService {
       },
     });
     if (!user) throw new NotFoundException('用户不存在');
+    const shouldUpdateUserName = user.userType !== UserType.STAFF;
 
     let targetUserId = userId;
     const existingUser = phone && phone !== user.phone
@@ -976,7 +977,7 @@ export class MemberService {
       await tx.user.update({
         where: { id: userId },
         data: {
-          name: nickname || user.name,
+          ...(shouldUpdateUserName ? { name: nickname || user.name } : {}),
           avatar: avatarUrl || user.avatar,
           phone: phone || user.phone,
         },
@@ -1138,7 +1139,7 @@ export class MemberService {
         where: { id: targetUserId },
         data: {
           phone: phone || targetUser.phone,
-          name: nickname || targetUser.name || sourceUser.name,
+          ...(targetUser.userType !== UserType.STAFF ? { name: nickname || targetUser.name || sourceUser.name } : {}),
           avatar: avatarUrl || targetUser.avatar || sourceUser.avatar,
           lastLoginAt: new Date(),
         },

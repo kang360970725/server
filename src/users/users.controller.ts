@@ -22,6 +22,7 @@ import { UpdateWorkStatusDto } from './dto/update-work-status.dto';
 
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { Permissions } from '../auth/decorators/permissions.decorator';
+import { miniOk } from '../mini/mini.response';
 
 @Controller('users')
 @UseGuards(JwtAuthGuard)
@@ -131,8 +132,8 @@ export class UsersController {
 
   // ✅ 通用：派单/筛选陪玩下拉（避免被 users:page 误伤）
   @Post('players/options')
-  getPlayerOptions(@Body() body: any) {
-    return this.usersService.getPlayerOptions(body);
+  async getPlayerOptions(@Body() body: any) {
+    return miniOk(await this.usersService.getPlayerOptions(body));
   }
 
   @Patch('players/:id/work-mode')

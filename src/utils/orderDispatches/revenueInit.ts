@@ -57,6 +57,22 @@ const getSettlementBaseAmount = (order: any) => {
 
     return 0;
 };
+
+const getInitialDispatcherSnapshot = (order: any) => {
+    const initialDispatcherId = Number(order?.initialDispatcherId ?? 0) || null;
+    if (initialDispatcherId) {
+        return {
+            userId: initialDispatcherId,
+            user: order?.initialDispatcher || null,
+        };
+    }
+
+    const dispatcherId = Number(order?.dispatcherId ?? 0) || null;
+    return {
+        userId: dispatcherId,
+        user: order?.dispatcher || null,
+    };
+};
 export const calcBillableHours = (acceptedAt?: Date | null, endAt?: Date | null, deductMinutesValue?: number | null) => {
     if (!acceptedAt || !endAt) return 0;
     const diffMinutesRaw = Math.floor((+new Date(endAt) - +new Date(acceptedAt)) / 60000);
@@ -102,7 +118,8 @@ export const computeBillingHours = (order: any) => {
             ? order.projectSnapshot?.price
             : orderMeanPrice;
 
-    const includeCustomerServiceRate = order?.dispatcher?.userType === 'CUSTOMER_SERVICE';
+    const initialDispatcher = getInitialDispatcherSnapshot(order);
+    const includeCustomerServiceRate = String(initialDispatcher?.user?.userType || '') === 'CUSTOMER_SERVICE';
 
     for (const d of dispatches) {
         const active = sortSettlementParticipants(getSettlementParticipants(d));
@@ -142,14 +159,14 @@ export const computeBillingHours = (order: any) => {
             thisMoney = roundMix1(lastPaidAmount * 1);
 
             // ✅ 客服收益：只在最终结单轮生成
-            if (order?.dispatcher?.userType === 'CUSTOMER_SERVICE') {
+            if (String(initialDispatcher?.user?.userType || '') === 'CUSTOMER_SERVICE' && initialDispatcher.userId) {
                 const csMoney = roundMix1(orderPaidAmount * 0.01);
 
                 settlements.push({
                     orderId: order.id,
                     dispatchId: d.id,
-                    userId: order.dispatcherId,
-                    userName: order.dispatcher.name,
+                    userId: initialDispatcher.userId,
+                    userName: initialDispatcher.user?.name,
                     settlementType: 'CUSTOMER_SERVICE',
                     settlementBatchId: order.settlementBatchId,
                     calculatedEarnings: csMoney,
@@ -247,7 +264,8 @@ export const computeBillingGuaranteed = (order: any) => {
     const orderPaidAmount = settlementBaseAmount || 0;
 
     const orderRatio = lastPaidAmount > 0 ? Number(baseAmountWan) / lastPaidAmount : 0;
-    const includeCustomerServiceRate = order?.dispatcher?.userType === 'CUSTOMER_SERVICE';
+    const initialDispatcher = getInitialDispatcherSnapshot(order);
+    const includeCustomerServiceRate = String(initialDispatcher?.user?.userType || '') === 'CUSTOMER_SERVICE';
 
     for (const d of dispatches) {
         const active = sortSettlementParticipants(getSettlementParticipants(d));
@@ -259,14 +277,14 @@ export const computeBillingGuaranteed = (order: any) => {
 
         // ✅ 客服收益：只在最终结单轮生成
         if (d.status === DispatchStatus.COMPLETED) {
-            if (order?.dispatcher?.userType === 'CUSTOMER_SERVICE') {
+            if (String(initialDispatcher?.user?.userType || '') === 'CUSTOMER_SERVICE' && initialDispatcher.userId) {
                 const csMoney = roundMix1(orderPaidAmount * 0.01);
 
                 settlements.push({
                     orderId: order.id,
                     dispatchId: d.id,
-                    userId: order.dispatcherId,
-                    userName: order.dispatcher.name,
+                    userId: initialDispatcher.userId,
+                    userName: initialDispatcher.user?.name,
                     settlementType: 'CUSTOMER_SERVICE',
                     settlementBatchId: order.settlementBatchId,
                     calculatedEarnings: csMoney,
@@ -400,7 +418,8 @@ export const computeBillingMODEPLAY = (order: any, modePlayAllocList: any) => {
     );
 
     const orderPaidAmount = getSettlementBaseAmount(order);
-    const includeCustomerServiceRate = order?.dispatcher?.userType === 'CUSTOMER_SERVICE';
+    const initialDispatcher = getInitialDispatcherSnapshot(order);
+    const includeCustomerServiceRate = String(initialDispatcher?.user?.userType || '') === 'CUSTOMER_SERVICE';
 
     for (const d of dispatches) {
         const active = sortSettlementParticipants(getSettlementParticipants(d));
@@ -412,14 +431,14 @@ export const computeBillingMODEPLAY = (order: any, modePlayAllocList: any) => {
 
         // ✅ 客服收益：只在最终结单轮生成
         if (d.status === DispatchStatus.COMPLETED) {
-            if (order?.dispatcher?.userType === 'CUSTOMER_SERVICE') {
+            if (String(initialDispatcher?.user?.userType || '') === 'CUSTOMER_SERVICE' && initialDispatcher.userId) {
                 const csMoney = roundMix1(orderPaidAmount * 0.01);
 
                 settlements.push({
                     orderId: order.id,
                     dispatchId: d.id,
-                    userId: order.dispatcherId,
-                    userName: order.dispatcher.name,
+                    userId: initialDispatcher.userId,
+                    userName: initialDispatcher.user?.name,
                     settlementType: 'CUSTOMER_SERVICE',
                     settlementBatchId: order.settlementBatchId,
                     calculatedEarnings: csMoney,

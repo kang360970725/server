@@ -1,4 +1,4 @@
-import { IsBoolean, IsIn, IsInt, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import { IsBoolean, IsInt, IsOptional, IsString, Matches, MaxLength, Min } from 'class-validator';
 
 export const MINIAPP_PROTOCOL_KEYS = [
   'platform_user_service_agreement',
@@ -21,7 +21,7 @@ export const MINIAPP_PROTOCOL_KEYS = [
   'marketing_activity_cooperation_agreement',
 ] as const;
 
-export type MiniappProtocolKey = (typeof MINIAPP_PROTOCOL_KEYS)[number];
+export type MiniappProtocolKey = string;
 
 export class UpsertMiniappProtocolDto {
   @IsOptional()
@@ -35,8 +35,8 @@ export class UpsertMiniappProtocolDto {
   originalKey?: string;
 
   @IsString()
-  @IsIn(MINIAPP_PROTOCOL_KEYS)
   @MaxLength(64)
+  @Matches(/^[a-zA-Z0-9_-]+$/, { message: '协议键仅支持字母、数字、下划线、中划线' })
   key: string;
 
   @IsInt()
