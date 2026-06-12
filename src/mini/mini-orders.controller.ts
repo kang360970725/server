@@ -97,7 +97,7 @@ export class MiniOrdersController {
             create: {
               orderId,
               paymentNo: String(decrypted?.out_trade_no || ''),
-              channel: 'WECHAT',
+              channel: 'MINIAPP_WECHAT',
               status: 'SUCCESS',
               amount: paidFen > 0 ? Number((paidFen / 100).toFixed(2)) : 0,
               prepayId: String(decrypted?.prepay_id || ''),
@@ -563,7 +563,7 @@ export class MiniOrdersController {
           data: {
             orderId: id,
             paymentNo,
-            channel: 'WECHAT',
+            channel: 'MINIAPP_WECHAT',
             status: 'PENDING',
             amount: amountYuan,
             payerOpenid,
@@ -818,7 +818,8 @@ export class MiniOrdersController {
     });
 
     const channel = String(own?.latestPayment?.channel || '').trim().toUpperCase();
-    const manualRefundRequired = Boolean(own?.isPaid) && (!channel || (channel !== 'WECHAT' && channel !== 'BALANCE'));
+    const manualRefundRequired = Boolean(own?.isPaid)
+      && (!channel || (channel !== 'MINIAPP_WECHAT' && channel !== 'WECHAT' && channel !== 'BALANCE'));
     return miniOk(
       {
         success: true,

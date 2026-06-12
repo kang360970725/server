@@ -783,6 +783,7 @@ model Order {
   playerEvaluations      OrderPlayerEvaluation[]
   latestPayment          OrderPayment?           @relation("OrderLatestPayment", fields: [latestPaymentId], references: [id])
   payments               OrderPayment[]          @relation("OrderPayments")
+  refunds                OrderRefund[]
 
   @@index([projectId])
   @@index([dispatcherId])
@@ -799,7 +800,7 @@ model OrderPayment {
   id             Int            @id @default(autoincrement())
   orderId        Int
   paymentNo      String         @unique @db.VarChar(64)
-  channel        String         @db.VarChar(20) // WECHAT/BALANCE/MANUAL
+  channel        String         @db.VarChar(32) // MINIAPP_WECHAT/BALANCE/MANUAL_SHOUQIANBA/TUTU_PLATFORM/THIRD_PARTY_CHANNEL
   status         OrderPayStatus @default(PENDING)
   amount         Decimal        @db.Decimal(10, 2)
   currency       String         @default("CNY") @db.VarChar(8)
@@ -812,10 +813,36 @@ model OrderPayment {
   updatedAt      DateTime       @updatedAt
   order          Order          @relation("OrderPayments", fields: [orderId], references: [id], onDelete: Cascade)
   latestForOrder Order[]        @relation("OrderLatestPayment")
+  refunds        OrderRefund[]
 
   @@index([orderId, status, createdAt], map: "idx_order_payment_order_status_time")
   @@index([transactionId], map: "idx_order_payment_txn")
   @@map("order_payments")
+}
+
+model OrderRefund {
+  id              Int       @id @default(autoincrement())
+  orderId          Int
+  paymentId        Int?
+  refundNo         String    @unique @db.VarChar(64)
+  channel          String    @db.VarChar(32) // MINIAPP_WECHAT/BALANCE/MANUAL_SHOUQIANBA/TUTU_PLATFORM/THIRD_PARTY_CHANNEL
+  status           String    @db.VarChar(24) // SUCCESS/MANUAL_REQUIRED/FAILED
+  amount           Decimal   @db.Decimal(10, 2)
+  currency         String    @default("CNY") @db.VarChar(8)
+  reason           String?   @db.VarChar(128)
+  externalRefundId String?   @db.VarChar(128)
+  operatorId       Int?
+  raw              Json?
+  refundedAt       DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  order            Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  payment          OrderPayment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  @@index([orderId, createdAt], map: "idx_order_refunds_order_time")
+  @@index([paymentId], map: "idx_order_refunds_payment")
+  @@index([channel, status, refundedAt], map: "idx_order_refunds_channel_status_time")
+  @@map("order_refunds")
 }
 
 model ProductReview {
