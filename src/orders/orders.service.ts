@@ -787,6 +787,72 @@ export class OrdersService {
         return `${prefix}-${orderId}-${Date.now()}`;
     }
 
+    private async ensureLegacySuccessfulPaymentForRefund(order: any) {
+        const latestPaymentStatus = String(order?.latestPayment?.status || '').trim().toUpperCase();
+        if (latestPaymentStatus === OrderPayStatus.SUCCESS) {
+            return order;
+        }
+        if (!this.isOrderEffectivelyPaidOrGifted(order as any)) {
+            return order;
+        }
+
+        const paymentAmount = this.toAmount2(
+            Number(
+                order?.paidAmount ??
+                order?.finalPayableAmount ??
+                order?.receivableAmount ??
+                0,
+            ),
+        );
+        if (paymentAmount <= 0) {
+            return order;
+        }
+
+        const paymentChannel = this.resolvePaymentChannelByOrderSource(order?.orderSource);
+        const paidAt = order?.paymentTime
+            ? new Date(order.paymentTime)
+            : (order?.updatedAt ? new Date(order.updatedAt) : new Date());
+
+        const payment = await this.prisma.orderPayment.create({
+            data: {
+                orderId: Number(order.id),
+                paymentNo: this.buildOrderPaymentNo(String(paymentChannel), Number(order.id)),
+                channel: paymentChannel,
+                status: OrderPayStatus.SUCCESS,
+                amount: paymentAmount,
+                currency: 'CNY',
+                paidAt,
+            },
+            select: {
+                id: true,
+                channel: true,
+                status: true,
+                amount: true,
+                transactionId: true,
+                paymentNo: true,
+            },
+        });
+
+        await this.prisma.order.update({
+            where: { id: Number(order.id) },
+            data: {
+                latestPaymentId: payment.id,
+                paymentTime: order?.paymentTime ? new Date(order.paymentTime) : paidAt,
+                isPaid: true,
+                payStatus: OrderPayStatus.SUCCESS,
+            },
+        });
+
+        return {
+            ...order,
+            latestPayment: payment,
+            latestPaymentId: payment.id,
+            paymentTime: order?.paymentTime ? new Date(order.paymentTime) : paidAt,
+            isPaid: true,
+            payStatus: OrderPayStatus.SUCCESS,
+        };
+    }
+
     private shouldAutoRefundWithWechat(order: {
         orderSource?: string | null;
         latestPayment?: {
@@ -2389,19 +2455,20 @@ export class OrdersService {
             throw new BadRequestException('订单已退款，禁止重复退款');
         }
 
-        const latestPaymentChannel = String((order as any)?.latestPayment?.channel || '').trim().toUpperCase();
-        const latestPaymentStatus = String((order as any)?.latestPayment?.status || '').trim().toUpperCase();
+        const orderWithPayment = await this.ensureLegacySuccessfulPaymentForRefund(order);
+        const latestPaymentChannel = String((orderWithPayment as any)?.latestPayment?.channel || '').trim().toUpperCase();
+        const latestPaymentStatus = String((orderWithPayment as any)?.latestPayment?.status || '').trim().toUpperCase();
         if (latestPaymentStatus !== OrderPayStatus.SUCCESS) {
             throw new BadRequestException('订单未支付完成，无法退款');
         }
 
-        const shouldAutoRefund = this.shouldAutoRefundWithWechat(order as any);
+        const shouldAutoRefund = this.shouldAutoRefundWithWechat(orderWithPayment as any);
         const shouldRefundBalance = latestPaymentChannel === 'BALANCE';
         const manualRefundRequired = !shouldAutoRefund && !shouldRefundBalance;
 
         const latestPaymentAmountFen = this.toAmountFen(
             Number(
-                (order as any)?.latestPayment?.amount ??
+                (orderWithPayment as any)?.latestPayment?.amount ??
                 order.paidAmount ??
                 order.receivableAmount ??
                 order.finalPayableAmount ??
@@ -2417,8 +2484,8 @@ export class OrdersService {
 
         const autoRefundTrace = shouldAutoRefund
             ? await this.wechatPayService.refundTransaction({
-                  outTradeNo: String((order as any)?.latestPayment?.paymentNo || '').trim(),
-                  transactionId: String((order as any)?.latestPayment?.transactionId || '').trim() || undefined,
+                  outTradeNo: String((orderWithPayment as any)?.latestPayment?.paymentNo || '').trim(),
+                  transactionId: String((orderWithPayment as any)?.latestPayment?.transactionId || '').trim() || undefined,
                   outRefundNo: refundNo,
                   amountFen: latestPaymentAmountFen,
                   totalFen: latestPaymentAmountFen,
@@ -2499,9 +2566,9 @@ export class OrdersService {
             await tx.orderRefund.create({
                 data: {
                     orderId,
-                    paymentId: Number((order as any)?.latestPayment?.id || 0) || null,
+                    paymentId: Number((orderWithPayment as any)?.latestPayment?.id || 0) || null,
                     refundNo,
-                    channel: latestPaymentChannel || this.resolvePaymentChannelByOrderSource((order as any)?.orderSource),
+                    channel: latestPaymentChannel || this.resolvePaymentChannelByOrderSource((orderWithPayment as any)?.orderSource),
                     status: manualRefundRequired ? 'MANUAL_REQUIRED' : 'SUCCESS',
                     amount: refundAmount,
                     currency: 'CNY',
