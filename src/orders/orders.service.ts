@@ -1,5 +1,4 @@
 import {BadRequestException, ConflictException, Injectable, Logger, NotFoundException} from '@nestjs/common';
-import {Cron} from '@nestjs/schedule';
 import {PrismaService} from '../prisma/prisma.service';
 import {CreateOrderDto} from './dto/create-order.dto';
 import {AcceptDispatchDto} from './dto/accept-dispatch.dto';
@@ -751,7 +750,41 @@ export class OrdersService {
 
     private isAutoRefundSupportedChannel(channel?: string | null) {
         const c = String(channel || '').trim().toUpperCase();
-        return c === 'WECHAT' || c === 'BALANCE';
+        return c === 'MINIAPP_WECHAT' || c === 'WECHAT' || c === 'BALANCE';
+    }
+
+    private resolvePaymentChannelByOrderSource(orderSource?: string | null) {
+        const source = String(orderSource || '').trim().toUpperCase() || 'CUSTOMER_SERVICE_MANUAL';
+        if (source === 'MINIAPP_SELF_SERVICE') return 'MINIAPP_WECHAT';
+        if (source === 'CUSTOMER_SERVICE_MANUAL') return 'MANUAL_SHOUQIANBA';
+        if (source === 'TUTU_PLATFORM') return 'TUTU_PLATFORM';
+        if (source === 'THIRD_PARTY_TRANSFER' || source === 'OFFICIAL_ACCOUNT') return 'THIRD_PARTY_CHANNEL';
+        return 'MANUAL_SHOUQIANBA';
+    }
+
+    private buildOrderPaymentNo(channel: string, orderId: number) {
+        const prefixMap: Record<string, string> = {
+            MINIAPP_WECHAT: 'WXM',
+            BALANCE: 'BAL',
+            MANUAL_SHOUQIANBA: 'SQB',
+            TUTU_PLATFORM: 'TUT',
+            THIRD_PARTY_CHANNEL: 'THD',
+        };
+        const prefix = prefixMap[String(channel || '').trim().toUpperCase()] || 'PAY';
+        return `${prefix}-${orderId}-${Date.now()}`;
+    }
+
+    private buildRefundNo(channel: string, orderId: number) {
+        const prefixMap: Record<string, string> = {
+            MINIAPP_WECHAT: 'RWX',
+            WECHAT: 'RWX',
+            BALANCE: 'RBL',
+            MANUAL_SHOUQIANBA: 'RSQ',
+            TUTU_PLATFORM: 'RTU',
+            THIRD_PARTY_CHANNEL: 'RTP',
+        };
+        const prefix = prefixMap[String(channel || '').trim().toUpperCase()] || 'RFD';
+        return `${prefix}-${orderId}-${Date.now()}`;
     }
 
     private shouldAutoRefundWithWechat(order: {
@@ -768,7 +801,7 @@ export class OrdersService {
         if (orderSource !== 'MINIAPP_SELF_SERVICE') return false;
         const channel = String(order?.latestPayment?.channel || '').trim().toUpperCase();
         const status = String(order?.latestPayment?.status || '').trim().toUpperCase();
-        return channel === 'WECHAT' && status === OrderPayStatus.SUCCESS;
+        return (channel === 'MINIAPP_WECHAT' || channel === 'WECHAT') && status === OrderPayStatus.SUCCESS;
     }
 
     private getDefaultOrderSourceByScene(scene?: OrderCreateScene) {
@@ -989,6 +1022,12 @@ export class OrdersService {
             giftDiscountAmount,
             manualAdjustAmount,
         });
+        const paidAt = isGifted
+            ? null
+            : (isPaid
+                ? (dto.paymentTime ? new Date(dto.paymentTime) : new Date())
+                : (dto.paymentTime ? new Date(dto.paymentTime) : null));
+        const paymentChannel = isPaid ? this.resolvePaymentChannelByOrderSource(orderSource) : null;
         const discountDetails: Array<{
             sourceType: string;
             sourceId?: number;
@@ -1035,64 +1074,51 @@ export class OrdersService {
         const order = await this.prisma.$transaction(async (tx) => {
             const createdOrder = await tx.order.create({
                 data: {
-                orderQuantity: Number(dto.orderQuantity ?? 1),
-                autoSerial: serial,
-                // receivableAmount: dto.receivableAmount,
-                // paidAmount: dto.paidAmount,
-                // paymentTime: dto.paymentTime ? new Date(dto.paymentTime) : null,
-
-                // ✅ 赠送单不可强制清零金额，清零后结算会产生错误
-                receivableAmount: dto.receivableAmount,
-                paidAmount: dto.paidAmount,
-                settlementBaseAmount: effectiveSettlementAmount,
-
-                // ✅ 赠送单一般不应有付款时间（也可以按业务改成 now）
-                paymentTime: isGifted || isPaid ? null : (dto.paymentTime ? new Date(dto.paymentTime) : null),
-                isPaid,
-                payStatus: isPaid ? 'SUCCESS' : 'PENDING',
-
-                // orderTime: dto.orderTime ? new Date(dto.orderTime) : null,
-                orderTime: new Date(),
-                openedAt: new Date(),
-                baseAmountWan: dto.baseAmountWan ?? null,
-
-                projectId: project.id,
-                projectSnapshot: projectSnapshot as any,
-
-                customerGameId: dto.customerGameId ?? null,
-                customerUserId,
-
-                dispatcherId,
-                initialDispatcherId: dispatcherId,
-                orderSource,
-
-                csRate: dto.csRate ?? defaultCsRate,
-                inviteRate: dto.inviteRate ?? defaultInviteRate,
-                inviter: dto.inviter ?? null,
-
-                customClubRate: dto.customClubRate ?? null,
-                clubRate: clubRate ?? null,
-
-                // ✅ 落库赠送标识
-                isGifted,
-                giftedAmount,
-                originalAmount,
-                discountAmount,
-                couponDiscountAmount,
-                activityDiscountAmount,
-                giftDiscountAmount,
-                manualAdjustAmount,
-                finalPayableAmount,
-                marketingCostAmount: discountAmount,
-                discountType,
-                status: OrderStatus.WAIT_ASSIGN,
-                ...(discountDetails.length
-                    ? {
-                        discountDetails: {
-                            create: discountDetails,
-                        },
-                    }
-                    : {}),
+                    orderQuantity: Number(dto.orderQuantity ?? 1),
+                    autoSerial: serial,
+                    // ✅ 赠送单不可强制清零金额，清零后结算会产生错误
+                    receivableAmount: dto.receivableAmount,
+                    paidAmount: dto.paidAmount,
+                    settlementBaseAmount: effectiveSettlementAmount,
+                    paymentTime: paidAt,
+                    isPaid,
+                    payStatus: isPaid ? 'SUCCESS' : 'PENDING',
+                    // orderTime: dto.orderTime ? new Date(dto.orderTime) : null,
+                    orderTime: new Date(),
+                    openedAt: new Date(),
+                    baseAmountWan: dto.baseAmountWan ?? null,
+                    projectId: project.id,
+                    projectSnapshot: projectSnapshot as any,
+                    customerGameId: dto.customerGameId ?? null,
+                    customerUserId,
+                    dispatcherId,
+                    initialDispatcherId: dispatcherId,
+                    orderSource,
+                    csRate: dto.csRate ?? defaultCsRate,
+                    inviteRate: dto.inviteRate ?? defaultInviteRate,
+                    inviter: dto.inviter ?? null,
+                    customClubRate: dto.customClubRate ?? null,
+                    clubRate: clubRate ?? null,
+                    // ✅ 落库赠送标识
+                    isGifted,
+                    giftedAmount,
+                    originalAmount,
+                    discountAmount,
+                    couponDiscountAmount,
+                    activityDiscountAmount,
+                    giftDiscountAmount,
+                    manualAdjustAmount,
+                    finalPayableAmount,
+                    marketingCostAmount: discountAmount,
+                    discountType,
+                    status: OrderStatus.WAIT_ASSIGN,
+                    ...(discountDetails.length
+                        ? {
+                            discountDetails: {
+                                create: discountDetails,
+                            },
+                        }
+                        : {}),
                 },
                 include: {
                     project: true,
@@ -1100,6 +1126,34 @@ export class OrdersService {
                     discountDetails: true,
                 },
             } as any);
+
+            if (isPaid && !isGifted) {
+                const payment = await tx.orderPayment.create({
+                    data: {
+                        orderId: Number(createdOrder.id),
+                        paymentNo: this.buildOrderPaymentNo(String(paymentChannel), Number(createdOrder.id)),
+                        channel: String(paymentChannel),
+                        status: OrderPayStatus.SUCCESS,
+                        amount: Number(dto.paidAmount ?? 0),
+                        currency: 'CNY',
+                        paidAt: paidAt || new Date(),
+                    },
+                    select: { id: true },
+                });
+
+                await tx.order.update({
+                    where: { id: Number(createdOrder.id) },
+                    data: {
+                        latestPaymentId: payment.id,
+                        paymentTime: paidAt || new Date(),
+                        isPaid: true,
+                        payStatus: OrderPayStatus.SUCCESS,
+                    },
+                });
+
+                (createdOrder as any).latestPaymentId = payment.id;
+                (createdOrder as any).paymentTime = paidAt || new Date();
+            }
 
             if (selectedUserCoupon) {
                 const consumeResult = await tx.userCoupon.updateMany({
@@ -1129,6 +1183,7 @@ export class OrdersService {
             projectId: order.projectId,
             paidAmount: order.paidAmount,
             orderSource,
+            paymentChannel,
         });
 
         // ✅ 新建即派单：若传了 playerIds，则直接创建首轮派单并指派
@@ -2342,9 +2397,7 @@ export class OrdersService {
 
         const shouldAutoRefund = this.shouldAutoRefundWithWechat(order as any);
         const shouldRefundBalance = latestPaymentChannel === 'BALANCE';
-        if (!shouldAutoRefund && !shouldRefundBalance) {
-            throw new BadRequestException('当前支付渠道暂不支持自动退款，请联系客服处理');
-        }
+        const manualRefundRequired = !shouldAutoRefund && !shouldRefundBalance;
 
         const latestPaymentAmountFen = this.toAmountFen(
             Number(
@@ -2360,12 +2413,13 @@ export class OrdersService {
         }
         const refundAmount = this.toAmount2(Number(latestPaymentAmountFen / 100));
         const refundReason = remark ? String(remark).trim().slice(0, 80) : '订单退款';
+        const refundNo = this.buildRefundNo(latestPaymentChannel, orderId);
 
         const autoRefundTrace = shouldAutoRefund
             ? await this.wechatPayService.refundTransaction({
                   outTradeNo: String((order as any)?.latestPayment?.paymentNo || '').trim(),
                   transactionId: String((order as any)?.latestPayment?.transactionId || '').trim() || undefined,
-                  outRefundNo: `REFUND-${orderId}-${Date.now()}`,
+                  outRefundNo: refundNo,
                   amountFen: latestPaymentAmountFen,
                   totalFen: latestPaymentAmountFen,
                   reason: refundReason,
@@ -2442,6 +2496,23 @@ export class OrdersService {
         const penaltyWarnings: string[] = [];
 
         await this.prisma.$transaction(async (tx) => {
+            await tx.orderRefund.create({
+                data: {
+                    orderId,
+                    paymentId: Number((order as any)?.latestPayment?.id || 0) || null,
+                    refundNo,
+                    channel: latestPaymentChannel || this.resolvePaymentChannelByOrderSource((order as any)?.orderSource),
+                    status: manualRefundRequired ? 'MANUAL_REQUIRED' : 'SUCCESS',
+                    amount: refundAmount,
+                    currency: 'CNY',
+                    reason: refundReason,
+                    externalRefundId: String(autoRefundTrace?.refundId || '').trim() || null,
+                    operatorId,
+                    raw: autoRefundTrace ? (autoRefundTrace as any) : null,
+                    refundedAt: now,
+                },
+            });
+
             if (shouldRefundBalance) {
                 const customerUserId = Number((order as any)?.customerUserId || 0);
                 if (!customerUserId) {
@@ -2558,6 +2629,9 @@ export class OrdersService {
         await this.logOrderAction(operatorId, orderId, 'REFUND_ORDER', {
             remark: remark ?? null,
             autoRefundTriggered: shouldAutoRefund,
+            manualRefundRequired,
+            refundNo,
+            refundChannel: latestPaymentChannel || null,
             autoRefundResult: autoRefundTrace
                 ? {
                       refundId: autoRefundTrace.refundId,
@@ -2731,7 +2805,7 @@ export class OrdersService {
             data: {
                 orderId,
                 paymentNo: `MAN-${orderId}-${Date.now()}`,
-                channel: 'MANUAL',
+                channel: 'MANUAL_SHOUQIANBA',
                 status: OrderPayStatus.SUCCESS,
                 amount: paidAmount,
                 currency: 'CNY',
@@ -3984,96 +4058,6 @@ export class OrdersService {
                 throw err;
             }
         });
-    }
-
-    @Cron('0 */10 * * * *', { timeZone: 'Asia/Shanghai' })
-    async autoConfirmPendingOrders() {
-        const thresholdMs = 72 * 60 * 60 * 1000;
-        const now = Date.now();
-
-        const systemActor = await this.prisma.user.findFirst({
-            where: {
-                Role: {
-                    is: {
-                        name: 'FINANCE_ADMIN',
-                    },
-                },
-                status: 'ACTIVE',
-            },
-            orderBy: { id: 'asc' },
-            select: { id: true },
-        });
-
-        if (!systemActor?.id) {
-            this.logger.warn('[auto-confirm] 未找到可用财务管理员账号，跳过自动确认');
-            return { scanned: 0, confirmed: 0, skipped: 0 };
-        }
-
-        const pendingOrders = await this.prisma.order.findMany({
-            where: {
-                status: OrderStatus.COMPLETED_PENDING_CONFIRM,
-            },
-            orderBy: { updatedAt: 'asc' },
-            select: {
-                id: true,
-                isPaid: true,
-                isGifted: true,
-                payStatus: true,
-                updatedAt: true,
-                dispatches: {
-                    select: {
-                        completedAt: true,
-                    },
-                },
-            },
-        });
-
-        let confirmed = 0;
-        let skipped = 0;
-
-        for (const order of pendingOrders) {
-            if (!this.isOrderEffectivelyPaidOrGifted(order as any)) {
-                skipped++;
-                continue;
-            }
-
-            const anchorAt = this.getAutoConfirmAnchorAt(order as any);
-            if (!anchorAt) {
-                skipped++;
-                continue;
-            }
-
-            if (now - anchorAt.getTime() < thresholdMs) {
-                continue;
-            }
-
-            try {
-                this.logger.log(`[auto-confirm] start orderId=${order.id}, anchorAt=${anchorAt.toISOString()}`);
-                await this.confirmCompleteOrder(Number(order.id), systemActor.id, {
-                    remark: 'SYSTEM_AUTO_CONFIRM_72H',
-                    autoConfirm: true,
-                });
-                this.logger.log(`[auto-confirm] success orderId=${order.id}`);
-                confirmed++;
-            } catch (e: any) {
-                this.logger.error(
-                    `[auto-confirm] orderId=${order.id} 自动确认失败：${e?.message || e}`,
-                    e?.stack,
-                );
-            }
-        }
-
-        if (confirmed > 0 || skipped > 0) {
-            this.logger.log(
-                `[auto-confirm] scanned=${pendingOrders.length}, confirmed=${confirmed}, skipped=${skipped}`,
-            );
-        }
-
-        return {
-            scanned: pendingOrders.length,
-            confirmed,
-            skipped,
-        };
     }
 
     private buildEvaluationDateRange(scope?: string, startAt?: string, endAt?: string) {
