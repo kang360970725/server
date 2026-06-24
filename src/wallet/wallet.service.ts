@@ -14,6 +14,13 @@ import {QueryWalletHoldsDto} from "./dto/query-wallet-holds.dto";
 import {QueryWalletTransactionsDto} from "./dto/query-wallet-transactions.dto";
 import {roundMix1, toNum} from "../utils/money/format";
 import { tcbGetTempFileURL, tcbUploadFile } from '../common/cloudbase.storage';
+import {
+    buildWalletAccountDeltaData,
+    buildWalletAccountSetData,
+    normalizeWalletAccountBuckets,
+    round2Amount,
+    walletAccountBalanceSelect,
+} from './wallet-account-buckets.util';
 
 /**
  * WalletService（V0.1）
@@ -61,6 +68,267 @@ export class WalletService {
         return s;
     }
 
+    private getActiveWithdrawalStatuses() {
+        return ['PENDING_REVIEW', 'APPROVED', 'PAYING', 'FAILED'] as const;
+    }
+
+    async getWalletAccountBalance(userId: number, tx?: PrismaTx) {
+        const db = (tx as any) ?? this.prisma;
+        return db.walletAccount.findUnique({
+            where: { userId },
+            select: walletAccountBalanceSelect,
+        });
+    }
+
+    async applyWalletAccountDelta(
+        tx: PrismaTx,
+        userId: number,
+        input: {
+            availableDelta?: number;
+            earningFrozenDelta?: number;
+            withdrawFrozenDelta?: number;
+            depositDelta?: number;
+        },
+    ) {
+        await this.ensureWalletAccount(userId, tx);
+        const data = buildWalletAccountDeltaData(input);
+        if (!Object.keys(data).length) {
+            return this.getWalletAccountBalance(userId, tx);
+        }
+        return (tx as any).walletAccount.update({
+            where: { userId },
+            data,
+            select: walletAccountBalanceSelect,
+        });
+    }
+
+    private async inspectWalletAccountState(userId: number, tx?: PrismaTx) {
+        const db = (tx as any) ?? this.prisma;
+        await this.ensureWalletAccount(userId, db);
+
+        const [account, holdAgg, withdrawAgg, negativeAgg, pendingCount, user] = await Promise.all([
+            this.getWalletAccountBalance(userId, db),
+            db.walletHold.aggregate({
+                where: { userId, status: WalletHoldStatus.FROZEN },
+                _sum: { amount: true },
+                _count: true,
+            }),
+            db.walletWithdrawalRequest.aggregate({
+                where: {
+                    userId,
+                    status: { in: [...this.getActiveWithdrawalStatuses()] as any },
+                },
+                _sum: { amount: true },
+                _count: true,
+            }),
+            db.walletTransaction.aggregate({
+                where: { userId, frozenAfter: { lt: 0 } as any },
+                _count: true,
+                _min: { frozenAfter: true, createdAt: true },
+                _max: { createdAt: true },
+            }),
+            db.walletWithdrawalRequest.count({
+                where: {
+                    userId,
+                    status: { in: [...this.getActiveWithdrawalStatuses()] as any },
+                },
+            }),
+            db.user.findUnique({
+                where: { id: userId },
+                select: {
+                    id: true,
+                    phone: true,
+                    name: true,
+                    userType: true,
+                    status: true,
+                    canWithdraw: true,
+                },
+            }),
+        ]);
+
+        const normalized = normalizeWalletAccountBuckets(account);
+        const expectedEarningFrozen = round2Amount(holdAgg?._sum?.amount);
+        const expectedWithdrawFrozen = round2Amount(withdrawAgg?._sum?.amount);
+        const expectedFrozen = round2Amount(expectedEarningFrozen + expectedWithdrawFrozen);
+        const expectedAvailable = round2Amount(normalized.totalBalance - expectedFrozen);
+        const deficitAmount = expectedAvailable < 0 ? round2Amount(Math.abs(expectedAvailable)) : 0;
+        const availableGap = round2Amount(expectedAvailable - normalized.availableBalance);
+        const frozenGap = round2Amount(expectedFrozen - normalized.frozenBalance);
+        const earningFrozenGap = round2Amount(expectedEarningFrozen - normalized.earningFrozenBalance);
+        const withdrawFrozenGap = round2Amount(expectedWithdrawFrozen - normalized.withdrawFrozenBalance);
+        const bucketFrozenGap = round2Amount(expectedFrozen - normalized.bucketFrozenBalance);
+        const hasNegativeBalance =
+            normalized.availableBalance < 0 ||
+            normalized.frozenBalance < 0 ||
+            normalized.earningFrozenBalance < 0 ||
+            normalized.withdrawFrozenBalance < 0;
+        const hasIssue =
+            deficitAmount > 0 ||
+            hasNegativeBalance ||
+            Math.abs(availableGap) > 0.009 ||
+            Math.abs(frozenGap) > 0.009 ||
+            Math.abs(earningFrozenGap) > 0.009 ||
+            Math.abs(withdrawFrozenGap) > 0.009 ||
+            Math.abs(bucketFrozenGap) > 0.009;
+
+        return {
+            userId,
+            phone: user?.phone ?? null,
+            name: user?.name ?? null,
+            userType: user?.userType ?? null,
+            status: user?.status ?? null,
+            canWithdraw: user?.canWithdraw ?? null,
+            currentAvailable: normalized.availableBalance,
+            currentFrozen: normalized.frozenBalance,
+            currentEarningFrozen: normalized.earningFrozenBalance,
+            currentWithdrawFrozen: normalized.withdrawFrozenBalance,
+            currentBucketFrozen: normalized.bucketFrozenBalance,
+            currentTotal: normalized.totalBalance,
+            depositBalance: normalized.depositBalance,
+            expectedAvailable,
+            expectedFrozen,
+            expectedEarningFrozen,
+            expectedWithdrawFrozen,
+            holdFrozenAmount: expectedEarningFrozen,
+            pendingWithdrawAmount: expectedWithdrawFrozen,
+            availableGap,
+            frozenGap,
+            earningFrozenGap,
+            withdrawFrozenGap,
+            bucketFrozenGap,
+            deficitAmount,
+            pendingWithdrawCount: Number(pendingCount || 0),
+            negativeFrozenSnapshotCount: Number(negativeAgg?._count || 0),
+            firstNegativeAt: negativeAgg?._min?.createdAt ?? null,
+            lastNegativeAt: negativeAgg?._max?.createdAt ?? null,
+            minFrozenAfter: round2Amount(negativeAgg?._min?.frozenAfter),
+            hasNegativeBalance,
+            hasIssue,
+            safeToRepair: deficitAmount <= 0,
+        };
+    }
+
+    async ensureWalletAccountBucketsReady(userId: number, tx?: PrismaTx, options?: { throwOnDeficit?: boolean }) {
+        const db = (tx as any) ?? this.prisma;
+        const audit = await this.inspectWalletAccountState(userId, db);
+        if (!audit.hasIssue) {
+            return this.getWalletAccountBalance(userId, db);
+        }
+
+        if (audit.deficitAmount > 0) {
+            if (options?.throwOnDeficit !== false) {
+                throw new BadRequestException('钱包冻结余额存在缺口，请先执行钱包异常修复');
+            }
+            return this.getWalletAccountBalance(userId, db);
+        }
+
+        return (db as any).walletAccount.update({
+            where: { userId },
+            data: buildWalletAccountSetData({
+                availableBalance: audit.expectedAvailable,
+                earningFrozenBalance: audit.expectedEarningFrozen,
+                withdrawFrozenBalance: audit.expectedWithdrawFrozen,
+                depositBalance: audit.depositBalance,
+            }),
+            select: walletAccountBalanceSelect,
+        });
+    }
+
+    async auditWalletAnomalies(params?: { userId?: number; onlyIssues?: boolean; limit?: number }) {
+        const userId = Number(params?.userId || 0);
+        const limit = Math.min(1000, Math.max(1, Number(params?.limit || 200)));
+        const onlyIssues = params?.onlyIssues !== false;
+
+        const accounts = await this.prisma.walletAccount.findMany({
+            where: userId ? { userId } : undefined,
+            orderBy: { userId: 'asc' },
+            take: userId ? undefined : limit,
+            select: { userId: true },
+        });
+
+        const items: any[] = [];
+        for (const row of accounts) {
+            const audit = await this.inspectWalletAccountState(Number(row.userId), this.prisma as any);
+            if (!onlyIssues || audit.hasIssue) {
+                items.push(audit);
+            }
+        }
+
+        const summary = items.reduce(
+            (acc, item) => {
+                acc.totalUsers += 1;
+                if (item.deficitAmount > 0) acc.deficitUsers += 1;
+                if (item.negativeFrozenSnapshotCount > 0) acc.negativeSnapshotUsers += 1;
+                if (item.hasNegativeBalance) acc.negativeBalanceUsers += 1;
+                acc.totalDeficitAmount = round2Amount(acc.totalDeficitAmount + item.deficitAmount);
+                return acc;
+            },
+            {
+                totalUsers: 0,
+                deficitUsers: 0,
+                negativeSnapshotUsers: 0,
+                negativeBalanceUsers: 0,
+                totalDeficitAmount: 0,
+            },
+        );
+
+        return {
+            generatedAt: new Date().toISOString(),
+            onlyIssues,
+            scannedUsers: accounts.length,
+            returnedUsers: items.length,
+            summary,
+            items,
+        };
+    }
+
+    async repairWalletAnomalies(params?: { userId?: number; apply?: boolean; includeDeficitUsers?: boolean; limit?: number }) {
+        const apply = params?.apply === true;
+        const includeDeficitUsers = params?.includeDeficitUsers === true;
+        const audit = await this.auditWalletAnomalies({
+            userId: params?.userId,
+            onlyIssues: true,
+            limit: params?.limit,
+        });
+
+        const safeItems = audit.items.filter((item: any) => item.safeToRepair);
+        const blockedItems = audit.items.filter((item: any) => !item.safeToRepair);
+        const applied: any[] = [];
+
+        if (apply) {
+            for (const item of safeItems) {
+                const account = await this.prisma.walletAccount.update({
+                    where: { userId: Number(item.userId) },
+                    data: buildWalletAccountSetData({
+                        availableBalance: Number(item.expectedAvailable || 0),
+                        earningFrozenBalance: Number(item.expectedEarningFrozen || 0),
+                        withdrawFrozenBalance: Number(item.expectedWithdrawFrozen || 0),
+                        depositBalance: Number(item.depositBalance || 0),
+                    }),
+                    select: walletAccountBalanceSelect,
+                });
+
+                applied.push({
+                    userId: item.userId,
+                    phone: item.phone,
+                    name: item.name,
+                    account: normalizeWalletAccountBuckets(account),
+                });
+            }
+        }
+
+        return {
+            generatedAt: new Date().toISOString(),
+            apply,
+            repairedCount: applied.length,
+            safeRepairableCount: safeItems.length,
+            blockedCount: blockedItems.length,
+            blockedItems: includeDeficitUsers ? blockedItems : blockedItems.slice(0, 50),
+            appliedItems: applied,
+            previewItems: apply ? [] : safeItems,
+        };
+    }
+
     async ensureWalletAccount(userId: number, tx?: PrismaTx) {
         const db = (tx as any) ?? this.prisma;
 
@@ -95,7 +363,15 @@ export class WalletService {
             try {
                 const uid = this.generateWalletUid();
                 return await db.walletAccount.create({
-                    data: { userId, walletUid: uid },
+                    data: {
+                        userId,
+                        walletUid: uid,
+                        availableBalance: 0,
+                        frozenBalance: 0,
+                        earningFrozenBalance: 0,
+                        withdrawFrozenBalance: 0,
+                        depositBalance: 0,
+                    },
                 });
             } catch (e: any) {
                 if (e?.code === 'P2002') continue;
@@ -138,10 +414,7 @@ export class WalletService {
                 data: {
                     availableBalance: { increment: amount },
                 },
-                select: {
-                    availableBalance: true,
-                    frozenBalance: true,
-                },
+                select: walletAccountBalanceSelect,
             });
 
             return db.walletTransaction.create({
@@ -238,6 +511,7 @@ export class WalletService {
         const runner = async (t: PrismaTx) => {
             // 0) 兜底确保账户存在
             await this.ensureWalletAccount(params.userId, t as any);
+            await this.ensureWalletAccountBucketsReady(params.userId, t as any);
 
             // 1) upsert 收益流水（冻结）
             // ✅ 幂等：同一来源只会有一条收益流水
@@ -311,9 +585,8 @@ export class WalletService {
                 // 冻结单补建时，账户 frozenBalance 可能没加过，这里做一次兜底修正：
                 // - 只有当收益流水还是 FROZEN 时才补增 frozenBalance
                 if (earningTx.status === 'FROZEN') {
-                    await (t as any).walletAccount.update({
-                        where: { userId: params.userId },
-                        data: { frozenBalance: { increment: earningTx.amount } },
+                    await this.applyWalletAccountDelta(t as any, params.userId, {
+                        earningFrozenDelta: Number(earningTx.amount || 0),
                     });
                 }
 
@@ -354,14 +627,12 @@ export class WalletService {
                         // - 增加：increment
                         // - 减少：decrement
                         if (delta > 0) {
-                            await (t as any).walletAccount.update({
-                                where: { userId: params.userId },
-                                data: { frozenBalance: { increment: delta } },
+                            await this.applyWalletAccountDelta(t as any, params.userId, {
+                                earningFrozenDelta: delta,
                             });
                         } else if (delta < 0) {
-                            await (t as any).walletAccount.update({
-                                where: { userId: params.userId },
-                                data: { frozenBalance: { decrement: Math.abs(delta) } },
+                            await this.applyWalletAccountDelta(t as any, params.userId, {
+                                earningFrozenDelta: delta,
                             });
                         }
                     }
@@ -439,6 +710,8 @@ export class WalletService {
 
         const isNegative = expected < 0;
 
+        await this.ensureWalletAccountBucketsReady(userId, tx as any);
+
         // 1️⃣ 查现有流水（幂等锚点）
         const existing = await tx.walletTransaction.findUnique({
             where: { sourceType_sourceId: { sourceType, sourceId } },
@@ -456,7 +729,13 @@ export class WalletService {
                 await tx.walletAccount.upsert({
                     where: { userId },
                     update: { availableBalance: { increment: expected } } as any,
-                    create: { userId, availableBalance: expected, frozenBalance: 0 } as any,
+                    create: {
+                        userId,
+                        availableBalance: expected,
+                        frozenBalance: 0,
+                        earningFrozenBalance: 0,
+                        withdrawFrozenBalance: 0,
+                    } as any,
                 });
 
                 const walletAmount = Math.abs(expected);
@@ -482,8 +761,14 @@ export class WalletService {
             // 🔺 正数收益：冻结
             await tx.walletAccount.upsert({
                 where: { userId },
-                update: { frozenBalance: { increment: expected } } as any,
-                create: { userId, availableBalance: 0, frozenBalance: expected } as any,
+                update: buildWalletAccountDeltaData({ earningFrozenDelta: expected }) as any,
+                create: {
+                    userId,
+                    availableBalance: 0,
+                    frozenBalance: expected,
+                    earningFrozenBalance: expected,
+                    withdrawFrozenBalance: 0,
+                } as any,
             });
 
             const txRow = await tx.walletTransaction.create({
@@ -540,12 +825,9 @@ export class WalletService {
         const deltaAvail = newAvail - oldAvail;
 
         // 1️⃣ 调整账户余额（幂等核心）
-        await tx.walletAccount.update({
-            where: { userId },
-            data: {
-                frozenBalance: deltaFrozen ? ({ increment: deltaFrozen } as any) : undefined,
-                availableBalance: deltaAvail ? ({ increment: deltaAvail } as any) : undefined,
-            } as any,
+        await this.applyWalletAccountDelta(tx as any, userId, {
+            earningFrozenDelta: deltaFrozen,
+            availableDelta: deltaAvail,
         });
 
         // 2️⃣ 更新流水
@@ -634,6 +916,8 @@ export class WalletService {
         const newEffect = round1(toNum(expectedAmount ?? 0)); // ✅ 可正可负：对余额的最终效果
         if (!Number.isFinite(newEffect) || newEffect === 0) return;
 
+        await this.ensureWalletAccountBucketsReady(userId, tx as any);
+
         const isNegative = newEffect < 0;
         const newAbs = round1(Math.abs(newEffect)); // ✅ walletTx.amount 永远写正数
 
@@ -668,8 +952,14 @@ export class WalletService {
                 const account = await tx.walletAccount.upsert({
                     where: { userId },
                     update: { availableBalance: { increment: newEffect } } as any, // newEffect < 0
-                    create: { userId, availableBalance: newEffect, frozenBalance: 0 } as any,
-                    select: { availableBalance: true, frozenBalance: true },
+                    create: {
+                        userId,
+                        availableBalance: newEffect,
+                        frozenBalance: 0,
+                        earningFrozenBalance: 0,
+                        withdrawFrozenBalance: 0,
+                    } as any,
+                    select: walletAccountBalanceSelect,
                 });
 
                 await tx.walletTransaction.create({
@@ -697,9 +987,15 @@ export class WalletService {
             // 🔺 正数：冻结收益（FROZEN + IN），必须创建 hold
             const account = await tx.walletAccount.upsert({
                 where: { userId },
-                update: { frozenBalance: { increment: newEffect } } as any,
-                create: { userId, availableBalance: 0, frozenBalance: newEffect } as any,
-                select: { availableBalance: true, frozenBalance: true },
+                update: buildWalletAccountDeltaData({ earningFrozenDelta: newEffect }) as any,
+                create: {
+                    userId,
+                    availableBalance: 0,
+                    frozenBalance: newEffect,
+                    earningFrozenBalance: newEffect,
+                    withdrawFrozenBalance: 0,
+                } as any,
+                select: walletAccountBalanceSelect,
             });
 
             const txRow = await tx.walletTransaction.create({
@@ -794,16 +1090,18 @@ export class WalletService {
          */
         const account = await tx.walletAccount.upsert({
             where: { userId },
-            update: {
-                frozenBalance: deltaFrozen ? ({ increment: deltaFrozen } as any) : undefined,
-                availableBalance: deltaAvail ? ({ increment: deltaAvail } as any) : undefined,
-            } as any,
+            update: buildWalletAccountDeltaData({
+                earningFrozenDelta: deltaFrozen,
+                availableDelta: deltaAvail,
+            }) as any,
             create: {
                 userId,
                 availableBalance: deltaAvail,
                 frozenBalance: deltaFrozen,
+                earningFrozenBalance: deltaFrozen,
+                withdrawFrozenBalance: 0,
             } as any,
-            select: { availableBalance: true, frozenBalance: true },
+            select: walletAccountBalanceSelect,
         });
 
         /**
@@ -926,6 +1224,7 @@ export class WalletService {
 
                 // 确保账户存在
                 await this.ensureWalletAccount(earningTx.userId, t as any);
+                await this.ensureWalletAccountBucketsReady(earningTx.userId, t as any);
 
                 // 是否有冻结单
                 const hold = await t.walletHold.findUnique({
@@ -940,14 +1239,12 @@ export class WalletService {
                 if (earningTx.status === WalletTxStatus.FROZEN) {
                     // 1.1 回退 frozenBalance（方向反向）
                     if (isOut) {
-                        await t.walletAccount.update({
-                            where: { userId: earningTx.userId },
-                            data: { frozenBalance: { increment: amount } },
+                        await this.applyWalletAccountDelta(t as any, earningTx.userId, {
+                            earningFrozenDelta: amount,
                         });
                     } else {
-                        await t.walletAccount.update({
-                            where: { userId: earningTx.userId },
-                            data: { frozenBalance: { decrement: amount } },
+                        await this.applyWalletAccountDelta(t as any, earningTx.userId, {
+                            earningFrozenDelta: -amount,
                         });
                     }
 
@@ -1077,6 +1374,7 @@ export class WalletService {
                     if (!fresh || fresh.status !== 'FROZEN') return;
 
                     await this.ensureWalletAccount(hold.userId, tx as any);
+                    await this.ensureWalletAccountBucketsReady(hold.userId, tx as any);
 
                     const releaseSourceType = 'WALLET_HOLD_RELEASE';
 
@@ -1114,13 +1412,9 @@ export class WalletService {
                         });
 
                         // 2) 更新账户余额：frozen-- available++
-                        const accountAfter = await tx.walletAccount.update({
-                            where: { userId: hold.userId },
-                            data: {
-                                frozenBalance: { decrement: amount },
-                                availableBalance: { increment: amount },
-                            },
-                            select: { availableBalance: true, frozenBalance: true },
+                        const accountAfter = await this.applyWalletAccountDelta(tx as any, hold.userId, {
+                            earningFrozenDelta: -amount,
+                            availableDelta: amount,
                         });
 
                         // 3) ✅ 回写余额快照（本笔落账后的余额）
@@ -1188,19 +1482,11 @@ export class WalletService {
         if (!userId) throw new BadRequestException('无效的 userId');
 
         await this.ensureWalletAccount(userId, this.prisma as any);
+        await this.ensureWalletAccountBucketsReady(userId, this.prisma as any, { throwOnDeficit: false });
 
         return this.prisma.walletAccount.findUnique({
             where: { userId },
-            select: {
-                id: true,
-                userId: true,
-                walletUid: true,
-                availableBalance: true,
-                frozenBalance: true,
-                depositBalance: true,
-                createdAt: true,
-                updatedAt: true,
-            },
+            select: walletAccountBalanceSelect,
         });
     }
 
@@ -1769,35 +2055,10 @@ export class WalletService {
         }
 
         // 7) 同步账户汇总（按 delta 修正，保证一致）
-        // frozenBalance：按 deltaFrozen 增减
-        if (deltaFrozen !== 0) {
-            if (deltaFrozen > 0) {
-                await db.walletAccount.update({
-                    where: { userId: params.userId },
-                    data: { frozenBalance: { increment: deltaFrozen } },
-                });
-            } else {
-                await db.walletAccount.update({
-                    where: { userId: params.userId },
-                    data: { frozenBalance: { decrement: Math.abs(deltaFrozen) } },
-                });
-            }
-        }
-
-        // availableBalance：按 deltaAvail 增减（负数就是扣款）
-        if (deltaAvail !== 0) {
-            if (deltaAvail > 0) {
-                await db.walletAccount.update({
-                    where: { userId: params.userId },
-                    data: { availableBalance: { increment: deltaAvail } },
-                });
-            } else {
-                await db.walletAccount.update({
-                    where: { userId: params.userId },
-                    data: { availableBalance: { decrement: Math.abs(deltaAvail) } },
-                });
-            }
-        }
+        await this.applyWalletAccountDelta(db as any, params.userId, {
+            earningFrozenDelta: deltaFrozen,
+            availableDelta: deltaAvail,
+        });
 
         // 8) ✅ 写入余额快照（本笔落账后的余额）
         // - 必须在同一个事务里完成（db 可能是 tx）
@@ -1819,25 +2080,6 @@ export class WalletService {
         return { tx: earningTx };
     }
 
-    async getWalletStatistics() {
-
-        const result = await this.prisma.walletAccount.aggregate({
-            _sum: {
-                availableBalance: true,
-                frozenBalance: true,
-            }
-        });
-
-        const available = Number(result._sum.availableBalance ?? 0);
-        const frozen = Number(result._sum.frozenBalance ?? 0);
-
-        return {
-            totalAvailableBalance: available,
-            totalFrozenBalance: frozen,
-            totalBalance: Number((available + frozen).toFixed(2)),
-        };
-    }
-
     /**
      * 单用户钱包流水重放预核算（只读，不修改任何余额）
      * - 按 createdAt ASC, id ASC 重放
@@ -1850,6 +2092,7 @@ export class WalletService {
         startAt?: string;
         endAt?: string;
         limitMismatches?: number;
+        mode?: 'legacy' | 'full';
     }) {
         const userId = Number(params?.userId || 0);
         if (!userId) throw new BadRequestException('userId 必填');
@@ -1862,13 +2105,16 @@ export class WalletService {
         };
         const r2 = (n: any) => round2(toNum(n));
         const mismatchLimit = Math.min(500, Math.max(20, Number(params?.limitMismatches ?? 100)));
+        const replayMode = String(params?.mode || 'full').trim().toLowerCase() === 'legacy' ? 'legacy' : 'full';
 
-        const noBalanceBizSet = new Set<string>([
-            'WITHDRAW_PAYOUT',
-            'WITHDRAW_RESERVE',
-            'WITHDRAW_RELEASE',
-            'RELEASE_FROZEN',
-        ]);
+        const noBalanceBizSet = replayMode === 'legacy'
+            ? new Set<string>([
+                'WITHDRAW_PAYOUT',
+                'WITHDRAW_RESERVE',
+                'WITHDRAW_RELEASE',
+                'RELEASE_FROZEN',
+            ])
+            : new Set<string>();
         const settlementBizSet = new Set<string>([
             'SETTLEMENT_EARNING',
             'SETTLEMENT_EARNING_BASE',
@@ -1972,6 +2218,7 @@ export class WalletService {
         const ignoredBizBreakdown: Record<string, number> = {};
         const bizBreakdown: Record<string, number> = {};
         const mismatchRows: any[] = [];
+        const negativeRows: any[] = [];
         let replaySettlementTotal = 0;
         let historySettlementTotal = 0;
         let replayWithdrawalTotal = 0;
@@ -1990,7 +2237,26 @@ export class WalletService {
             replayAvailable = r2(replayAvailable + result.deltaAvailable);
             replayFrozen = r2(replayFrozen + result.deltaFrozen);
 
-            if (replayAvailable < 0 || replayFrozen < 0) negativeMoments++;
+            if (replayAvailable < 0 || replayFrozen < 0) {
+                negativeMoments++;
+                if (negativeRows.length < mismatchLimit) {
+                    negativeRows.push({
+                        id: row.id,
+                        createdAt: row.createdAt,
+                        bizType: row.bizType,
+                        status: row.status,
+                        direction: row.direction,
+                        amount: r2(row.amount),
+                        sourceType: row.sourceType,
+                        sourceId: row.sourceId,
+                        orderId: row.orderId,
+                        settlementId: row.settlementId,
+                        dispatchId: row.dispatchId,
+                        replayAvailableAfter: replayAvailable,
+                        replayFrozenAfter: replayFrozen,
+                    });
+                }
+            }
 
             // ===== 统计：结算收益（重放/历史）=====
             if (settlementBizSet.has(biz)) {
@@ -2014,8 +2280,9 @@ export class WalletService {
                 if (row.status !== 'REVERSED') {
                     historyWithdrawalTotal = r2(historyWithdrawalTotal + amt);
                 }
-                // 重放提现：当前策略下提现不影响余额，按 0 计（保留字段便于对比）
-                // replayWithdrawalTotal 保持不变
+                if (!(result as any).ignored) {
+                    replayWithdrawalTotal = r2(replayWithdrawalTotal + amt);
+                }
             }
 
             const sa = row.availableAfter === null || row.availableAfter === undefined ? null : r2(row.availableAfter);
@@ -2067,6 +2334,7 @@ export class WalletService {
 
         return {
             userId,
+            mode: replayMode,
             range: {
                 startAt: params?.startAt ?? null,
                 endAt: params?.endAt ?? null,
@@ -2113,6 +2381,7 @@ export class WalletService {
                 noBalanceBizTypes: Array.from(noBalanceBizSet),
             },
             mismatchRows,
+            negativeRows,
         };
     }
 
@@ -2354,25 +2623,17 @@ export class WalletService {
         let accountAfter: any;
 
         if (direction === 'OUT') {
-            accountAfter = await tx.walletAccount.update({
-                where: { userId },
-                data: { availableBalance: { decrement: amountAbs } },
-                select: { availableBalance: true, frozenBalance: true },
+            accountAfter = await this.applyWalletAccountDelta(tx as any, userId, {
+                availableDelta: -amountAbs,
+            });
+        } else if (shouldFreeze) {
+            accountAfter = await this.applyWalletAccountDelta(tx as any, userId, {
+                earningFrozenDelta: amountAbs,
             });
         } else {
-            if (shouldFreeze) {
-                accountAfter = await tx.walletAccount.update({
-                    where: { userId },
-                    data: { frozenBalance: { increment: amountAbs } },
-                    select: { availableBalance: true, frozenBalance: true },
-                });
-            } else {
-                accountAfter = await tx.walletAccount.update({
-                    where: { userId },
-                    data: { availableBalance: { increment: amountAbs } },
-                    select: { availableBalance: true, frozenBalance: true },
-                });
-            }
+            accountAfter = await this.applyWalletAccountDelta(tx as any, userId, {
+                availableDelta: amountAbs,
+            });
         }
 
         // 3) 回写余额快照到 earningTx（逻辑不动）
@@ -2536,32 +2797,10 @@ export class WalletService {
             return new Date(resolved as any);
         };
 
-        const applyAccountDelta = async (availableDelta: number, frozenDelta: number) => {
-            const data: any = {};
-            if (Math.abs(availableDelta) > 0) {
-                data.availableBalance =
-                    availableDelta > 0
-                        ? { increment: round2(availableDelta) }
-                        : { decrement: round2(Math.abs(availableDelta)) };
-            }
-            if (Math.abs(frozenDelta) > 0) {
-                data.frozenBalance =
-                    frozenDelta > 0
-                        ? { increment: round2(frozenDelta) }
-                        : { decrement: round2(Math.abs(frozenDelta)) };
-            }
-
-            if (!Object.keys(data).length) {
-                return tx.walletAccount.findUnique({
-                    where: { userId },
-                    select: { availableBalance: true, frozenBalance: true },
-                });
-            }
-
-            return tx.walletAccount.update({
-                where: { userId },
-                data,
-                select: { availableBalance: true, frozenBalance: true },
+        const applyAccountDelta = async (availableDelta: number, earningFrozenDelta: number) => {
+            return this.applyWalletAccountDelta(tx as any, userId, {
+                availableDelta,
+                earningFrozenDelta,
             });
         };
 

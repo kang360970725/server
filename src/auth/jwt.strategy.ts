@@ -1,7 +1,9 @@
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
+import { PlayerWorkStatus, StaffEmploymentStatus } from '@prisma/client';
+import { isDispatchMonitoredStaff } from '../common/utils/staff-role-scope.util';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -21,12 +23,70 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
+  private async autoFreezeDormantStaffIfNeeded(user: any) {
+    if (
+      String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN &&
+      !isDispatchMonitoredStaff(user)
+    ) {
+      await this.prisma.user.update({
+        where: { id: Number(user.id) },
+        data: {
+          staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
+          canWithdraw: true,
+        },
+      });
+      return {
+        ...user,
+        staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
+        canWithdraw: true,
+      };
+    }
+    if (!isDispatchMonitoredStaff(user)) return user;
+    if (String(user?.staffEmploymentStatus || StaffEmploymentStatus.ACTIVE) !== StaffEmploymentStatus.ACTIVE) return user;
+
+    const lastAccepted = await this.prisma.orderParticipant.findFirst({
+      where: {
+        userId: Number(user.id),
+        acceptedAt: { not: null },
+      },
+      orderBy: { acceptedAt: 'desc' },
+      select: { acceptedAt: true },
+    });
+
+    const baseDate = lastAccepted?.acceptedAt ? new Date(lastAccepted.acceptedAt) : (user?.createdAt ? new Date(user.createdAt) : null);
+    if (!baseDate) return user;
+
+    const freezeAt = new Date(baseDate);
+    freezeAt.setDate(freezeAt.getDate() + 7);
+    if (freezeAt.getTime() > Date.now()) return user;
+
+    await this.prisma.user.update({
+      where: { id: Number(user.id) },
+      data: {
+        staffEmploymentStatus: StaffEmploymentStatus.FROZEN,
+        canWithdraw: false,
+        workStatus: PlayerWorkStatus.IDLE,
+        workMode: 'OFFLINE' as any,
+        workOnlineExpiresAt: null,
+      },
+    });
+
+    return {
+      ...user,
+      staffEmploymentStatus: StaffEmploymentStatus.FROZEN,
+      canWithdraw: false,
+      workStatus: PlayerWorkStatus.IDLE,
+      workMode: 'OFFLINE',
+      workOnlineExpiresAt: null,
+    };
+  }
+
   async validate(payload: any) {
     const userId = Number(payload.sub);
     if (!userId) throw new UnauthorizedException('无效 token');
 
     // ✅ 这里挂 permissions（Permission.key）
-    const user = await this.prisma.user.findUnique({
+    let user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
       select: {
         id: true,
@@ -34,6 +94,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         status: true,
         roleId: true,
         userType: true,
+        createdAt: true,
+        staffEmploymentStatus: true,
         name: true,
         workStatus: true,
         offlineJoinedAt: true,
@@ -49,12 +111,16 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
 
     if (!user) throw new UnauthorizedException('用户不存在');
+    user = await this.autoFreezeDormantStaffIfNeeded(user);
+    if (!payload?.mini && isDispatchMonitoredStaff(user) && String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {
+      throw new ForbiddenException('账户已冻结，请联系管理员');
+    }
 
     const permissions = user.Role?.permissions?.map((p) => p.key) || [];
     const roleName = String(user.Role?.name || '').trim();
     const leaseNow = new Date();
     const leaseExpiresAt = user.workOnlineExpiresAt ? new Date(user.workOnlineExpiresAt) : null;
-    const isStaff = String(user.userType || '').toUpperCase() === 'STAFF';
+    const isStaff = isDispatchMonitoredStaff(user);
     const isOnline = String(user.workMode || '').toUpperCase() === 'ONLINE';
 
     if (isStaff && isOnline) {
@@ -118,6 +184,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       roleId: user.roleId,
       roleName,
       userType: user.userType,
+      staffEmploymentStatus: user.staffEmploymentStatus,
       workStatus: user.workStatus,
       offlineJoinedAt: user.offlineJoinedAt,
       workMode: user.workMode,

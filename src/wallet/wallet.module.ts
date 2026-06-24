@@ -7,6 +7,7 @@ import {WalletWithdrawalsController} from "./wallet-withdrawals.controller";
 import {WalletWithdrawalsService} from "./wallet-withdrawals.service";
 import { WalletDepositService } from './wallet.deposit.service';
 import { OfflineFeeModule } from '../offline-fee/offline-fee.module';
+import { SystemConfigModule } from '../system-config/system-config.module';
 
 /**
  * WalletModule（V0.1）
@@ -17,7 +18,7 @@ import { OfflineFeeModule } from '../offline-fee/offline-fee.module';
  * 这里沿用现有习惯，避免大范围重构。
  */
 @Module({
-    imports: [OfflineFeeModule],
+    imports: [OfflineFeeModule, SystemConfigModule],
     controllers: [
         WalletController,
         WalletWithdrawalsController, // ✅ 新增

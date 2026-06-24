@@ -12,6 +12,7 @@ import {
   Request,
 } from '@nestjs/common';
 import { UsersService } from './users.service';
+import { MemberService } from '../member/member.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { ChangeLevelDto } from './dto/change-level.dto';
@@ -19,6 +20,8 @@ import { ResetPasswordDto } from './dto/reset-password.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { UserType } from '@prisma/client';
 import { UpdateWorkStatusDto } from './dto/update-work-status.dto';
+import { StaffExitDto } from './dto/staff-exit.dto';
+import { StaffClearDto } from './dto/staff-clear.dto';
 
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { Permissions } from '../auth/decorators/permissions.decorator';
@@ -27,7 +30,10 @@ import { miniOk } from '../mini/mini.response';
 @Controller('users')
 @UseGuards(JwtAuthGuard)
 export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly memberService: MemberService,
+  ) {}
 
   private static readonly userManagePermissions = [
     'users:member:page',
@@ -51,6 +57,8 @@ export class UsersController {
       @Query('search') search?: string,
       @Query('userType') userType?: UserType,
       @Query('status') status?: string,
+      @Query('anonymousOnly') anonymousOnly?: string,
+      @Query('includeStaffMembers') includeStaffMembers?: string,
       @Query('loginInactiveDays') loginInactiveDays?: number,
       @Query('acceptInactiveDays') acceptInactiveDays?: number,
       @Query('scene') scene?: string,
@@ -62,6 +70,8 @@ export class UsersController {
       search,
       userType,
       status,
+      anonymousOnly,
+      includeStaffMembers,
       loginInactiveDays,
       acceptInactiveDays,
       scene,
@@ -69,11 +79,52 @@ export class UsersController {
     });
   }
 
+  @Get('staff/wallet-statistics')
+  @UseGuards(PermissionsGuard)
+  @Permissions(...UsersController.userManagePermissions)
+  getStaffWalletStatistics() {
+    return this.usersService.getStaffWalletStatistics();
+  }
+
   @Get(':id')
   @UseGuards(PermissionsGuard)
   @Permissions(...UsersController.userManagePermissions)
   findOne(@Param('id', ParseIntPipe) id: number, @Request() req) {
     return this.usersService.findOne(id, req.user);
+  }
+
+  @Get(':id/member-game-cards')
+  @UseGuards(PermissionsGuard)
+  @Permissions(...UsersController.userManagePermissions)
+  listMemberGameCards(@Param('id', ParseIntPipe) id: number) {
+    return this.memberService.listAdminGameCards(id);
+  }
+
+  @Post(':id/member-game-cards')
+  @UseGuards(PermissionsGuard)
+  @Permissions(...UsersController.userManagePermissions)
+  createMemberGameCard(@Param('id', ParseIntPipe) id: number, @Body() body: any) {
+    return this.memberService.createAdminGameCard(id, body || {});
+  }
+
+  @Post(':id/member-game-cards/:cardId/set-primary')
+  @UseGuards(PermissionsGuard)
+  @Permissions(...UsersController.userManagePermissions)
+  setMemberGameCardPrimary(
+      @Param('id', ParseIntPipe) id: number,
+      @Param('cardId', ParseIntPipe) cardId: number,
+  ) {
+    return this.memberService.setAdminGameCardPrimary(id, cardId);
+  }
+
+  @Delete(':id/member-game-cards/:cardId')
+  @UseGuards(PermissionsGuard)
+  @Permissions(...UsersController.userManagePermissions)
+  deleteMemberGameCard(
+      @Param('id', ParseIntPipe) id: number,
+      @Param('cardId', ParseIntPipe) cardId: number,
+  ) {
+    return this.memberService.deleteAdminGameCard(id, cardId);
   }
 
   @Patch(':id')
@@ -85,6 +136,49 @@ export class UsersController {
       @Request() req,
   ) {
     return this.usersService.update(id, updateUserDto, req.user.userId, req.user);
+  }
+
+  @Post(':id/withdraw-qr-code/reset')
+  @UseGuards(PermissionsGuard)
+  @Permissions(...UsersController.userManagePermissions)
+  resetWithdrawQrCode(
+      @Param('id', ParseIntPipe) id: number,
+      @Body() body: { remark?: string },
+      @Request() req,
+  ) {
+    return this.usersService.resetWithdrawQrCode(id, req.user.userId, req.user, body?.remark);
+  }
+
+  @Post(':id/staff-exit')
+  @UseGuards(PermissionsGuard)
+  @Permissions(...UsersController.userManagePermissions)
+  staffExit(
+      @Param('id', ParseIntPipe) id: number,
+      @Body() dto: StaffExitDto,
+      @Request() req,
+  ) {
+    return this.usersService.exitStaffShop(id, dto, req.user.userId, req.user);
+  }
+
+  @Post(':id/staff-exit-preview')
+  @UseGuards(PermissionsGuard)
+  @Permissions(...UsersController.userManagePermissions)
+  staffExitPreview(
+      @Param('id', ParseIntPipe) id: number,
+      @Request() req,
+  ) {
+    return this.usersService.getStaffExitPreview(id, req.user);
+  }
+
+  @Post(':id/staff-clear')
+  @UseGuards(PermissionsGuard)
+  @Permissions(...UsersController.userManagePermissions)
+  staffClear(
+      @Param('id', ParseIntPipe) id: number,
+      @Body() dto: StaffClearDto,
+      @Request() req,
+  ) {
+    return this.usersService.clearStaffAssets(id, dto, req.user.userId, req.user);
   }
 
   // 管理端用：获取可用评级（在用户管理页里常见）

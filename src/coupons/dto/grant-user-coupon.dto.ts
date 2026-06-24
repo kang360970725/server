@@ -1,9 +1,14 @@
-import { IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { IsArray, IsInt, IsOptional, IsString, Min } from 'class-validator';
 
 export class GrantUserCouponDto {
+  @IsOptional()
   @IsInt()
   @Min(1)
   userId: number;
+
+  @IsOptional()
+  @IsArray()
+  userIds?: number[];
 
   @IsInt()
   @Min(1)

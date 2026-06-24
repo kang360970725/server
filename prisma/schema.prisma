@@ -85,9 +85,13 @@ model User {
   withdrawQrCodeUploadedAt    DateTime?
   canWithdraw                 Boolean                    @default(true)
   depositLimit                Decimal                    @default(2000.00) @db.Decimal(10, 2)
+  staffTags                   Json?
   workMode                    StaffWorkMode              @default(ONLINE)
   offlineJoinedAt             DateTime?
   workOnlineExpiresAt         DateTime?
+  staffEmploymentStatus       StaffEmploymentStatus      @default(ACTIVE)
+  staffCooldownUntil          DateTime?
+  staffExitedAt               DateTime?
   dispatchedOrders            Order[]                    @relation("OrderDispatcher")
   initiallyDispatchedOrders   Order[]                    @relation("OrderInitialDispatcher")
   customerOrders              Order[]                    @relation("OrderCustomer")
@@ -129,11 +133,13 @@ model User {
   productReviews              ProductReview[]
   wechatBindings              UserWechatBinding[]
   memberProfile               MemberProfile?
+  memberGameCards             MemberGameCard[]
   memberPointAccount          MemberPointAccount?
   memberPointTransactions     MemberPointTransaction[]
   memberRechargeOrders        MemberRechargeOrder[]
 
   @@index([workStatus])
+  @@index([userType, staffEmploymentStatus])
   @@index([workMode, offlineJoinedAt])
   @@index([workMode, workOnlineExpiresAt])
   @@index([rating], map: "users_rating_fkey")
@@ -573,6 +579,24 @@ model MemberProfile {
   @@map("member_profiles")
 }
 
+model MemberGameCard {
+  id               Int      @id @default(autoincrement())
+  userId           Int
+  gameCategoryId   String   @db.VarChar(64)
+  gameCategoryName String   @db.VarChar(120)
+  gameUniqueId     String   @db.VarChar(64)
+  gameNickname     String?  @db.VarChar(64)
+  isPrimary        Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([gameCategoryId, gameUniqueId], map: "uniq_member_game_card_category_unique_id")
+  @@index([userId, gameCategoryId], map: "idx_member_game_card_user_category")
+  @@index([userId, isPrimary], map: "idx_member_game_card_user_primary")
+  @@map("member_game_cards")
+}
+
 model MemberLevelConfig {
   id                    Int      @id @default(autoincrement())
   code                  String   @unique @db.VarChar(32)
@@ -628,6 +652,8 @@ model MemberRechargePlan {
   amount         Decimal               @db.Decimal(10, 2)
   bonusAmount    Decimal               @default(0.00) @db.Decimal(10, 2)
   giftPoints     Int                   @default(0)
+  giftGrowthValue Int                  @default(0)
+  couponBenefits Json?
   couponText     String?               @db.VarChar(120)
   badgeText      String?               @db.VarChar(32)
   sortOrder      Int                   @default(100)
@@ -649,9 +675,13 @@ model MemberRechargeOrder {
   bonusAmount   Decimal                   @default(0.00) @db.Decimal(10, 2)
   grantedAmount Decimal                   @default(0.00) @db.Decimal(10, 2)
   giftPoints    Int                       @default(0)
+  giftGrowthValue Int                     @default(0)
+  couponBenefits Json?
   payAmount     Decimal                   @db.Decimal(10, 2)
   channel       String                    @default("WECHAT") @db.VarChar(20)
   status        MemberRechargeOrderStatus @default(PENDING)
+  operatorId    Int?
+  remark        String?                   @db.VarChar(255)
   payerOpenid   String?                   @db.VarChar(128)
   prepayId      String?                   @db.VarChar(128)
   transactionId String?                   @db.VarChar(128)
@@ -755,6 +785,7 @@ model Order {
   isPaid                 Boolean                 @default(false)
   /// 订单支付状态（与支付流水联动）
   payStatus              OrderPayStatus          @default(PENDING)
+  isTestPayment          Boolean                 @default(false)
   /// 订单优惠汇总（统一优惠口径）
   /// - originalAmount：优惠前基准金额（通常=应收）
   /// - discountAmount：总优惠（可由多来源叠加）
@@ -803,6 +834,7 @@ model OrderPayment {
   channel        String         @db.VarChar(32) // MINIAPP_WECHAT/BALANCE/MANUAL_SHOUQIANBA/TUTU_PLATFORM/THIRD_PARTY_CHANNEL
   status         OrderPayStatus @default(PENDING)
   amount         Decimal        @db.Decimal(10, 2)
+  isTestPayment  Boolean        @default(false)
   currency       String         @default("CNY") @db.VarChar(8)
   prepayId       String?        @db.VarChar(128)
   transactionId  String?        @db.VarChar(128)
@@ -843,6 +875,33 @@ model OrderRefund {
   @@index([paymentId], map: "idx_order_refunds_payment")
   @@index([channel, status, refundedAt], map: "idx_order_refunds_channel_status_time")
   @@map("order_refunds")
+}
+
+model ComplaintWorkOrder {
+  id                     Int      @id @default(autoincrement())
+  ticketNo               String   @unique @db.VarChar(64)
+  orderId                Int      @unique
+  userId                 Int
+  status                 String   @db.VarChar(32)
+  reason                 String   @db.VarChar(120)
+  description            String?  @db.Text
+  paymentChannel         String?  @db.VarChar(32)
+  refundSupported        Boolean  @default(false)
+  refundUnsupportedReason String? @db.VarChar(255)
+  suggestedRefundAmount  Decimal? @db.Decimal(10, 2)
+  approvedRefundAmount   Decimal? @db.Decimal(10, 2)
+  reviewRemark           String?  @db.VarChar(255)
+  refundRemark           String?  @db.VarChar(255)
+  reviewedBy             Int?
+  reviewedAt             DateTime?
+  refundedBy             Int?
+  refundedAt             DateTime?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@index([status, createdAt], map: "idx_complaint_work_orders_status_time")
+  @@index([userId, createdAt], map: "idx_complaint_work_orders_user_time")
+  @@map("complaint_work_orders")
 }
 
 model ProductReview {
@@ -1066,6 +1125,10 @@ model WalletAccount {
   availableBalance Decimal  @default(0.0) @db.Decimal(10, 1)
   /// 冻结余额（未到解冻时间）
   frozenBalance    Decimal  @default(0.0) @db.Decimal(10, 1)
+  /// 收益冻结余额（由 wallet_holds 驱动）
+  earningFrozenBalance Decimal @default(0.0) @db.Decimal(10, 1)
+  /// 提现冻结余额（由 wallet_withdrawal_requests 驱动）
+  withdrawFrozenBalance Decimal @default(0.0) @db.Decimal(10, 1)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
   /// 钱包UID：展示级唯一号（大写字母+数字混合），兼容老数据先允许为空
@@ -1233,6 +1296,13 @@ enum PlayerWorkStatus {
   WORKING
   /// 休息（不可派单）
   RESTING
+}
+
+enum StaffEmploymentStatus {
+  ACTIVE
+  FROZEN
+  EXITED
+  BLACKLISTED
 }
 
 enum RatingStatus {
@@ -1432,6 +1502,8 @@ enum WalletBizType {
   MEMBER_RECHARGE_BONUS
   MEMBER_ORDER_CONSUME
   MEMBER_RECHARGE_REFUND
+  STAFF_EXIT_RELEASE
+  STAFF_EXIT_CLEAR
 }
 
 enum WithdrawalStatus {
@@ -1474,6 +1546,8 @@ enum DepositBizType {
   PENALTY_DEDUCT
   /// 退还押金
   DEPOSIT_REFUND
+  STAFF_EXIT_RELEASE
+  STAFF_EXIT_CLEAR
 }
 
 enum MemberRechargeOrderStatus {

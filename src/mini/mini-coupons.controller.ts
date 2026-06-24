@@ -28,14 +28,29 @@ export class MiniCouponsController {
     const page = Math.max(1, Number(query?.page ?? 1));
     const limit = Math.min(50, Math.max(1, Number(query?.limit ?? 20)));
     const skip = (page - 1) * limit;
+    const now = new Date();
 
-    const where: any = { status: CouponTemplateStatus.ACTIVE };
+    const where: any = {
+      status: CouponTemplateStatus.ACTIVE,
+      OR: [
+        { startAt: null },
+        { startAt: { lte: now } },
+      ],
+      AND: [
+        {
+          OR: [
+            { endAt: null },
+            { endAt: { gte: now } },
+          ],
+        },
+      ],
+    };
     if (query?.type) where.type = query.type;
 
     const [list, total] = await Promise.all([
       this.prisma.couponTemplate.findMany({
         where,
-        orderBy: { id: 'desc' },
+        orderBy: [{ id: 'desc' }],
         skip,
         take: limit,
       }),
@@ -64,6 +79,16 @@ export class MiniCouponsController {
     const page = Math.max(1, Number(query?.page ?? 1));
     const limit = Math.min(50, Math.max(1, Number(query?.limit ?? 20)));
     const skip = (page - 1) * limit;
+    const now = new Date();
+
+    await this.prisma.userCoupon.updateMany({
+      where: {
+        userId,
+        status: UserCouponStatus.UNUSED,
+        expiresAt: { lt: now },
+      },
+      data: { status: UserCouponStatus.EXPIRED },
+    });
 
     const where: any = { userId };
     if (query?.status) where.status = query.status as UserCouponStatus;
@@ -102,11 +127,14 @@ export class MiniCouponsController {
     const template = await this.prisma.couponTemplate.findUnique({ where: { id: templateId } });
     if (!template) throw new BadRequestException('券模板不存在');
     if (template.status !== CouponTemplateStatus.ACTIVE) throw new BadRequestException('券模板未生效');
+    const now = new Date();
+    if (template.startAt && now < template.startAt) throw new BadRequestException('券模板尚未开始');
+    if (template.endAt && now > template.endAt) throw new BadRequestException('券模板已过期');
 
-    const exists = await this.prisma.userCoupon.count({
-      where: { userId, templateId, status: UserCouponStatus.UNUSED },
+    const claimedCount = await this.prisma.userCoupon.count({
+      where: { userId, templateId },
     });
-    if (template.perUserLimit && exists >= template.perUserLimit) {
+    if (template.perUserLimit && claimedCount >= template.perUserLimit) {
       throw new BadRequestException('超出每人领取上限');
     }
 
@@ -114,7 +142,6 @@ export class MiniCouponsController {
       throw new BadRequestException('已领完');
     }
 
-    const now = new Date();
     const data = await this.prisma.$transaction(async (tx) => {
       const coupon = await tx.userCoupon.create({
         data: {

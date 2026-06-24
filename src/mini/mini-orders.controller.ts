@@ -10,6 +10,7 @@ import { getWechatOrderNotifyUrlFromConfig } from './wechat-callback.util';
 import { SystemConfigService } from '../system-config/system-config.service';
 import { MemberService } from '../member/member.service';
 import { WalletService } from '../wallet/wallet.service';
+import { MiniSubscribeMessageService } from '../notifications/mini-subscribe-message.service';
 
 @ApiTags('mini-orders')
 @ApiBearerAuth()
@@ -22,6 +23,7 @@ export class MiniOrdersController {
     private readonly systemConfigService: SystemConfigService,
     private readonly memberService: MemberService,
     private readonly walletService: WalletService,
+    private readonly miniSubscribeMessageService: MiniSubscribeMessageService,
   ) {}
 
   private ownOrderWhere(uid: number, id?: number) {
@@ -71,19 +73,35 @@ export class MiniOrdersController {
     return `WX_${orderId}_${ts}_${suffix}`;
   }
 
+  private normalizeReviewLabel(score: number) {
+    if (score <= 2) return '差评';
+    if (score === 3) return '中评';
+    return '好评';
+  }
+
+  private normalizeReviewText(input: any) {
+    return String(input || '').trim();
+  }
+
   private async applyWechatPaymentSuccess(
     orderId: number,
     paymentRef: { id: number | null; orderId: number },
     decrypted: any,
   ) {
     const paidFen = Number(decrypted?.amount?.payer_total ?? 0);
-    return this.prisma.$transaction(async (tx) => {
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const currentOrder = await tx.order.findUnique({
+        where: { id: orderId },
+        select: { isTestPayment: true },
+      });
+      const isTestPayment = Boolean(currentOrder?.isTestPayment);
       const payment = paymentRef.id
         ? await tx.orderPayment.update({
             where: { id: paymentRef.id },
             data: {
               status: 'SUCCESS',
               amount: paidFen > 0 ? Number((paidFen / 100).toFixed(2)) : 0,
+              isTestPayment,
               prepayId: String(decrypted?.prepay_id || ''),
               transactionId: String(decrypted?.transaction_id || ''),
               payerOpenid: String(decrypted?.payer?.openid || ''),
@@ -100,6 +118,7 @@ export class MiniOrdersController {
               channel: 'MINIAPP_WECHAT',
               status: 'SUCCESS',
               amount: paidFen > 0 ? Number((paidFen / 100).toFixed(2)) : 0,
+              isTestPayment,
               prepayId: String(decrypted?.prepay_id || ''),
               transactionId: String(decrypted?.transaction_id || ''),
               payerOpenid: String(decrypted?.payer?.openid || ''),
@@ -109,6 +128,7 @@ export class MiniOrdersController {
             update: {
               status: 'SUCCESS',
               amount: paidFen > 0 ? Number((paidFen / 100).toFixed(2)) : 0,
+              isTestPayment,
               prepayId: String(decrypted?.prepay_id || ''),
               transactionId: String(decrypted?.transaction_id || ''),
               payerOpenid: String(decrypted?.payer?.openid || ''),
@@ -136,6 +156,10 @@ export class MiniOrdersController {
         },
       });
     });
+    try {
+      await this.miniSubscribeMessageService.pushOrderProgressMessage(orderId, '订单支付成功，请留意后续订单进度', '待派单');
+    } catch {}
+    return updated;
   }
 
   @Get()
@@ -194,6 +218,7 @@ export class MiniOrdersController {
           isPaid: true,
           receivableAmount: true,
           paidAmount: true,
+          projectSnapshot: true,
           createdAt: true,
           paymentTime: true,
           latestPayment: {
@@ -202,19 +227,83 @@ export class MiniOrdersController {
               status: true,
             },
           },
-          project: { select: { id: true, name: true } },
+          project: { select: { id: true, name: true, coverImage: true } },
+          dispatcher: {
+            select: { id: true, name: true, phone: true, avatar: true, userType: true },
+          },
+          currentDispatch: {
+            select: {
+              id: true,
+              status: true,
+              participants: {
+                where: { isActive: true },
+                orderBy: { id: 'asc' },
+                select: {
+                  id: true,
+                  user: {
+                    select: {
+                      id: true,
+                      name: true,
+                      phone: true,
+                      avatar: true,
+                      workStatus: true,
+                      userType: true,
+                      staffRating: {
+                        select: {
+                          id: true,
+                          name: true,
+                          rate: true,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
         },
       }),
       this.prisma.order.count({ where }),
     ]);
 
+    const normalizedList = (list || []).map((row: any) => {
+      const snapshotCoverImage = String(row?.projectSnapshot?.coverImage || '').trim();
+      const currentCoverImage = String(row?.project?.coverImage || '').trim();
+      return {
+        ...row,
+        project: row?.project
+          ? {
+              ...row.project,
+              coverImage: currentCoverImage || snapshotCoverImage || null,
+            }
+          : row?.project,
+      };
+    });
+
     return miniOk({
-      list,
+      list: normalizedList,
       total,
       page,
       limit,
       totalPages: Math.ceil(total / limit),
     });
+  }
+
+  @Get('subscribe-message/config')
+  @ApiOperation({ summary: '下单页订阅消息模板配置' })
+  async subscribeMessageConfig(@Query('scene') sceneRaw?: string) {
+    const scene = String(sceneRaw || 'ORDER_PLACE').trim().toUpperCase() as 'ORDER_PLACE' | 'AFTER_SALES_APPLY' | 'MARKETING_DETAIL';
+    return miniOk({
+      scene,
+      templates: await this.miniSubscribeMessageService.getTemplateOptionsByScene(scene),
+    });
+  }
+
+  @Post('subscribe-message/record')
+  @ApiOperation({ summary: '记录下单页订阅消息授权结果' })
+  async recordSubscribeMessage(@Req() req: any, @Body() body: any) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return miniOk(await this.miniSubscribeMessageService.recordSubscribeRequest(uid, body));
   }
 
   @Get(':id')
@@ -271,12 +360,14 @@ export class MiniOrdersController {
     const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
     await this.memberService.assertMiniPhoneBound(uid);
     const playerIds = await this.resolveMiniOrderPlayerIds(body);
+    const projectId = Number(body?.projectId);
+    const customerGameId = await this.memberService.assertMiniGameCardForOrder(uid, projectId, body?.customerGameId);
     const payload = {
-      projectId: Number(body?.projectId),
+      projectId,
       receivableAmount: Number(body?.receivableAmount ?? body?.paidAmount ?? 0),
       paidAmount: Number(body?.paidAmount ?? 0),
       orderQuantity: Number(body?.orderQuantity ?? 1),
-      customerGameId: body?.customerGameId ? String(body.customerGameId) : undefined,
+      customerGameId,
       inviter: body?.inviter ? String(body.inviter) : undefined,
       customClubRate: body?.customClubRate == null ? undefined : Number(body.customClubRate),
       isGifted: Boolean(body?.isGifted),
@@ -294,6 +385,13 @@ export class MiniOrdersController {
       dispatcherId: null,
       customerUserId: uid,
     });
+    try {
+      await this.miniSubscribeMessageService.pushOrderProgressMessage(
+        Number((order as any)?.id || 0),
+        '订单已创建，等待派单',
+        '待派单',
+      );
+    } catch {}
     return miniOk(order, '下单成功');
   }
 
@@ -342,6 +440,32 @@ export class MiniOrdersController {
     if (!own) throw new BadRequestException('订单不存在或无权限操作');
     const data = await this.ordersService.refundOrder(id, uid, body?.remark ? String(body.remark) : '用户重新申请退款');
     return miniOk(data, '退款处理成功');
+  }
+
+  @Post(':id/confirm-complete')
+  @ApiOperation({ summary: '确认结单（当前用户）' })
+  @ApiParam({ name: 'id', example: 1001 })
+  @ApiOkResponse({
+    schema: {
+      example: { code: 0, message: '确认结单成功', data: { success: true } },
+    },
+  })
+  async confirmComplete(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: any) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    const own = await this.prisma.order.findFirst({
+      where: this.ownOrderWhere(uid, id),
+      select: {
+        id: true,
+        status: true,
+        isPaid: true,
+        latestPayment: { select: { channel: true, status: true } },
+      },
+    });
+    if (!own) throw new BadRequestException('订单不存在或无权限操作');
+    const data = await this.ordersService.confirmCompleteOrder(id, uid, {
+      remark: body?.remark ? String(body.remark) : '用户确认结单',
+    });
+    return miniOk(data, '确认结单成功');
   }
 
   @Post(':id/pay-confirm')
@@ -489,6 +613,9 @@ export class MiniOrdersController {
         },
       });
     });
+    try {
+      await this.miniSubscribeMessageService.pushOrderProgressMessage(id, '订单支付成功，请留意后续订单进度', '待派单');
+    } catch {}
     return miniOk(data, '支付确认成功');
   }
 
@@ -502,6 +629,7 @@ export class MiniOrdersController {
         id: true,
         autoSerial: true,
         paidAmount: true,
+        isTestPayment: true,
         isPaid: true,
         status: true,
         project: { select: { name: true } },
@@ -511,6 +639,7 @@ export class MiniOrdersController {
             paymentNo: true,
             status: true,
             amount: true,
+            isTestPayment: true,
             payerOpenid: true,
             prepayId: true,
           },
@@ -536,7 +665,7 @@ export class MiniOrdersController {
     const latestPaymentFen = Math.max(1, Math.round(Number(latestPayment?.amount || 0) * 100));
     const totalFeeFen = isReusablePayment ? latestPaymentFen : orderAmountFen;
     const shouldUseTestAmount = isReusablePayment
-      ? latestPaymentFen !== orderAmountFen
+      ? Boolean(latestPayment?.isTestPayment || order?.isTestPayment)
       : (Boolean(body?.testMode) && await this.memberService.canUseMiniPaymentTestMode(uid));
     const prepay = await this.wechatPayService.createJsapiPrepay({
       orderNo: paymentNo,
@@ -554,6 +683,7 @@ export class MiniOrdersController {
           data: {
             status: 'PENDING',
             amount: amountYuan,
+            isTestPayment: shouldUseTestAmount,
             payerOpenid,
             prepayId: prepay?.mock ? String(prepay?.params?.package || '') : String(prepay?.params?.package || '').replace(/^prepay_id=/, ''),
           },
@@ -566,6 +696,7 @@ export class MiniOrdersController {
             channel: 'MINIAPP_WECHAT',
             status: 'PENDING',
             amount: amountYuan,
+            isTestPayment: shouldUseTestAmount,
             payerOpenid,
             prepayId: prepay?.mock ? String(prepay?.params?.package || '') : String(prepay?.params?.package || '').replace(/^prepay_id=/, ''),
           },
@@ -575,6 +706,7 @@ export class MiniOrdersController {
       where: { id },
       data: {
         payStatus: 'PENDING',
+        isTestPayment: shouldUseTestAmount,
         latestPaymentId: payment.id,
       },
     });
@@ -688,10 +820,31 @@ export class MiniOrdersController {
     schema: {
       type: 'object',
       properties: {
-        score: { type: 'number', example: 5 },
+        score: { type: 'number', example: 5, description: '商品与综合评价合并后的总评分' },
         tags: { type: 'array', items: { type: 'string' }, example: ['指挥专业', '沟通愉快'] },
-        content: { type: 'string', example: '服务专业，体验很好' },
+        content: { type: 'string', example: '商品符合预期，整体服务体验很好' },
         anonymous: { type: 'boolean', example: true },
+        playerReviews: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              userId: { type: 'number', example: 2001 },
+              userName: { type: 'string', example: '小奶猫选手' },
+              score: { type: 'number', example: 5 },
+              content: { type: 'string', example: '操作稳定，沟通顺畅' },
+            },
+          },
+        },
+        dispatcherReview: {
+          type: 'object',
+          properties: {
+            userId: { type: 'number', example: 10086 },
+            userName: { type: 'string', example: '派单客服A' },
+            score: { type: 'number', example: 5 },
+            content: { type: 'string', example: '响应及时，沟通清晰' },
+          },
+        },
       },
     },
   })
@@ -711,10 +864,33 @@ export class MiniOrdersController {
     const score = Number(body?.score ?? 5);
     if (!Number.isFinite(score) || score < 1 || score > 5) throw new BadRequestException('score 范围为 1-5');
 
+    const tags = Array.isArray(body?.tags) ? body.tags.map((item: any) => String(item || '').trim()).filter(Boolean) : [];
+    const content = this.normalizeReviewText(body?.content);
+    const anonymous = Boolean(body?.anonymous);
+    const playerReviewsRaw = Array.isArray(body?.playerReviews) ? body.playerReviews : [];
+    const dispatcherReviewRaw = body?.dispatcherReview && typeof body.dispatcherReview === 'object' ? body.dispatcherReview : null;
+
     await this.prisma.$transaction(async (tx) => {
       const order = await tx.order.findUnique({
         where: { id },
-        select: { id: true, projectId: true, dispatcherId: true },
+        select: {
+          id: true,
+          projectId: true,
+          dispatcherId: true,
+          dispatches: {
+            orderBy: [{ round: 'desc' }, { id: 'desc' }],
+            select: {
+              id: true,
+              round: true,
+              participants: {
+                select: {
+                  userId: true,
+                  acceptedAt: true,
+                },
+              },
+            },
+          },
+        },
       });
       if (!order) throw new BadRequestException('订单不存在');
 
@@ -722,13 +898,14 @@ export class MiniOrdersController {
         where: { id },
         data: { status: OrderStatus.REVIEWED },
       });
+
       await tx.productReview.upsert({
         where: { orderId: id },
         update: {
           score,
-          tags: Array.isArray(body?.tags) ? (body.tags as any) : [],
-          content: body?.content ? String(body.content) : '',
-          anonymous: Boolean(body?.anonymous),
+          tags: tags as any,
+          content,
+          anonymous,
           isHidden: false,
           hiddenReason: null,
           hiddenBy: null,
@@ -739,11 +916,79 @@ export class MiniOrdersController {
           orderId: id,
           userId: uid,
           score,
-          tags: Array.isArray(body?.tags) ? (body.tags as any) : [],
-          content: body?.content ? String(body.content) : '',
-          anonymous: Boolean(body?.anonymous),
+          tags: tags as any,
+          content,
+          anonymous,
         },
       });
+
+      const dispatchByPlayer = new Map<number, number>();
+      order.dispatches.forEach((dispatch) => {
+        dispatch.participants.forEach((participant) => {
+          const playerId = Number(participant.userId || 0);
+          if (!playerId || dispatchByPlayer.has(playerId)) return;
+          dispatchByPlayer.set(playerId, dispatch.id);
+        });
+      });
+
+      const normalizedPlayerReviews = playerReviewsRaw.map((item: any) => {
+        const playerUserId = Number(item?.userId || 0);
+        const itemScore = Number(item?.score ?? 5);
+        if (!playerUserId) throw new BadRequestException('playerReviews.userId 缺失');
+        if (!Number.isFinite(itemScore) || itemScore < 1 || itemScore > 5) {
+          throw new BadRequestException('playerReviews.score 范围为 1-5');
+        }
+        const dispatchId = Number(dispatchByPlayer.get(playerUserId) || 0);
+        if (!dispatchId) throw new BadRequestException(`陪玩师 ${playerUserId} 不属于该订单`);
+        return {
+          orderId: id,
+          dispatchId,
+          playerUserId,
+          evaluatorId: uid,
+          score: itemScore,
+          ratingLabel: this.normalizeReviewLabel(itemScore),
+          reviewRemark: this.normalizeReviewText(item?.content) || null,
+        };
+      });
+
+      if (normalizedPlayerReviews.length) {
+        await tx.orderPlayerEvaluation.deleteMany({
+          where: {
+            orderId: id,
+            playerUserId: { in: normalizedPlayerReviews.map((item) => item.playerUserId) },
+          },
+        });
+        await tx.orderPlayerEvaluation.createMany({
+          data: normalizedPlayerReviews as any,
+        });
+      }
+
+      if (dispatcherReviewRaw) {
+        const dispatcherScore = Number(dispatcherReviewRaw?.score ?? 5);
+        if (!Number.isFinite(dispatcherScore) || dispatcherScore < 1 || dispatcherScore > 5) {
+          throw new BadRequestException('dispatcherReview.score 范围为 1-5');
+        }
+        const dispatcherUserId = Number(dispatcherReviewRaw?.userId || order.dispatcherId || 0);
+        if (!dispatcherUserId) throw new BadRequestException('当前订单无可评价客服');
+        await tx.userLog.create({
+          data: {
+            userId: uid,
+            action: 'MINI_ORDER_DISPATCHER_REVIEW',
+            targetType: 'ORDER',
+            targetId: id,
+            newData: {
+              dispatcherUserId,
+              dispatcherUserName: this.normalizeReviewText(dispatcherReviewRaw?.userName),
+              score: dispatcherScore,
+              ratingLabel: this.normalizeReviewLabel(dispatcherScore),
+              content: this.normalizeReviewText(dispatcherReviewRaw?.content),
+              anonymous,
+            } as any,
+            remark: 'miniapp dispatcher review submit',
+          },
+        });
+      }
+
       await tx.userLog.create({
         data: {
           userId: uid,
@@ -752,16 +997,40 @@ export class MiniOrdersController {
           targetId: id,
           newData: {
             score,
-            tags: Array.isArray(body?.tags) ? body.tags : [],
-            content: body?.content ? String(body.content) : '',
-            anonymous: Boolean(body?.anonymous),
+            tags,
+            content,
+            anonymous,
+            playerReviews: normalizedPlayerReviews.map((item) => ({
+              playerUserId: item.playerUserId,
+              dispatchId: item.dispatchId,
+              score: item.score,
+              ratingLabel: item.ratingLabel,
+              reviewRemark: item.reviewRemark,
+            })),
+            dispatcherReview: dispatcherReviewRaw ? {
+              userId: Number(dispatcherReviewRaw?.userId || order.dispatcherId || 0),
+              userName: this.normalizeReviewText(dispatcherReviewRaw?.userName),
+              score: Number(dispatcherReviewRaw?.score ?? 5),
+              content: this.normalizeReviewText(dispatcherReviewRaw?.content),
+            } : null,
           } as any,
           remark: 'miniapp review submit',
         },
       });
     });
 
+    try {
+      await this.miniSubscribeMessageService.pushOrderProgressMessage(id, '订单已评价，感谢你的反馈', '已评价');
+    } catch {}
+
     return miniOk({ success: true, status: OrderStatus.REVIEWED }, '评价提交成功');
+  }
+
+  @Get(':id/after-sales')
+  @ApiOperation({ summary: '获取售后工单详情' })
+  async afterSalesDetail(@Req() req: any, @Param('id', ParseIntPipe) id: number) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return miniOk(await this.ordersService.getComplaintWorkOrderByOrderIdForMini(id, uid));
   }
 
   @Post(':id/after-sales')
@@ -784,50 +1053,10 @@ export class MiniOrdersController {
   })
   async afterSales(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: any) {
     const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
-    const own = await this.prisma.order.findFirst({
-      where: this.ownOrderWhere(uid, id),
-      select: {
-        id: true,
-        isPaid: true,
-        latestPayment: { select: { channel: true, status: true } },
-      },
-    });
-    if (!own) throw new BadRequestException('订单不存在或无权限操作');
-
-    const reason = body?.reason ? String(body.reason).trim() : '';
-    if (!reason) throw new BadRequestException('reason 必填');
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.order.update({
-        where: { id },
-        data: { status: OrderStatus.WAIT_AFTERSALE },
-      });
-      await tx.userLog.create({
-        data: {
-          userId: uid,
-          action: 'MINI_ORDER_AFTER_SALES',
-          targetType: 'ORDER',
-          targetId: id,
-          newData: {
-            reason,
-            description: body?.description ? String(body.description) : '',
-          } as any,
-          remark: 'miniapp after-sales submit',
-        },
-      });
-    });
-
-    const channel = String(own?.latestPayment?.channel || '').trim().toUpperCase();
-    const manualRefundRequired = Boolean(own?.isPaid)
-      && (!channel || (channel !== 'MINIAPP_WECHAT' && channel !== 'WECHAT' && channel !== 'BALANCE'));
+    const data = await this.ordersService.submitComplaintWorkOrderFromMini(id, uid, body || {});
     return miniOk(
-      {
-        success: true,
-        status: OrderStatus.WAIT_AFTERSALE,
-        manualRefundRequired,
-        refundHint: manualRefundRequired ? '支付渠道不正确，需要人工手动退款' : null,
-      },
-      manualRefundRequired ? '售后申请已提交（该订单需人工退款处理）' : '售后申请已提交',
+      data,
+      data?.manualRefundRequired ? '售后申请已提交（当前支付渠道不支持售后退款）' : '售后申请已提交',
     );
   }
 }

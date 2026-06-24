@@ -117,4 +117,52 @@ export class UserLogsService {
         if (!log) throw new BadRequestException('日志不存在');
         return log;
     }
+
+    async pruneExpiredLogs(params?: {
+        retentionDays?: number;
+        batchSize?: number;
+        maxBatches?: number;
+    }) {
+        const retentionDays = Math.max(1, Number(params?.retentionDays || 45));
+        const batchSize = Math.max(100, Math.min(20000, Number(params?.batchSize || 5000)));
+        const maxBatches = Math.max(1, Math.min(1000, Number(params?.maxBatches || 20)));
+
+        const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+
+        let totalDeleted = 0;
+        let batches = 0;
+
+        while (batches < maxBatches) {
+            const rows = await this.prisma.userLog.findMany({
+                where: { createdAt: { lt: cutoff } },
+                orderBy: [{ id: 'asc' }],
+                take: batchSize,
+                select: { id: true },
+            });
+
+            if (!rows.length) break;
+
+            const ids = rows.map((item) => Number(item.id)).filter((id) => id > 0);
+            if (!ids.length) break;
+
+            const result = await this.prisma.userLog.deleteMany({
+                where: { id: { in: ids } },
+            });
+
+            totalDeleted += Number(result.count || 0);
+            batches += 1;
+
+            if (rows.length < batchSize) break;
+        }
+
+        return {
+            retentionDays,
+            batchSize,
+            maxBatches,
+            cutoff: cutoff.toISOString(),
+            batches,
+            totalDeleted,
+            hasMore: batches >= maxBatches,
+        };
+    }
 }

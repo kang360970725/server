@@ -3,15 +3,15 @@ import {
   UnauthorizedException,
   ConflictException,
   BadRequestException,
-  ForbiddenException
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import type { StringValue } from 'ms';
 import { PrismaService } from '../prisma.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
-import { UserStatus } from '@prisma/client';
+import { PlayerWorkStatus, StaffEmploymentStatus, UserStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
+import { isDispatchMonitoredStaff } from '../common/utils/staff-role-scope.util';
 
 @Injectable()
 export class AuthService {
@@ -23,9 +23,18 @@ export class AuthService {
       private jwtService: JwtService,
   ) {}
 
+  private buildLoginFailure(code: string, message: string) {
+    return {
+      success: false,
+      code,
+      message,
+    };
+  }
+
   private signAccessToken(
     user: { id?: number; userId?: number; phone?: string; name?: string },
     expiresIn: StringValue | number = AuthService.DEFAULT_ACCESS_TOKEN_EXPIRES_IN as StringValue,
+    options?: { mini?: boolean },
   ) {
     const uid = Number(user?.id || user?.userId || 0);
     if (!uid) throw new UnauthorizedException('无效用户');
@@ -33,8 +42,67 @@ export class AuthService {
       phone: String(user?.phone || '').trim(),
       sub: uid,
       name: String(user?.name || '').trim(),
+      mini: Boolean(options?.mini),
     };
     return this.jwtService.sign(payload, { expiresIn });
+  }
+
+  private async autoFreezeDormantStaffIfNeeded(user: any) {
+    if (
+      String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN &&
+      !isDispatchMonitoredStaff(user)
+    ) {
+      await this.prisma.user.update({
+        where: { id: Number(user.id) },
+        data: {
+          staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
+          canWithdraw: true,
+        },
+      });
+      return {
+        ...user,
+        staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
+        canWithdraw: true,
+      };
+    }
+    if (!isDispatchMonitoredStaff(user)) return user;
+    if (String(user?.staffEmploymentStatus || StaffEmploymentStatus.ACTIVE) !== StaffEmploymentStatus.ACTIVE) return user;
+
+    const lastAccepted = await this.prisma.orderParticipant.findFirst({
+      where: {
+        userId: Number(user.id),
+        acceptedAt: { not: null },
+      },
+      orderBy: { acceptedAt: 'desc' },
+      select: { acceptedAt: true },
+    });
+
+    const baseDate = lastAccepted?.acceptedAt ? new Date(lastAccepted.acceptedAt) : (user?.createdAt ? new Date(user.createdAt) : null);
+    if (!baseDate) return user;
+
+    const freezeAt = new Date(baseDate);
+    freezeAt.setDate(freezeAt.getDate() + 7);
+    if (freezeAt.getTime() > Date.now()) return user;
+
+    await this.prisma.user.update({
+      where: { id: Number(user.id) },
+      data: {
+        staffEmploymentStatus: StaffEmploymentStatus.FROZEN,
+        canWithdraw: false,
+        workStatus: PlayerWorkStatus.IDLE,
+        workMode: 'OFFLINE' as any,
+        workOnlineExpiresAt: null,
+      },
+    });
+
+    return {
+      ...user,
+      staffEmploymentStatus: StaffEmploymentStatus.FROZEN,
+      canWithdraw: false,
+      workStatus: PlayerWorkStatus.IDLE,
+      workMode: 'OFFLINE',
+      workOnlineExpiresAt: null,
+    };
   }
 
   private buildMiniProfileCompletion(user: any) {
@@ -110,35 +178,40 @@ export class AuthService {
     };
   }
 
-  async login(loginDto: LoginDto) {
+  async login(loginDto: LoginDto, options?: { mini?: boolean }) {
     const { phone, password } = loginDto;
 
-    const user = await this.prisma.user.findUnique({
+    let user: any = await this.prisma.user.findUnique({
       where: { phone },
+      include: {
+        Role: {
+          select: {
+            name: true,
+          },
+        },
+      },
     });
 
     // ✅ 账号不存在：返回 200 + success=false（不抛 401）
     if (!user) {
-      return {
-        success: false,
-        message: '手机号或密码错误',
-      };
+      return this.buildLoginFailure('INVALID_CREDENTIALS', '手机号或密码错误');
     }
 
     // ✅ 密码错误：同样返回 200 + success=false
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
-      return {
-        success: false,
-        message: '手机号或密码错误',
-      };
+      return this.buildLoginFailure('INVALID_CREDENTIALS', '手机号或密码错误');
     }
 // 查到 user 之后，校验密码之前或之后都可以
     if (user.status === UserStatus.DISABLED) {
-      throw new ForbiddenException('账号已禁用，禁止登录');
+      return this.buildLoginFailure('ACCOUNT_DISABLED', '账号已禁用，请联系管理员');
+    }
+    user = await this.autoFreezeDormantStaffIfNeeded(user);
+    if (!options?.mini && isDispatchMonitoredStaff(user) && String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {
+      return this.buildLoginFailure('ACCOUNT_FROZEN', '账户已冻结，请联系管理员');
     }
     // ✅ 登录成功
-    const isStaff = String(user.userType || '').toUpperCase() === 'STAFF';
+    const isStaff = isDispatchMonitoredStaff(user);
     if (isStaff) {
       const leaseExpiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
       await this.prisma.user.update({
@@ -162,10 +235,10 @@ export class AuthService {
         },
       });
     }
-    const access_token = this.signAccessToken(user);
+    const access_token = this.signAccessToken(user, AuthService.DEFAULT_ACCESS_TOKEN_EXPIRES_IN as StringValue, options);
 
     // 返回用户信息（不包含密码）
-    const { password: _, ...userWithoutPassword } = user;
+    const { password: _, Role: __, ...userWithoutPassword } = user;
 
     return {
       success: true,
@@ -283,6 +356,7 @@ export class AuthService {
     const access_token = this.signAccessToken(
       user,
       mini ? AuthService.MINI_ACCESS_TOKEN_EXPIRES_IN : AuthService.DEFAULT_ACCESS_TOKEN_EXPIRES_IN,
+      options,
     );
     return {
       access_token,

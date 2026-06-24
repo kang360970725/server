@@ -1,0 +1,2 @@
+ALTER TABLE `users`
+ADD COLUMN `staffTags` JSON NULL;

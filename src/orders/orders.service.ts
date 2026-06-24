@@ -16,7 +16,11 @@ import {
     PlayerWorkStatus,
     UserCouponStatus,
     UserType,
-    WalletBizType
+    WalletBizType,
+    WalletDirection,
+    WalletTxStatus,
+    MemberPointBizType,
+    MemberPointDirection
 } from '@prisma/client';
 import {WalletService} from '../wallet/wallet.service';
 import {randomInt, randomUUID} from 'crypto';
@@ -29,6 +33,7 @@ import {
 import {compareSettlementsToPlan} from "../utils/finance/generateRepairPlan";
 import {computeSettlementFreezeTime} from "../utils/orderDispatches/settlement-freeze.rule";
 import { NotificationsService } from '../notifications/notifications.service';
+import { MiniSubscribeMessageService } from '../notifications/mini-subscribe-message.service';
 import { PenaltiesService } from '../penalties/penalties.service';
 import { SystemConfigService } from '../system-config/system-config.service';
 import { WechatPayService } from '../mini/wechat-pay.service';
@@ -43,6 +48,9 @@ type AssignDispatchOptions = {
     updateOrderDispatcherId?: boolean;
     writeOperatorLog?: boolean;
 };
+type ArchiveDispatchOptions = {
+    forceByAdmin?: boolean;
+};
 
 const ORDER_SOURCE_DEFAULTS = [
     { value: 'TUTU_PLATFORM', label: '突突平台', enabled: true },
@@ -56,14 +64,265 @@ const ORDER_SOURCE_DEFAULTS = [
 export class OrdersService {
     private readonly logger = new Logger(OrdersService.name);
 
-    constructor(
+  constructor(
         private prisma: PrismaService,
         private wallet: WalletService,
         private notificationsService: NotificationsService,
+        private miniSubscribeMessageService: MiniSubscribeMessageService,
         private penaltiesService: PenaltiesService,
         private systemConfigService: SystemConfigService,
         private wechatPayService: WechatPayService,
+  ) {
+  }
+
+    private normalizeRequiredRemark(input: any, message = '请填写处理原因') {
+        const remark = String(input || '').trim();
+        if (!remark) {
+            throw new BadRequestException(message);
+        }
+        return remark;
+    }
+
+    private buildMemberCode(userId: number) {
+        return `BM${String(userId).padStart(8, '0')}`;
+    }
+
+    private getOrderRewardPointsByPaidAmount(paidAmount: number) {
+        return Math.max(0, Math.floor(round2(Math.max(0, Number(paidAmount || 0))) / 10));
+    }
+
+    private getMemberGrowthValueByPaidAmount(paidAmount: number) {
+        return Math.max(0, Math.floor(round2(Math.max(0, Number(paidAmount || 0)))));
+    }
+
+    private resolveMemberBenefitBaseAmount(order: any, paidAmountInput?: number) {
+        const actualPaidAmount = round2(Math.max(0, Number(
+            paidAmountInput ?? order?.paidAmount ?? 0,
+        )));
+        const finalPayableAmount = round2(Math.max(0, Number(
+            order?.finalPayableAmount ?? order?.receivableAmount ?? actualPaidAmount,
+        )));
+
+        // 仅明确标记为测试支付的订单，才按业务订单金额累计会员权益。
+        if (Boolean(order?.isTestPayment) && finalPayableAmount > 0) {
+            return finalPayableAmount;
+        }
+
+        return actualPaidAmount;
+    }
+
+    private buildOrderBalanceReceiptMeta(params: {
+        deductedAmount: number;
+        balanceAfter: number;
+        rewardPoints: number;
+        growthValue: number;
+    }) {
+        return {
+            receiptMeta: {
+                memberBalanceDeducted: this.toAmount2(Number(params.deductedAmount || 0)),
+                memberBalanceAfter: this.toAmount2(Number(params.balanceAfter || 0)),
+                rewardPointsPreview: Math.max(0, Number(params.rewardPoints || 0)),
+                growthValuePreview: Math.max(0, Number(params.growthValue || 0)),
+            },
+        };
+    }
+
+    private async resolveMemberLevelCodeTx(
+        tx: any,
+        totalRechargeAmount: number,
+        annualContribution: number,
+        fallbackLevelCode = 'NONE',
     ) {
+        const configs = await tx.memberLevelConfig.findMany({
+            where: { enabled: true },
+            orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+        });
+
+        if (!configs.length) return fallbackLevelCode;
+
+        let matched = configs.find((item: any) => item.isDefault) || configs[0];
+        for (const config of configs) {
+            if (
+                totalRechargeAmount >= Number(config?.minRechargeAmount || 0) &&
+                annualContribution >= Number(config?.minAnnualContribution || 0)
+            ) {
+                matched = config;
+            }
+        }
+        return String(matched?.code || fallbackLevelCode || 'NONE');
+    }
+
+    private async applyOrderMemberBenefitsTx(tx: any, order: any) {
+        const userId = Number(order?.userId || order?.customerUserId || 0);
+        if (!userId) return;
+
+        const benefitBaseAmount = this.resolveMemberBenefitBaseAmount(order);
+        if (benefitBaseAmount <= 0) return;
+
+        const growthValue = this.getMemberGrowthValueByPaidAmount(benefitBaseAmount);
+        const earnedPoints = this.getOrderRewardPointsByPaidAmount(benefitBaseAmount);
+
+        const currentProfile = await tx.memberProfile.findUnique({ where: { userId } });
+        const totalRechargeAmount = Number(currentProfile?.totalRechargeAmount || 0);
+        const nextTotalConsumeAmount = round2(Number(currentProfile?.totalConsumeAmount || 0) + benefitBaseAmount);
+        const nextAnnualContribution = Number(currentProfile?.annualContribution || 0) + growthValue;
+        const nextLevelCode = await this.resolveMemberLevelCodeTx(
+            tx,
+            totalRechargeAmount,
+            nextAnnualContribution,
+            String(currentProfile?.levelCode || 'NONE'),
+        );
+
+        if (currentProfile) {
+            await tx.memberProfile.update({
+                where: { userId },
+                data: {
+                    totalConsumeAmount: nextTotalConsumeAmount,
+                    annualContribution: nextAnnualContribution,
+                    levelCode: nextLevelCode,
+                },
+            });
+        } else {
+            await tx.memberProfile.create({
+                data: {
+                    userId,
+                    memberCode: this.buildMemberCode(userId),
+                    levelCode: nextLevelCode,
+                    totalConsumeAmount: nextTotalConsumeAmount,
+                    annualContribution: nextAnnualContribution,
+                },
+            });
+        }
+
+        if (earnedPoints <= 0) return;
+
+        const existingPointTx = await tx.memberPointTransaction.findFirst({
+            where: {
+                userId,
+                bizType: MemberPointBizType.ORDER_CONSUME,
+                sourceType: 'ORDER',
+                sourceId: Number(order.id),
+            },
+            select: { id: true },
+        });
+        if (existingPointTx) return;
+
+        const pointAccount = await tx.memberPointAccount.upsert({
+            where: { userId },
+            update: {
+                availablePoints: { increment: earnedPoints },
+                totalEarnedPoints: { increment: earnedPoints },
+            },
+            create: {
+                userId,
+                availablePoints: earnedPoints,
+                totalEarnedPoints: earnedPoints,
+            },
+        });
+
+        await tx.memberPointTransaction.create({
+            data: {
+                userId,
+                direction: MemberPointDirection.IN,
+                bizType: MemberPointBizType.ORDER_CONSUME,
+                points: earnedPoints,
+                balanceAfter: Number(pointAccount.availablePoints),
+                sourceType: 'ORDER',
+                sourceId: Number(order.id),
+                remark: `订单完成奖励积分 ${earnedPoints}（累计口径 ¥${benefitBaseAmount.toFixed(2)}）`,
+            },
+        });
+    }
+
+    private async rollbackOrderMemberBenefitsTx(tx: any, order: any, refundAmountInput?: number) {
+        const userId = Number(order?.userId || order?.customerUserId || 0);
+        if (!userId) return;
+
+        const paidAmount = round2(Math.max(0, Number(order?.paidAmount || 0)));
+        const benefitOrderBaseAmount = this.resolveMemberBenefitBaseAmount(order, paidAmount);
+        const benefitBaseAmount = round2(Math.min(
+            benefitOrderBaseAmount,
+            Math.max(0, Number((refundAmountInput ?? paidAmount) || 0)) >= paidAmount && paidAmount > 0
+                ? benefitOrderBaseAmount
+                : Math.max(0, Number((refundAmountInput ?? paidAmount) || 0)),
+        ));
+        if (benefitBaseAmount <= 0) return;
+
+        const growthValue = this.getMemberGrowthValueByPaidAmount(benefitBaseAmount);
+        const earnedPoints = this.getOrderRewardPointsByPaidAmount(benefitBaseAmount);
+
+        const currentProfile = await tx.memberProfile.findUnique({ where: { userId } });
+        if (currentProfile) {
+            const totalRechargeAmount = Number(currentProfile?.totalRechargeAmount || 0);
+            const nextTotalConsumeAmount = Math.max(0, round2(Number(currentProfile?.totalConsumeAmount || 0) - benefitBaseAmount));
+            const nextAnnualContribution = Math.max(0, Number(currentProfile?.annualContribution || 0) - growthValue);
+            const nextLevelCode = await this.resolveMemberLevelCodeTx(
+                tx,
+                totalRechargeAmount,
+                nextAnnualContribution,
+                String(currentProfile?.levelCode || 'NONE'),
+            );
+
+            await tx.memberProfile.update({
+                where: { userId },
+                data: {
+                    totalConsumeAmount: nextTotalConsumeAmount,
+                    annualContribution: nextAnnualContribution,
+                    levelCode: nextLevelCode,
+                },
+            });
+        }
+
+        if (earnedPoints <= 0) return;
+
+        const rewardPointTx = await tx.memberPointTransaction.findFirst({
+            where: {
+                userId,
+                bizType: MemberPointBizType.ORDER_CONSUME,
+                sourceType: 'ORDER',
+                sourceId: Number(order.id),
+            },
+            orderBy: { id: 'desc' },
+            select: { id: true },
+        });
+        if (!rewardPointTx) return;
+
+        const existingRollbackTx = await tx.memberPointTransaction.findFirst({
+            where: {
+                userId,
+                bizType: MemberPointBizType.ORDER_DEDUCT,
+                sourceType: 'ORDER_REFUND',
+                sourceId: Number(order.id),
+            },
+            select: { id: true },
+        });
+        if (existingRollbackTx) return;
+
+        const pointAccount = await tx.memberPointAccount.upsert({
+            where: { userId },
+            update: {
+                availablePoints: { decrement: earnedPoints },
+                totalSpentPoints: { increment: earnedPoints },
+            },
+            create: {
+                userId,
+                availablePoints: 0 - earnedPoints,
+                totalSpentPoints: earnedPoints,
+            },
+        });
+
+        await tx.memberPointTransaction.create({
+            data: {
+                userId,
+                direction: MemberPointDirection.OUT,
+                bizType: MemberPointBizType.ORDER_DEDUCT,
+                points: earnedPoints,
+                balanceAfter: Number(pointAccount.availablePoints),
+                sourceType: 'ORDER_REFUND',
+                sourceId: Number(order.id),
+                remark: `订单退款扣回积分 ${earnedPoints}（退款 ¥${benefitBaseAmount.toFixed(2)}）`,
+            },
+        });
     }
 
     private getDispatchParticipantUserSelect() {
@@ -71,6 +330,7 @@ export class OrdersService {
             id: true,
             name: true,
             phone: true,
+            avatar: true,
             workStatus: true,
             userType: true,
             staffRating: {
@@ -1006,7 +1266,10 @@ export class OrdersService {
     async createOrder(dto: CreateOrderDto, operatorId: number, context?: CreateOrderContext) {
         const scene = context?.scene || 'ADMIN';
         const dispatcherId = context?.dispatcherId === undefined ? operatorId : context.dispatcherId;
-        const customerUserId = context?.customerUserId == null ? null : Number(context.customerUserId);
+        const customerUserId =
+            context?.customerUserId != null
+                ? Number(context.customerUserId)
+                : ((dto as any)?.customerUserId != null ? Number((dto as any).customerUserId) : null);
         const orderSource = await this.normalizeOrderSource(dto?.orderSource, scene);
         const project = await this.prisma.gameProject.findUnique({where: {id: dto.projectId}});
         if (!project) throw new NotFoundException('项目不存在');
@@ -1042,6 +1305,9 @@ export class OrdersService {
             });
             if (!selectedUserCoupon) {
                 throw new BadRequestException('用户券不存在');
+            }
+            if (!customerUserId || Number(selectedUserCoupon.userId) !== Number(customerUserId)) {
+                throw new BadRequestException('该优惠券不属于当前下单用户');
             }
             if (selectedUserCoupon.status !== UserCouponStatus.UNUSED) {
                 throw new BadRequestException('优惠券已使用或不可用');
@@ -1082,6 +1348,15 @@ export class OrdersService {
             couponDiscountAmount + activityDiscountAmount + giftDiscountAmount + manualAdjustAmount,
         );
         const finalPayableAmount = this.toAmount2(Math.max(0, originalAmount - discountAmount));
+        const requestedPaymentChannel = String((dto as any)?.paymentChannel || '').trim().toUpperCase();
+        const useMemberBalancePayment =
+            scene === 'ADMIN' &&
+            !isGifted &&
+            isPaid &&
+            requestedPaymentChannel === 'BALANCE';
+        if (useMemberBalancePayment && !customerUserId) {
+            throw new BadRequestException('使用会员储值支付时必须选择会员用户');
+        }
         const discountType = this.resolveDiscountType({
             couponDiscountAmount,
             activityDiscountAmount,
@@ -1093,7 +1368,9 @@ export class OrdersService {
             : (isPaid
                 ? (dto.paymentTime ? new Date(dto.paymentTime) : new Date())
                 : (dto.paymentTime ? new Date(dto.paymentTime) : null));
-        const paymentChannel = isPaid ? this.resolvePaymentChannelByOrderSource(orderSource) : null;
+        const paymentChannel = isPaid
+            ? (useMemberBalancePayment ? 'BALANCE' : this.resolvePaymentChannelByOrderSource(orderSource))
+            : null;
         const discountDetails: Array<{
             sourceType: string;
             sourceId?: number;
@@ -1194,18 +1471,89 @@ export class OrdersService {
             } as any);
 
             if (isPaid && !isGifted) {
-                const payment = await tx.orderPayment.create({
-                    data: {
-                        orderId: Number(createdOrder.id),
-                        paymentNo: this.buildOrderPaymentNo(String(paymentChannel), Number(createdOrder.id)),
-                        channel: String(paymentChannel),
-                        status: OrderPayStatus.SUCCESS,
-                        amount: Number(dto.paidAmount ?? 0),
-                        currency: 'CNY',
-                        paidAt: paidAt || new Date(),
-                    },
-                    select: { id: true },
-                });
+                let payment: { id: number };
+                if (useMemberBalancePayment) {
+                    await this.wallet.ensureWalletAccount(Number(customerUserId), tx as any);
+                    const account = await tx.walletAccount.findUnique({
+                        where: { userId: Number(customerUserId) },
+                        select: {
+                            availableBalance: true,
+                            frozenBalance: true,
+                        },
+                    });
+                    const availableBalance = this.toAmount2(Number(account?.availableBalance ?? 0));
+                    const consumeAmount = this.toAmount2(Number(dto.paidAmount ?? 0));
+                    if (availableBalance < consumeAmount) {
+                        throw new BadRequestException('会员储值余额不足');
+                    }
+
+                    const accountAfter = await tx.walletAccount.update({
+                        where: { userId: Number(customerUserId) },
+                        data: {
+                            availableBalance: { decrement: consumeAmount },
+                        },
+                        select: {
+                            availableBalance: true,
+                            frozenBalance: true,
+                        },
+                    });
+
+                    const rewardBaseAmount = this.resolveMemberBenefitBaseAmount({
+                        paidAmount: consumeAmount,
+                        finalPayableAmount,
+                        receivableAmount: Number(dto.receivableAmount ?? consumeAmount),
+                        isTestPayment: false,
+                    });
+                    const rewardPointsPreview = this.getOrderRewardPointsByPaidAmount(rewardBaseAmount);
+                    const growthValuePreview = this.getMemberGrowthValueByPaidAmount(rewardBaseAmount);
+
+                    payment = await tx.orderPayment.create({
+                        data: {
+                            orderId: Number(createdOrder.id),
+                            paymentNo: this.buildOrderPaymentNo(String(paymentChannel), Number(createdOrder.id)),
+                            channel: 'BALANCE',
+                            status: OrderPayStatus.SUCCESS,
+                            amount: consumeAmount,
+                            currency: 'CNY',
+                            paidAt: paidAt || new Date(),
+                            notifyRaw: this.buildOrderBalanceReceiptMeta({
+                                deductedAmount: consumeAmount,
+                                balanceAfter: Number(accountAfter?.availableBalance ?? 0),
+                                rewardPoints: rewardPointsPreview,
+                                growthValue: growthValuePreview,
+                            }) as any,
+                        },
+                        select: { id: true },
+                    });
+
+                    await tx.walletTransaction.create({
+                        data: {
+                            userId: Number(customerUserId),
+                            direction: WalletDirection.OUT,
+                            bizType: WalletBizType.MEMBER_ORDER_CONSUME,
+                            amount: consumeAmount,
+                            status: WalletTxStatus.AVAILABLE,
+                            sourceType: 'ORDER_PAYMENT_BALANCE',
+                            sourceId: Number(payment.id),
+                            orderId: Number(createdOrder.id),
+                            availableAfter: Number(accountAfter?.availableBalance ?? 0),
+                            frozenAfter: Number(accountAfter?.frozenBalance ?? 0),
+                        } as any,
+                    });
+                } else {
+                    payment = await tx.orderPayment.create({
+                        data: {
+                            orderId: Number(createdOrder.id),
+                            paymentNo: this.buildOrderPaymentNo(String(paymentChannel), Number(createdOrder.id)),
+                            channel: String(paymentChannel),
+                            status: OrderPayStatus.SUCCESS,
+                            amount: Number(dto.paidAmount ?? 0),
+                            currency: 'CNY',
+                            paidAt: paidAt || new Date(),
+                        },
+                        select: { id: true },
+                    });
+                }
 
                 await tx.order.update({
                     where: { id: Number(createdOrder.id) },
@@ -1390,7 +1738,7 @@ export class OrdersService {
                     select: { id: true, name: true, phone: true, avatar: true },
                 },
                 dispatcher: {
-                    select: { id: true, name: true, phone: true, userType: true },
+                    select: { id: true, name: true, phone: true, avatar: true, userType: true },
                 },
 
                 // ✅ 当前派单批次
@@ -1433,6 +1781,7 @@ export class OrdersService {
                         channel: true,
                         amount: true,
                         status: true,
+                        notifyRaw: true,
                     },
                 },
             },
@@ -1440,6 +1789,44 @@ export class OrdersService {
 
         if (!order) {
             throw new NotFoundException('订单不存在');
+        }
+
+        const shouldKeepDispatchParticipant = (dispatch: any, participant: any) => {
+            if (!participant) return false;
+            if (participant?.isActive !== false) return true;
+            if (participant?.acceptedAt) return true;
+            if (participant?.rejectedAt) return true;
+            if (Number(participant?.progressBaseWan || 0) > 0) return true;
+            if (String(dispatch?.status || '') === DispatchStatus.COMPLETED && (
+                participant?.billableHours != null || participant?.billableMinutes != null
+            )) return true;
+            return false;
+        };
+
+        if (Array.isArray(order?.dispatches)) {
+            order.dispatches = order.dispatches.map((dispatch: any) => ({
+                ...dispatch,
+                participants: Array.isArray(dispatch?.participants)
+                    ? dispatch.participants.filter((participant: any) => shouldKeepDispatchParticipant(dispatch, participant))
+                    : [],
+            }));
+        }
+
+        const orderStatus = String(order?.status || '').trim().toUpperCase();
+        const currentParticipants = Array.isArray(order?.currentDispatch?.participants) ? order.currentDispatch.participants : [];
+        if (order?.currentDispatch && (orderStatus === 'COMPLETED_PENDING_CONFIRM' || currentParticipants.length === 0)) {
+            const latestDispatch = Array.isArray(order?.dispatches) ? order.dispatches[0] : null;
+            const fallbackParticipants = Array.isArray(latestDispatch?.participants)
+                ? latestDispatch.participants.filter((p: any) => shouldKeepDispatchParticipant(latestDispatch, p) && !p?.rejectedAt)
+                : [];
+            if (fallbackParticipants.length) {
+                order.currentDispatch = {
+                    ...order.currentDispatch,
+                    id: latestDispatch?.id ?? order.currentDispatch.id,
+                    status: latestDispatch?.status ?? order.currentDispatch.status,
+                    participants: fallbackParticipants,
+                };
+            }
         }
 
         // ===========================
@@ -1854,9 +2241,22 @@ export class OrdersService {
      * 打手存单/结单（ARCHIVED）——本轮只需正常存单
      * -----------------------------*/
     async archiveDispatch(dispatchStatus: DispatchStatus, dispatchId: number, user: any, dto: any) {
+        return this.archiveDispatchWithOptions(dispatchStatus, dispatchId, user, dto, {});
+    }
+
+    private async archiveDispatchWithOptions(
+        dispatchStatus: DispatchStatus,
+        dispatchId: number,
+        user: any,
+        dto: any,
+        options: ArchiveDispatchOptions,
+    ) {
         const operatorId: number = user.userId
+        const requiredRemark = options.forceByAdmin
+            ? this.normalizeRequiredRemark(dto?.remark, `客服${dispatchStatus === DispatchStatus.ARCHIVED ? '存单' : '结单'}请填写处理原因`)
+            : String(dto?.remark || '').trim() || undefined;
         const orderId = await this.prisma.$transaction(async (tx) => {
-            await this.lockDispatchForSettlementOrThrow(dispatchId, tx);
+            await this.lockDispatchForSettlementOrThrow(dispatchId, tx, options.forceByAdmin === true);
             try {
                 const dispatch = await tx.orderDispatch.findUnique({
                     where: {id: dispatchId},
@@ -1877,7 +2277,7 @@ export class OrdersService {
                     && p.isActive !== false
                     && !p.rejectedAt
                 ));
-                if (!isParticipant) throw new BadRequestException('你不是本轮派单参与者，无权操作');
+                if (!isParticipant && !options.forceByAdmin) throw new BadRequestException('你不是本轮派单参与者，无权操作');
 
                 // ✅ 2) 防重复（可选但建议）
                 if (dispatch.status === dispatchStatus) {
@@ -1934,6 +2334,19 @@ export class OrdersService {
                 }
 
                 const now = new Date();
+                if (options.forceByAdmin && dispatch.status === DispatchStatus.WAIT_ACCEPT) {
+                    await tx.orderParticipant.updateMany({
+                        where: {
+                            dispatchId,
+                            isActive: true,
+                            rejectedAt: null,
+                            acceptedAt: null,
+                        },
+                        data: {
+                            acceptedAt: now,
+                        },
+                    });
+                }
 
                 // ✅ 4) 派单置存/结单
                 await tx.orderDispatch.update({
@@ -1942,7 +2355,7 @@ export class OrdersService {
                         status: dispatchStatus,
                         archivedAt: now,
                         completedAt: dispatchStatus === 'COMPLETED' ? now : null,
-                        remark: dto.remark ?? dispatch.remark ?? null,
+                        remark: requiredRemark ?? dispatch.remark ?? null,
                         ...(orderClass === 'HOURLY'
                             ? {
                                 deductMinutesValue:
@@ -1980,12 +2393,13 @@ export class OrdersService {
                 await this.logOrderAction(
                     operatorId,
                     dispatch.orderId,
-                    'ARCHIVE_DISPATCH',
+                    options.forceByAdmin ? 'ADMIN_ARCHIVE_DISPATCH' : 'ARCHIVE_DISPATCH',
                     {
                         dispatchId,
                         archivedAt: now.toISOString(),
                         orderClass,
-                        remark: dto.remark ?? null,
+                        forceByAdmin: Boolean(options.forceByAdmin),
+                        remark: requiredRemark ?? null,
                         // 保底单关键数据：把前端传入的 progresses 原样记录（或记录 normalize 后也行）
                         progresses: orderClass === 'GUARANTEED' ? (dto.progresses ?? []) : undefined,
                         // 小时单关键数据：你算出来的 minutes/hours 也建议塞这里（你现在还没接上）
@@ -2046,7 +2460,7 @@ export class OrdersService {
         if (!orderId) throw new BadRequestException('id 必填');
         if (!Number.isFinite(paidAmount) || paidAmount < 0) throw new BadRequestException('paidAmount 非法');
 
-        return this.prisma.$transaction(async (tx) => {
+        const result = await this.prisma.$transaction(async (tx) => {
             // 1) 读取订单（事务内）
             const order = await tx.order.findUnique({
                 where: {id: orderId},
@@ -2062,6 +2476,8 @@ export class OrdersService {
             // ✅ 不重算、不动钱包
             return tx.order.findUnique({where: {id: orderId}});
         });
+
+        return result;
     }
 
     /*** -----------------------------
@@ -2108,14 +2524,19 @@ export class OrdersService {
                 throw new BadRequestException('当前派单已更新，请刷新后重试');
             }
 
-            const activeParticipants = (dispatch.participants || []).filter((p: any) => p?.isActive !== false);
+            const allParticipants = Array.isArray(dispatch.participants) ? dispatch.participants : [];
+            const activeParticipants = allParticipants.filter((p: any) => p?.isActive !== false);
+            const acceptedActiveParticipants = activeParticipants.filter((p: any) => !!p?.acceptedAt && !p?.rejectedAt);
 
-            // 锁轮判断：已不是 WAIT_ACCEPT / 有人接单 / 有人拒单（含 rejectedAt） => 必须新建一轮
-            const hasAccepted = activeParticipants.some((p: any) => !!p.acceptedAt);
-            const hasRejected = activeParticipants.some((p: any) => !!p.rejectedAt);
+            // 锁轮判断：
+            // - 非 WAIT_ACCEPT：必须新建一轮
+            // - 出现过拒单：必须新建一轮，避免把已拒单历史重新揉回当前轮
+            // - 仅“部分接单”场景允许原轮替换未接单参与者
+            const hasAccepted = acceptedActiveParticipants.length > 0;
+            const hasRejected = allParticipants.some((p: any) => !!p?.rejectedAt);
 
             const shouldCreateNewRound =
-                dispatch.status !== DispatchStatus.WAIT_ACCEPT || hasAccepted || hasRejected;
+                dispatch.status !== DispatchStatus.WAIT_ACCEPT || hasRejected;
 
             if (shouldCreateNewRound) {
                 const oldActiveUserIds = activeParticipants.map((p: any) => Number(p.userId));
@@ -2191,26 +2612,50 @@ export class OrdersService {
                 return;
             }
 
-            // ✅ 否则：仍在 WAIT_ACCEPT 且无人接单/拒单
+            // ✅ 否则：仍在 WAIT_ACCEPT，且没有发生过拒单
+            // - 无人接单：允许普通改派
+            // - 已有人接单：仅允许保留已接单的人，替换未接单的人
             // 不能“全量失效+createMany(skipDuplicates)”；否则同一 user 会因唯一键无法重建活跃记录。
             // 改为：按 userId 差量更新（保留/移除/新增）保证同一参与者可安全改派。
             const activeUserIds = Array.from(new Set(activeParticipants.map((p: any) => Number(p.userId))));
             const targetSet = new Set(target);
             const toDisable = activeUserIds.filter((uid) => !targetSet.has(uid));
 
-            if (toDisable.length > 0) {
-                await tx.orderParticipant.updateMany({
+            if (hasAccepted) {
+                const acceptedUserIds = acceptedActiveParticipants.map((p: any) => Number(p.userId));
+                const missingAccepted = acceptedUserIds.filter((uid: number) => !targetSet.has(uid));
+                if (missingAccepted.length > 0) {
+                    throw new BadRequestException('已有打手接单，仅支持替换未接单参与者');
+                }
+            }
+
+            const removablePendingParticipants = activeParticipants.filter((p: any) => (
+                toDisable.includes(Number(p.userId))
+                && !p?.acceptedAt
+                && !p?.rejectedAt
+            ));
+            const invalidRemovedParticipants = activeParticipants.filter((p: any) => (
+                toDisable.includes(Number(p.userId))
+                && (!!p?.acceptedAt || !!p?.rejectedAt)
+            ));
+            if (invalidRemovedParticipants.length > 0) {
+                throw new BadRequestException('当前仅支持替换未接单参与者');
+            }
+
+            if (removablePendingParticipants.length > 0) {
+                await tx.orderParticipant.deleteMany({
                     where: {
-                        dispatchId,
-                        userId: { in: toDisable },
-                        isActive: true,
+                        id: { in: removablePendingParticipants.map((p: any) => Number(p.id)).filter((id: number) => Number.isFinite(id) && id > 0) },
                     },
-                    data: { isActive: false },
                 });
             }
 
             // 对目标参与者做 upsert，兼容“同一人重新指派”
             for (const uid of target) {
+                const existing = allParticipants.find((p: any) => Number(p.userId) === Number(uid));
+                if (existing?.acceptedAt) {
+                    continue;
+                }
                 await tx.orderParticipant.upsert({
                     where: {
                         dispatchId_userId: {
@@ -2236,7 +2681,8 @@ export class OrdersService {
             await this.logOrderAction(operatorId, dispatch.orderId, 'UPDATE_DISPATCH_PARTICIPANTS', {
                 dispatchId,
                 beforeActiveUserIds: activeUserIds,
-                removedUserIds: toDisable,
+                removedUserIds: removablePendingParticipants.map((p: any) => Number(p.userId)),
+                acceptedUserIds: acceptedActiveParticipants.map((p: any) => Number(p.userId)),
                 targetUserIds: target,
                 remark: dto?.remark ?? null,
                 at: now,
@@ -2249,7 +2695,10 @@ export class OrdersService {
             });
 
             // 同步被移除参与者的工作状态，避免“已被替换但仍无法再次派单”
-            await this.refreshPlayerWorkStatusByActiveAcceptedDispatches(tx, toDisable);
+            await this.refreshPlayerWorkStatusByActiveAcceptedDispatches(
+                tx,
+                removablePendingParticipants.map((p: any) => Number(p.userId)),
+            );
         });
 
         // 返回订单详情，供前端刷新
@@ -2281,6 +2730,16 @@ export class OrdersService {
             console.error('[notify][update-dispatch-participants] failed', e?.message || e);
         }
 
+        try {
+            await this.miniSubscribeMessageService.pushOrderProgressMessage(
+                Number(finalOrderId),
+                '订单已派单，请留意接单与服务进度',
+                '待接单',
+            );
+        } catch (e: any) {
+            console.error('[notify][mini-order-progress][update-dispatch-participants] failed', e?.message || e);
+        }
+
         return this.getOrderDetail(Number(finalOrderId));
     }
 
@@ -2294,7 +2753,7 @@ export class OrdersService {
         if (!settlementId) throw new BadRequestException('settlementId 必填');
         if (!Number.isFinite(finalEarnings)) throw new BadRequestException('finalEarnings 非法');
 
-        return this.prisma.$transaction(async (tx) => {
+        const result = await this.prisma.$transaction(async (tx) => {
             const s = await tx.orderSettlement.findUnique({
                 where: {id: settlementId},
                 select: {
@@ -2404,8 +2863,428 @@ export class OrdersService {
 
             return updated;
         });
+
+        return result;
     }
 
+
+
+    private isComplaintRefundSupportedChannel(channel?: string | null) {
+        const c = String(channel || '').trim().toUpperCase();
+        return c === 'MINIAPP_WECHAT' || c === 'WECHAT' || c === 'BALANCE';
+    }
+
+    private getComplaintRefundUnsupportedReason(channel?: string | null) {
+        return this.isComplaintRefundSupportedChannel(channel)
+            ? null
+            : '退款仅支持原路退回，代付下单等不支持售后退款';
+    }
+
+    private getComplaintSuggestedRefundAmount(paidAmount: number) {
+        return this.toAmount2(this.toAmount2(Number(paidAmount || 0)) * 0.7);
+    }
+
+    private buildComplaintTicketNo(orderId: number) {
+        return `KP-${orderId}-${Date.now()}`;
+    }
+
+    private normalizeComplaintWorkOrderRow(row: any) {
+        if (!row) return null;
+        return {
+            ...row,
+            id: Number(row.id),
+            orderId: Number(row.orderId),
+            userId: Number(row.userId),
+            refundSupported: Boolean(Number(row.refundSupported || 0)),
+            suggestedRefundAmount:
+                row.suggestedRefundAmount === null || row.suggestedRefundAmount === undefined
+                    ? null
+                    : this.toAmount2(Number(row.suggestedRefundAmount)),
+            approvedRefundAmount:
+                row.approvedRefundAmount === null || row.approvedRefundAmount === undefined
+                    ? null
+                    : this.toAmount2(Number(row.approvedRefundAmount)),
+            reviewedBy: row.reviewedBy == null ? null : Number(row.reviewedBy),
+            refundedBy: row.refundedBy == null ? null : Number(row.refundedBy),
+        };
+    }
+
+    private async findComplaintWorkOrderById(db: any, id: number) {
+        const rows = await db.$queryRawUnsafe(
+            'SELECT * FROM complaint_work_orders WHERE id = ? LIMIT 1',
+            Number(id),
+        );
+        return this.normalizeComplaintWorkOrderRow(rows?.[0]);
+    }
+
+    private async findComplaintWorkOrderByOrderId(db: any, orderId: number) {
+        const rows = await db.$queryRawUnsafe(
+            'SELECT * FROM complaint_work_orders WHERE orderId = ? ORDER BY id DESC LIMIT 1',
+            Number(orderId),
+        );
+        return this.normalizeComplaintWorkOrderRow(rows?.[0]);
+    }
+
+    private async updateComplaintWorkOrderTx(db: any, id: number, patch: Record<string, any>) {
+        const entries = Object.entries(patch || {}).filter(([, value]) => value !== undefined);
+        if (!entries.length) return this.findComplaintWorkOrderById(db, id);
+        const sets: string[] = [];
+        const values: any[] = [];
+        for (const [key, rawValue] of entries) {
+            let value = rawValue;
+            if (typeof value === 'boolean') value = value ? 1 : 0;
+            if (value && typeof value === 'object' && !(value instanceof Date)) value = JSON.stringify(value);
+            sets.push(`\`${key}\` = ?`);
+            values.push(value);
+        }
+        sets.push('`updatedAt` = NOW()');
+        await db.$executeRawUnsafe(
+            `UPDATE complaint_work_orders SET ${sets.join(', ')} WHERE id = ?`,
+            ...values,
+            Number(id),
+        );
+        return this.findComplaintWorkOrderById(db, id);
+    }
+
+    private async createComplaintWorkOrderTx(db: any, payload: {
+        orderId: number;
+        userId: number;
+        status: string;
+        reason: string;
+        description?: string | null;
+        paymentChannel?: string | null;
+        refundSupported: boolean;
+        refundUnsupportedReason?: string | null;
+        suggestedRefundAmount?: number | null;
+    }) {
+        const ticketNo = this.buildComplaintTicketNo(payload.orderId);
+        await db.$executeRawUnsafe(
+            `INSERT INTO complaint_work_orders (
+                ticketNo, orderId, userId, status, reason, description,
+                paymentChannel, refundSupported, refundUnsupportedReason,
+                suggestedRefundAmount, createdAt, updatedAt
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+            ticketNo,
+            Number(payload.orderId),
+            Number(payload.userId),
+            String(payload.status || 'PENDING_REVIEW'),
+            String(payload.reason || '').trim(),
+            payload.description ? String(payload.description).trim() : null,
+            payload.paymentChannel ? String(payload.paymentChannel).trim().toUpperCase() : null,
+            payload.refundSupported ? 1 : 0,
+            payload.refundUnsupportedReason ? String(payload.refundUnsupportedReason).trim() : null,
+            payload.suggestedRefundAmount == null ? null : this.toAmount2(Number(payload.suggestedRefundAmount)),
+        );
+        const rows = await db.$queryRawUnsafe(
+            'SELECT * FROM complaint_work_orders WHERE orderId = ? ORDER BY id DESC LIMIT 1',
+            Number(payload.orderId),
+        );
+        return this.normalizeComplaintWorkOrderRow(rows?.[0]);
+    }
+
+    private async getComplaintOrderMap(orderIds: number[]) {
+        const ids = Array.from(new Set((orderIds || []).map((item) => Number(item)).filter((item) => Number.isFinite(item) && item > 0)));
+        if (!ids.length) return new Map<number, any>();
+        const orders = await this.prisma.order.findMany({
+            where: { id: { in: ids } },
+            select: {
+                id: true,
+                autoSerial: true,
+                paidAmount: true,
+                receivableAmount: true,
+                finalPayableAmount: true,
+                status: true,
+                createdAt: true,
+                customerUser: { select: { id: true, name: true, phone: true } },
+                latestPayment: { select: { channel: true, status: true, amount: true, paidAt: true } },
+                project: { select: { id: true, name: true, coverImage: true } },
+            },
+        });
+        return new Map<number, any>(orders.map((item: any) => [Number(item.id), item]));
+    }
+
+    private buildComplaintWorkOrderView(row: any, order?: any) {
+        const complaint = this.normalizeComplaintWorkOrderRow(row);
+        if (!complaint) return null;
+        const paidAmount = this.toAmount2(Number(order?.paidAmount ?? order?.latestPayment?.amount ?? order?.finalPayableAmount ?? order?.receivableAmount ?? 0));
+        return {
+            ...complaint,
+            order: order
+                ? {
+                      id: Number(order.id),
+                      orderNo: String(order.autoSerial || `#${order.id}`),
+                      serviceName: String(order?.project?.name || '--'),
+                      coverImage: String(order?.project?.coverImage || ''),
+                      amount: paidAmount,
+                      status: String(order.status || ''),
+                      createdAt: order.createdAt,
+                      customerName: String(order?.customerUser?.name || '--'),
+                      customerPhone: String(order?.customerUser?.phone || ''),
+                      paymentChannel: String(order?.latestPayment?.channel || complaint.paymentChannel || ''),
+                      paymentStatus: String(order?.latestPayment?.status || ''),
+                      paidAt: order?.latestPayment?.paidAt || null,
+                  }
+                : null,
+        };
+    }
+
+    async getComplaintWorkOrderByOrderIdForMini(orderId: number, userId: number) {
+        orderId = Number(orderId);
+        userId = Number(userId);
+        const order = await this.prisma.order.findFirst({
+            where: { id: orderId, customerUserId: userId },
+            select: {
+                id: true,
+                autoSerial: true,
+                paidAmount: true,
+                receivableAmount: true,
+                finalPayableAmount: true,
+                status: true,
+                createdAt: true,
+                customerUser: { select: { id: true, name: true, phone: true } },
+                latestPayment: { select: { channel: true, status: true, amount: true, paidAt: true } },
+                project: { select: { id: true, name: true, coverImage: true } },
+            },
+        });
+        if (!order) throw new NotFoundException('订单不存在');
+        const complaint = await this.findComplaintWorkOrderByOrderId(this.prisma, orderId);
+        return {
+            order: this.buildComplaintWorkOrderView({ orderId }, order)?.order || null,
+            complaint: complaint ? this.buildComplaintWorkOrderView(complaint, order) : null,
+        };
+    }
+
+    async submitComplaintWorkOrderFromMini(orderId: number, userId: number, body: any) {
+        orderId = Number(orderId);
+        userId = Number(userId);
+        const reason = String(body?.reason || '').trim();
+        if (!reason) throw new BadRequestException('reason 必填');
+        const description = body?.description ? String(body.description).trim() : '';
+
+        const order = await this.prisma.order.findFirst({
+            where: { id: orderId, customerUserId: userId },
+            select: {
+                id: true,
+                autoSerial: true,
+                paidAmount: true,
+                receivableAmount: true,
+                finalPayableAmount: true,
+                status: true,
+                createdAt: true,
+                customerUser: { select: { id: true, name: true, phone: true } },
+                latestPayment: { select: { channel: true, status: true, amount: true, paidAt: true } },
+                project: { select: { id: true, name: true, coverImage: true } },
+            },
+        });
+        if (!order) throw new NotFoundException('订单不存在');
+
+        const allowed = new Set(['COMPLETED', 'REVIEWED', 'WAIT_AFTERSALE', 'AFTERSALE_DONE']);
+        const currentStatus = String(order.status || '').toUpperCase();
+        if (!allowed.has(currentStatus)) {
+            throw new BadRequestException('当前订单状态不支持申请售后');
+        }
+        if (currentStatus === 'REFUNDED') {
+            throw new BadRequestException('已退款订单不可重复申请售后');
+        }
+
+        const paymentChannel = String(order?.latestPayment?.channel || '').trim().toUpperCase();
+        const refundSupported = this.isComplaintRefundSupportedChannel(paymentChannel);
+        const refundUnsupportedReason = this.getComplaintRefundUnsupportedReason(paymentChannel);
+        const paidAmount = this.toAmount2(Number(order?.latestPayment?.amount ?? order?.paidAmount ?? order?.finalPayableAmount ?? order?.receivableAmount ?? 0));
+        const suggestedRefundAmount = this.getComplaintSuggestedRefundAmount(paidAmount);
+
+        const complaint = await this.prisma.$transaction(async (tx) => {
+            const exists = await this.findComplaintWorkOrderByOrderId(tx, orderId);
+            if (exists && ['PENDING_REVIEW', 'APPROVED', 'REFUNDED'].includes(String(exists.status || ''))) {
+                throw new BadRequestException('该订单已有处理中或已完成的客诉工单');
+            }
+
+            await tx.order.update({
+                where: { id: orderId },
+                data: { status: OrderStatus.WAIT_AFTERSALE },
+            });
+
+            if (exists) {
+                return this.updateComplaintWorkOrderTx(tx, exists.id, {
+                    status: 'PENDING_REVIEW',
+                    reason,
+                    description,
+                    paymentChannel,
+                    refundSupported,
+                    refundUnsupportedReason,
+                    suggestedRefundAmount,
+                    approvedRefundAmount: null,
+                    reviewRemark: null,
+                    refundRemark: null,
+                    reviewedBy: null,
+                    reviewedAt: null,
+                    refundedBy: null,
+                    refundedAt: null,
+                });
+            }
+
+            return this.createComplaintWorkOrderTx(tx, {
+                orderId,
+                userId,
+                status: 'PENDING_REVIEW',
+                reason,
+                description,
+                paymentChannel,
+                refundSupported,
+                refundUnsupportedReason,
+                suggestedRefundAmount,
+            });
+        });
+
+        return {
+            success: true,
+            status: OrderStatus.WAIT_AFTERSALE,
+            manualRefundRequired: !refundSupported,
+            refundHint: refundUnsupportedReason,
+            complaint: this.buildComplaintWorkOrderView(complaint, order),
+        };
+    }
+
+    async listComplaintWorkOrders(query: { page?: number; limit?: number; status?: string; keyword?: string }) {
+        const page = Math.max(1, Number(query?.page || 1));
+        const limit = Math.min(100, Math.max(1, Number(query?.limit || 20)));
+        const offset = (page - 1) * limit;
+        const status = String(query?.status || '').trim().toUpperCase();
+        const keyword = String(query?.keyword || '').trim();
+        const where: string[] = ['1=1'];
+        const params: any[] = [];
+        if (status) {
+            where.push('status = ?');
+            params.push(status);
+        }
+        if (keyword) {
+            where.push('(ticketNo LIKE ? OR reason LIKE ? OR description LIKE ?)');
+            params.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
+        }
+        const whereSql = where.join(' AND ');
+        const rows = await this.prisma.$queryRawUnsafe(
+            `SELECT * FROM complaint_work_orders WHERE ${whereSql} ORDER BY createdAt DESC LIMIT ? OFFSET ?`,
+            ...params,
+            limit,
+            offset,
+        );
+        const totalRows = await this.prisma.$queryRawUnsafe(
+            `SELECT COUNT(*) AS total FROM complaint_work_orders WHERE ${whereSql}`,
+            ...params,
+        );
+        const normalized = ((rows as any[]) || []).map((item) => this.normalizeComplaintWorkOrderRow(item)).filter(Boolean);
+        const orderMap = await this.getComplaintOrderMap(normalized.map((item: any) => Number(item.orderId)));
+        return {
+            data: normalized.map((item: any) => this.buildComplaintWorkOrderView(item, orderMap.get(Number(item.orderId)))),
+            total: Number((totalRows as any[])?.[0]?.total || 0),
+            page,
+            limit,
+            totalPages: Math.ceil(Number((totalRows as any[])?.[0]?.total || 0) / limit),
+        };
+    }
+
+    async reviewComplaintWorkOrder(id: number, operatorId: number, body: { action?: string; reviewRemark?: string; approvedRefundAmount?: number }) {
+        id = Number(id);
+        operatorId = Number(operatorId);
+        if (!id) throw new BadRequestException('id 必填');
+        if (!operatorId) throw new BadRequestException('未登录或无权限操作');
+        const ticket = await this.findComplaintWorkOrderById(this.prisma, id);
+        if (!ticket) throw new NotFoundException('客诉工单不存在');
+        if (String(ticket.status || '') === 'REFUNDED') throw new BadRequestException('该工单已完成退款');
+        const action = String(body?.action || '').trim().toUpperCase();
+        const reviewRemark = body?.reviewRemark ? String(body.reviewRemark).trim().slice(0, 255) : null;
+        if (!['APPROVE', 'REJECT'].includes(action)) throw new BadRequestException('审核动作不合法');
+
+        const next = await this.prisma.$transaction(async (tx) => {
+            if (action === 'REJECT') {
+                await tx.order.update({ where: { id: Number(ticket.orderId) }, data: { status: OrderStatus.AFTERSALE_DONE } });
+                return this.updateComplaintWorkOrderTx(tx, id, {
+                    status: 'REJECTED',
+                    reviewRemark,
+                    reviewedBy: operatorId,
+                    reviewedAt: new Date(),
+                });
+            }
+            return this.updateComplaintWorkOrderTx(tx, id, {
+                status: 'APPROVED',
+                reviewRemark,
+                approvedRefundAmount:
+                    body?.approvedRefundAmount === undefined || body?.approvedRefundAmount === null
+                        ? ticket.approvedRefundAmount ?? ticket.suggestedRefundAmount
+                        : this.toAmount2(Number(body.approvedRefundAmount)),
+                reviewedBy: operatorId,
+                reviewedAt: new Date(),
+            });
+        });
+        const orderMap = await this.getComplaintOrderMap([Number(ticket.orderId)]);
+        const complaintOrder = orderMap.get(Number(ticket.orderId));
+        try {
+            await this.miniSubscribeMessageService.pushAfterSalesResultMessage({
+                userId: Number(ticket.userId),
+                orderId: Number(ticket.orderId),
+                orderNo: String(complaintOrder?.autoSerial || `#${ticket.orderId}`),
+                result: action === 'REJECT' ? '售后申请已驳回' : '售后申请已审核通过',
+                refundAmount: action === 'REJECT' ? undefined : Number(next?.approvedRefundAmount ?? ticket.suggestedRefundAmount ?? 0),
+                reviewedAt: next?.reviewedAt || new Date(),
+                remark: reviewRemark || (action === 'REJECT' ? '请查看审核意见' : '请留意后续退款处理'),
+            });
+        } catch (e: any) {
+            console.error('[notify][mini-after-sales][review] failed', e?.message || e);
+        }
+        return this.buildComplaintWorkOrderView(next, orderMap.get(Number(ticket.orderId)));
+    }
+
+    async refundComplaintWorkOrder(id: number, operatorId: number, body: { refundAmount?: number; refundRemark?: string }) {
+        id = Number(id);
+        operatorId = Number(operatorId);
+        if (!id) throw new BadRequestException('id 必填');
+        if (!operatorId) throw new BadRequestException('未登录或无权限操作');
+        const ticket = await this.findComplaintWorkOrderById(this.prisma, id);
+        if (!ticket) throw new NotFoundException('客诉工单不存在');
+        if (!ticket.refundSupported) throw new BadRequestException(ticket.refundUnsupportedReason || '当前支付渠道不支持原路退款');
+        if (!['APPROVED', 'PENDING_REVIEW'].includes(String(ticket.status || ''))) {
+            throw new BadRequestException('仅审核通过的工单可执行退款');
+        }
+
+        const amount = body?.refundAmount === undefined || body?.refundAmount === null
+            ? this.toAmount2(Number(ticket.approvedRefundAmount ?? ticket.suggestedRefundAmount ?? 0))
+            : this.toAmount2(Number(body.refundAmount));
+        if (!(amount > 0)) throw new BadRequestException('退款金额必须大于 0');
+
+        const refundRemark = body?.refundRemark ? String(body.refundRemark).trim().slice(0, 255) : null;
+        await this.refundOrder(Number(ticket.orderId), operatorId, refundRemark || '客诉工单退款', {
+            refundAmount: amount,
+            strictOriginalReturn: true,
+        });
+
+        const next = await this.prisma.$transaction(async (tx) => {
+            return this.updateComplaintWorkOrderTx(tx, id, {
+                status: 'REFUNDED',
+                approvedRefundAmount: amount,
+                refundRemark,
+                refundedBy: operatorId,
+                refundedAt: new Date(),
+                reviewedBy: ticket.reviewedBy ?? operatorId,
+                reviewedAt: ticket.reviewedAt ?? new Date(),
+            });
+        });
+        const orderMap = await this.getComplaintOrderMap([Number(ticket.orderId)]);
+        const complaintOrder = orderMap.get(Number(ticket.orderId));
+        try {
+            await this.miniSubscribeMessageService.pushAfterSalesResultMessage({
+                userId: Number(ticket.userId),
+                orderId: Number(ticket.orderId),
+                orderNo: String(complaintOrder?.autoSerial || `#${ticket.orderId}`),
+                result: '退款已完成',
+                refundAmount: amount,
+                reviewedAt: next?.refundedAt || new Date(),
+                remark: refundRemark || '退款已原路退回，请留意到账情况',
+            });
+        } catch (e: any) {
+            console.error('[notify][mini-after-sales][refund] failed', e?.message || e);
+        }
+        return this.buildComplaintWorkOrderView(next, orderMap.get(Number(ticket.orderId)));
+    }
 
     /*** -----------------------------
      * 退款功能
@@ -2420,6 +3299,8 @@ export class OrdersService {
             liableUserIds?: number[];
             hasCompensation?: boolean;
             compensationAmount?: number;
+            refundAmount?: number;
+            strictOriginalReturn?: boolean;
         },
     ) {
         orderId = Number(orderId);
@@ -2465,6 +3346,9 @@ export class OrdersService {
         const shouldAutoRefund = this.shouldAutoRefundWithWechat(orderWithPayment as any);
         const shouldRefundBalance = latestPaymentChannel === 'BALANCE';
         const manualRefundRequired = !shouldAutoRefund && !shouldRefundBalance;
+        if (Boolean(options?.strictOriginalReturn) && manualRefundRequired) {
+            throw new BadRequestException(this.getComplaintRefundUnsupportedReason(latestPaymentChannel) || '当前支付渠道不支持原路退款');
+        }
 
         const latestPaymentAmountFen = this.toAmountFen(
             Number(
@@ -2478,7 +3362,18 @@ export class OrdersService {
         if ((shouldAutoRefund || shouldRefundBalance) && latestPaymentAmountFen <= 0) {
             throw new BadRequestException('订单支付金额异常，无法发起退款');
         }
-        const refundAmount = this.toAmount2(Number(latestPaymentAmountFen / 100));
+        const requestedRefundAmount =
+            options?.refundAmount === undefined || options?.refundAmount === null
+                ? null
+                : this.toAmount2(Number(options.refundAmount));
+        if (requestedRefundAmount !== null && !(requestedRefundAmount > 0)) {
+            throw new BadRequestException('退款金额必须大于 0');
+        }
+        if (requestedRefundAmount !== null && requestedRefundAmount > this.toAmount2(Number(latestPaymentAmountFen / 100))) {
+            throw new BadRequestException('退款金额不能超过订单实付金额');
+        }
+        const refundAmountFen = requestedRefundAmount === null ? latestPaymentAmountFen : this.toAmountFen(requestedRefundAmount);
+        const refundAmount = this.toAmount2(Number(refundAmountFen / 100));
         const refundReason = remark ? String(remark).trim().slice(0, 80) : '订单退款';
         const refundNo = this.buildRefundNo(latestPaymentChannel, orderId);
 
@@ -2487,7 +3382,7 @@ export class OrdersService {
                   outTradeNo: String((orderWithPayment as any)?.latestPayment?.paymentNo || '').trim(),
                   transactionId: String((orderWithPayment as any)?.latestPayment?.transactionId || '').trim() || undefined,
                   outRefundNo: refundNo,
-                  amountFen: latestPaymentAmountFen,
+                  amountFen: refundAmountFen,
                   totalFen: latestPaymentAmountFen,
                   reason: refundReason,
               })
@@ -2659,6 +3554,9 @@ export class OrdersService {
 
             // ✅ 4) 钱包冲正：无论是否已有 settlements，只要订单曾产生收益流水都要回滚
             await this.wallet.reverseOrderSettlementEarnings({orderId}, tx);
+
+            // ✅ 5) 退款回滚会员成长值与订单奖励积分
+            await this.rollbackOrderMemberBenefitsTx(tx, orderWithPayment, refundAmount);
         });
 
         // 5) 退款后处罚（不阻断退款主流程）
@@ -2724,6 +3622,234 @@ export class OrdersService {
                 : [],
             compensationPendingCount: Number(compensationPenaltyResult?.pendingCount || 0),
             penaltyWarnings,
+        });
+
+        try {
+            const pointAccount = await this.prisma.memberPointAccount.findUnique({
+                where: { userId: Number((order as any)?.customerUserId || 0) },
+                select: { availablePoints: true },
+            });
+            const profile = await this.prisma.memberProfile.findUnique({
+                where: { userId: Number((order as any)?.customerUserId || 0) },
+                select: { annualContribution: true },
+            });
+            const benefitRollbackAmount = round2(Math.min(
+                this.resolveMemberBenefitBaseAmount(order),
+                Number(refundAmount || 0) >= Number((order as any)?.paidAmount || 0)
+                    ? this.resolveMemberBenefitBaseAmount(order)
+                    : Number(refundAmount || 0),
+            ));
+            const points = this.getOrderRewardPointsByPaidAmount(benefitRollbackAmount);
+            const growthValue = this.getMemberGrowthValueByPaidAmount(benefitRollbackAmount);
+            if (Number((order as any)?.customerUserId || 0) > 0) {
+                await this.miniSubscribeMessageService.pushMemberAssetMessage({
+                    userId: Number((order as any).customerUserId),
+                    assetType: '退款回退资产',
+                    changeAmount: `积分-${points} / 成长值-${growthValue}`,
+                    balanceAfter: `积分余额 ${Number(pointAccount?.availablePoints || 0)} / 成长值 ${Number(profile?.annualContribution || 0)}`,
+                    targetType: 'ORDER',
+                    targetId: Number(orderId),
+                    pageQuery: { id: Number(orderId) },
+                    remark: `订单退款 ¥${Number(refundAmount || 0).toFixed(2)}，对应会员资产已回退`,
+                });
+            }
+        } catch (e: any) {
+            console.error('[notify][mini-member-asset][refund-order] failed', e?.message || e);
+        }
+
+        return this.getOrderDetail(orderId);
+    }
+
+    async adminAcceptDispatch(dispatchId: number, operator: any, remark?: string) {
+        const operatorId = Number(operator?.userId || 0);
+        if (!dispatchId || !operatorId) throw new BadRequestException('参数非法');
+        const requiredRemark = this.normalizeRequiredRemark(remark, '客服代接单请填写处理原因');
+
+        return this.prisma.$transaction(async (tx) => {
+            const dispatch = await tx.orderDispatch.findUnique({
+                where: { id: dispatchId },
+                include: {
+                    order: true,
+                    participants: true,
+                },
+            });
+            if (!dispatch) throw new NotFoundException('派单批次不存在');
+            if (Number(dispatch.order.currentDispatchId || 0) !== Number(dispatch.id)) {
+                throw new BadRequestException('当前派单已更新，请刷新后再操作');
+            }
+            this.ensureDispatchStatus(dispatch, [DispatchStatus.WAIT_ACCEPT, DispatchStatus.ACCEPTED], '当前状态不可代接单');
+
+            const activeParticipants = (dispatch.participants || []).filter((p: any) => p?.isActive !== false && !p?.rejectedAt);
+            if (!activeParticipants.length) {
+                throw new BadRequestException('当前派单没有可代接单的有效参与者');
+            }
+
+            const now = new Date();
+            await tx.orderParticipant.updateMany({
+                where: {
+                    dispatchId,
+                    id: { in: activeParticipants.map((p: any) => Number(p.id)) },
+                    acceptedAt: null,
+                },
+                data: {
+                    acceptedAt: now,
+                },
+            });
+
+            await tx.user.updateMany({
+                where: {
+                    id: { in: activeParticipants.map((p: any) => Number(p.userId)) },
+                },
+                data: {
+                    workStatus: 'WORKING' as any,
+                },
+            });
+
+            await tx.orderDispatch.update({
+                where: { id: dispatchId },
+                data: {
+                    status: DispatchStatus.ACCEPTED,
+                    acceptedAllAt: dispatch.acceptedAllAt || now,
+                },
+            });
+
+            await tx.order.update({
+                where: { id: dispatch.orderId },
+                data: { status: OrderStatus.ACCEPTED },
+            });
+
+            await this.logOrderAction(operatorId, dispatch.orderId, 'ADMIN_ACCEPT_DISPATCH', {
+                dispatchId,
+                acceptedAt: now.toISOString(),
+                participantUserIds: activeParticipants.map((p: any) => Number(p.userId)),
+                remark: requiredRemark,
+            }, tx, '客服代接单');
+
+            return this.getDispatchWithParticipants(dispatchId);
+        });
+    }
+
+    async adminArchiveDispatch(dispatchStatus: DispatchStatus, dispatchId: number, operator: any, dto: any) {
+        return this.archiveDispatchWithOptions(dispatchStatus, dispatchId, operator, dto, { forceByAdmin: true });
+    }
+
+    async rollbackDispatchToAccepted(dispatchId: number, operator: any, remark?: string) {
+        const operatorId = Number(operator?.userId || 0);
+        if (!dispatchId || !operatorId) throw new BadRequestException('参数非法');
+        const requiredRemark = this.normalizeRequiredRemark(remark, '客服回退到接单中请填写处理原因');
+
+        const orderId = await this.prisma.$transaction(async (tx) => {
+            const dispatch = await tx.orderDispatch.findUnique({
+                where: { id: dispatchId },
+                include: {
+                    order: true,
+                    participants: true,
+                },
+            });
+            if (!dispatch) throw new NotFoundException('派单批次不存在');
+            if (dispatch.status !== DispatchStatus.ARCHIVED) {
+                throw new BadRequestException('仅存单状态支持回退到接单中');
+            }
+            if (Number(dispatch.order.currentDispatchId || 0) !== Number(dispatch.id)) {
+                throw new BadRequestException('该轮已不是当前轮，不支持回退');
+            }
+            const settlementCount = await tx.orderSettlement.count({ where: { dispatchId } });
+            if (settlementCount > 0) {
+                throw new BadRequestException('该轮已生成结算数据，不支持回退');
+            }
+
+            const participantIds = (dispatch.participants || [])
+                .filter((p: any) => !p?.rejectedAt)
+                .map((p: any) => Number(p.id));
+            const participantUserIds = (dispatch.participants || [])
+                .filter((p: any) => !p?.rejectedAt)
+                .map((p: any) => Number(p.userId));
+
+            if (!participantIds.length) {
+                throw new BadRequestException('当前轮没有可恢复的参与者');
+            }
+
+            await tx.orderParticipant.updateMany({
+                where: { id: { in: participantIds } },
+                data: { isActive: true },
+            });
+            await tx.orderDispatch.update({
+                where: { id: dispatchId },
+                data: {
+                    status: DispatchStatus.ACCEPTED,
+                    archivedAt: null,
+                    completedAt: null,
+                },
+            });
+            await tx.order.update({
+                where: { id: dispatch.orderId },
+                data: { status: OrderStatus.ACCEPTED },
+            });
+            await tx.user.updateMany({
+                where: { id: { in: participantUserIds } },
+                data: { workStatus: 'WORKING' as any },
+            });
+
+            await this.logOrderAction(operatorId, dispatch.orderId, 'ADMIN_ROLLBACK_DISPATCH_TO_ACCEPTED', {
+                dispatchId,
+                fromStatus: DispatchStatus.ARCHIVED,
+                toStatus: DispatchStatus.ACCEPTED,
+                remark: requiredRemark,
+            }, tx, '客服回退存单到接单中');
+
+            return dispatch.orderId;
+        });
+
+        return this.getOrderDetail(orderId);
+    }
+
+    async rollbackCompletedDispatchToArchived(dispatchId: number, operator: any, remark?: string) {
+        const operatorId = Number(operator?.userId || 0);
+        if (!dispatchId || !operatorId) throw new BadRequestException('参数非法');
+        const requiredRemark = this.normalizeRequiredRemark(remark, '客服回退到存单请填写处理原因');
+
+        const orderId = await this.prisma.$transaction(async (tx) => {
+            const dispatch = await tx.orderDispatch.findUnique({
+                where: { id: dispatchId },
+                include: {
+                    order: true,
+                },
+            });
+            if (!dispatch) throw new NotFoundException('派单批次不存在');
+            if (dispatch.status !== DispatchStatus.COMPLETED) {
+                throw new BadRequestException('仅结单状态支持回退到存单');
+            }
+            if (dispatch.order.status !== OrderStatus.COMPLETED_PENDING_CONFIRM) {
+                throw new BadRequestException('仅待确认结单阶段支持回退');
+            }
+            if (Number(dispatch.order.currentDispatchId || 0) !== Number(dispatch.id)) {
+                throw new BadRequestException('该轮已不是当前轮，不支持回退');
+            }
+            const settlementCount = await tx.orderSettlement.count({ where: { dispatchId } });
+            if (settlementCount > 0) {
+                throw new BadRequestException('该轮已生成结算数据，不支持回退');
+            }
+
+            await tx.orderDispatch.update({
+                where: { id: dispatchId },
+                data: {
+                    status: DispatchStatus.ARCHIVED,
+                    completedAt: null,
+                },
+            });
+            await tx.order.update({
+                where: { id: dispatch.orderId },
+                data: { status: OrderStatus.ARCHIVED },
+            });
+
+            await this.logOrderAction(operatorId, dispatch.orderId, 'ADMIN_ROLLBACK_DISPATCH_TO_ARCHIVED', {
+                dispatchId,
+                fromStatus: DispatchStatus.COMPLETED,
+                toStatus: DispatchStatus.ARCHIVED,
+                remark: requiredRemark,
+            }, tx, '客服回退误结单到存单');
+
+            return dispatch.orderId;
         });
 
         return this.getOrderDetail(orderId);
@@ -3113,6 +4239,7 @@ export class OrdersService {
                 isPaid: true,
                 isGifted: true,
                 giftedAmount: true,
+                isTestPayment: true,
 
                 orderQuantity: true,
                 baseAmountWan: true,
@@ -3880,7 +5007,7 @@ export class OrdersService {
         const remark = dto?.remark;
         const isAutoConfirm = Boolean(dto?.autoConfirm);
 
-        return this.prisma.$transaction(async (tx) => {
+        const result = await this.prisma.$transaction(async (tx) => {
             /**
              * Step 0：并发保护
              */
@@ -4079,6 +5206,8 @@ export class OrdersService {
                     },
                 });
 
+                await this.applyOrderMemberBenefitsTx(tx, latestOrder);
+
                 return {
                     orderId,
                     status: OrderStatus.COMPLETED,
@@ -4125,6 +5254,57 @@ export class OrdersService {
                 throw err;
             }
         });
+
+        if (!result?.previewOnly && String(result?.status || '') === String(OrderStatus.COMPLETED)) {
+            try {
+                await this.miniSubscribeMessageService.pushOrderProgressMessage(
+                    Number(orderId),
+                    '订单已完成，欢迎前往评价本次服务',
+                    '待评价',
+                );
+            } catch (e: any) {
+                console.error('[notify][mini-order-progress][confirm-complete] failed', e?.message || e);
+            }
+            try {
+                const orderAfter = await this.prisma.order.findUnique({
+                    where: { id: Number(orderId) },
+                    select: {
+                        id: true,
+                        customerUserId: true,
+                        paidAmount: true,
+                        finalPayableAmount: true,
+                        isTestPayment: true,
+                    },
+                });
+                if (orderAfter?.customerUserId) {
+                    const pointAccount = await this.prisma.memberPointAccount.findUnique({
+                        where: { userId: Number(orderAfter.customerUserId) },
+                        select: { availablePoints: true },
+                    });
+                    const profile = await this.prisma.memberProfile.findUnique({
+                        where: { userId: Number(orderAfter.customerUserId) },
+                        select: { annualContribution: true },
+                    });
+                    const benefitBaseAmount = this.resolveMemberBenefitBaseAmount(orderAfter);
+                    const points = this.getOrderRewardPointsByPaidAmount(benefitBaseAmount);
+                    const growthValue = this.getMemberGrowthValueByPaidAmount(benefitBaseAmount);
+                    await this.miniSubscribeMessageService.pushMemberAssetMessage({
+                        userId: Number(orderAfter.customerUserId),
+                        assetType: '订单奖励已到账',
+                        changeAmount: `积分+${points} / 成长值+${growthValue}`,
+                        balanceAfter: `积分余额 ${Number(pointAccount?.availablePoints || 0)} / 成长值 ${Number(profile?.annualContribution || 0)}`,
+                        targetType: 'ORDER',
+                        targetId: Number(orderAfter.id),
+                        pageQuery: { id: orderAfter.id },
+                        remark: `订单完成后已发放积分与会员成长值`,
+                    });
+                }
+            } catch (e: any) {
+                console.error('[notify][mini-member-asset][confirm-complete] failed', e?.message || e);
+            }
+        }
+
+        return result;
     }
 
     private buildEvaluationDateRange(scope?: string, startAt?: string, endAt?: string) {
@@ -4675,6 +5855,18 @@ export class OrdersService {
             remark: remark ?? null,
         });
 
+        if (allAccepted) {
+            try {
+                await this.miniSubscribeMessageService.pushOrderProgressMessage(
+                    Number(refreshed.orderId),
+                    '订单已接单，服务即将开始',
+                    '服务中',
+                );
+            } catch (e: any) {
+                console.error('[notify][mini-order-progress][accept-dispatch] failed', e?.message || e);
+            }
+        }
+
         return this.getDispatchWithParticipants(dispatchId);
     }
 
@@ -5122,9 +6314,14 @@ export class OrdersService {
      * - 抢占成功：当前请求成为“唯一结算者”
      * - 抢占失败：说明另一个请求已经在处理/处理完成
      * -----------------------------*/
-    async lockDispatchForSettlementOrThrow(dispatchId: number, tx: any) {
+    async lockDispatchForSettlementOrThrow(dispatchId: number, tx: any, allowWaitAccept = false) {
         const locked = await tx.orderDispatch.updateMany({
-            where: {id: dispatchId, status: DispatchStatus.ACCEPTED},
+            where: {
+                id: dispatchId,
+                status: allowWaitAccept
+                    ? { in: [DispatchStatus.WAIT_ACCEPT, DispatchStatus.ACCEPTED] }
+                    : DispatchStatus.ACCEPTED,
+            },
             data: {status: DispatchStatus.SETTLING},
         });
 
@@ -5343,7 +6540,8 @@ export class OrdersService {
 
         // 2️⃣ 本轮参与者
         // - ✅ 进行中（WAIT_ACCEPT/ACCEPTED/SETTLING 等）：只取 isActive=true，避免把“被替换的历史参与者”重复计入
-        // - ✅ 已完成（COMPLETED/ARCHIVED）：参与者已被置为历史（isActive=false），此时必须使用历史参与者来重算/落库
+        // - ✅ 已完成（COMPLETED/ARCHIVED）：参与者已被置为历史（isActive=false），但仍必须满足 acceptedAt!=null，
+        //      避免把“从未接单、后续被客服换人”的历史参与者误计入结算
         const dispatchStatus: any = (dispatch as any).status;
 
         const isFinalized =
@@ -5352,7 +6550,7 @@ export class OrdersService {
 
         const participants = (dispatch.participants || []).filter((p: any) => {
             if (p?.rejectedAt) return false;
-            return isFinalized ? true : !!p?.isActive;
+            return isFinalized ? !!p?.acceptedAt : !!p?.isActive;
         });
 
         if (participants.length === 0) return true;

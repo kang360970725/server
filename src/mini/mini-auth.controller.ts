@@ -47,7 +47,7 @@ export class MiniAuthController {
     const result = await this.authService.login({
       phone: body?.phone,
       password: body?.password,
-    });
+    }, { mini: true });
     if ((result as any)?.success && (result as any)?.user?.id) {
       const token = this.authService.refreshAccessToken({
         id: (result as any).user.id,

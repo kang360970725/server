@@ -1,5 +1,14 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { MemberPointBizType, MemberPointDirection, Prisma, PrismaClient, UserType, WechatBindingPlatform } from '@prisma/client';
+import {
+  CouponTemplateStatus,
+  MemberPointBizType,
+  MemberPointDirection,
+  Prisma,
+  PrismaClient,
+  UserCouponStatus,
+  UserType,
+  WechatBindingPlatform,
+} from '@prisma/client';
 import { createHash } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
@@ -52,6 +61,258 @@ export class MemberService {
         .slice(0, 50);
     }
     return [];
+  }
+
+  private normalizeRechargeCouponBenefits(input: any) {
+    const list = Array.isArray(input) ? input : [];
+    const normalized = list
+      .map((item: any) => ({
+        templateId: Number(item?.templateId || 0),
+        count: Math.max(1, Math.floor(Number(item?.count || 1))),
+      }))
+      .filter((item) => Number.isFinite(item.templateId) && item.templateId > 0)
+      .slice(0, 20);
+
+    const uniq = new Map<number, { templateId: number; count: number }>();
+    for (const item of normalized) {
+      uniq.set(item.templateId, item);
+    }
+    return Array.from(uniq.values());
+  }
+
+  private async grantRechargeCouponBenefits(
+    input: { userId: number; sourceId: number; couponBenefits: Array<{ templateId: number; count: number }> },
+    tx: PrismaTx,
+  ) {
+    const couponBenefits = this.normalizeRechargeCouponBenefits(input?.couponBenefits);
+    if (!couponBenefits.length) return [];
+
+    const templateIds = couponBenefits.map((item) => item.templateId);
+    const templates = await (tx as any).couponTemplate.findMany({
+      where: { id: { in: templateIds } },
+    });
+    const templateMap = new Map<number, any>(templates.map((item: any) => [Number(item.id), item]));
+    const now = new Date();
+    const grantedRows: any[] = [];
+
+    for (const benefit of couponBenefits) {
+      const template = templateMap.get(Number(benefit.templateId));
+      if (!template) throw new NotFoundException(`优惠券模板不存在：${benefit.templateId}`);
+      if (template.status !== CouponTemplateStatus.ACTIVE) {
+        throw new BadRequestException(`优惠券模板未生效：${template.name || benefit.templateId}`);
+      }
+      if (template.startAt && now < template.startAt) {
+        throw new BadRequestException(`优惠券模板尚未开始：${template.name || benefit.templateId}`);
+      }
+      if (template.endAt && now > template.endAt) {
+        throw new BadRequestException(`优惠券模板已过期：${template.name || benefit.templateId}`);
+      }
+      if (template.totalLimit && Number(template.issuedCount || 0) + Number(benefit.count || 0) > Number(template.totalLimit)) {
+        throw new BadRequestException(`优惠券模板库存不足：${template.name || benefit.templateId}`);
+      }
+      if (template.perUserLimit && Number(template.perUserLimit) > 0) {
+        const currentCount = await (tx as any).userCoupon.count({
+          where: { userId: Number(input.userId), templateId: Number(template.id) },
+        });
+        if (currentCount + Number(benefit.count || 0) > Number(template.perUserLimit)) {
+          throw new BadRequestException(`会员领取该券已达上限：${template.name || benefit.templateId}`);
+        }
+      }
+
+      const expiresAt = template.endAt || null;
+      const createRows = Array.from({ length: Number(benefit.count || 0) }).map(() => ({
+        userId: Number(input.userId),
+        templateId: Number(template.id),
+        status: UserCouponStatus.UNUSED,
+        receivedAt: now,
+        expiresAt,
+      }));
+      if (createRows.length) {
+        await (tx as any).userCoupon.createMany({ data: createRows });
+        await (tx as any).couponTemplate.update({
+          where: { id: Number(template.id) },
+          data: { issuedCount: { increment: createRows.length } },
+        });
+        grantedRows.push({
+          templateId: Number(template.id),
+          templateName: String(template.name || ''),
+          count: createRows.length,
+        });
+      }
+    }
+
+    if (grantedRows.length) {
+      await (tx as any).userLog.create({
+        data: {
+          userId: Number(input.userId),
+          action: 'MEMBER_RECHARGE_GIFT_COUPONS',
+          targetType: 'MEMBER_RECHARGE_ORDER',
+          targetId: Number(input.sourceId),
+          newData: { couponBenefits: grantedRows } as any,
+          remark: '会员充值赠送优惠券',
+        },
+      });
+    }
+
+    return grantedRows;
+  }
+
+  private async applyGrowthReward(
+    input: { userId: number; growthValue: number; sourceType: string; sourceId?: number; remark?: string },
+    tx: PrismaTx,
+  ) {
+    const growthValue = Math.max(0, Math.floor(Number(input?.growthValue || 0)));
+    if (growthValue <= 0) return null;
+
+    await this.ensureUserAssets(Number(input.userId), tx as any);
+    const profile = await (tx as any).memberProfile.findUnique({ where: { userId: Number(input.userId) } });
+    const totalRechargeAmount = this.round2(this.toAmount(profile?.totalRechargeAmount));
+    const annualContribution = Number(profile?.annualContribution || 0) + growthValue;
+    const levelConfig = await this.resolveLevelConfig(totalRechargeAmount, annualContribution, tx as any);
+
+    const updated = await (tx as any).memberProfile.update({
+      where: { userId: Number(input.userId) },
+      data: {
+        annualContribution,
+        levelCode: String(levelConfig?.code || 'NONE'),
+      },
+    });
+
+    await (tx as any).userLog.create({
+      data: {
+        userId: Number(input.userId),
+        action: 'MEMBER_GROWTH_CHANGE',
+        targetType: String(input.sourceType || 'MEMBER'),
+        targetId: input.sourceId ?? null,
+        newData: {
+          change: growthValue,
+          annualContribution: Number(updated?.annualContribution || 0),
+          levelCode: String(updated?.levelCode || 'NONE'),
+        } as any,
+        remark: input.remark ? String(input.remark).slice(0, 255) : '会员成长值增加',
+      },
+    });
+
+    return updated;
+  }
+
+  private normalizeGameCategoryId(input: any) {
+    return String(input || '').trim();
+  }
+
+  private normalizeGameCategoryName(input: any) {
+    return String(input || '').trim().slice(0, 120);
+  }
+
+  private normalizeGameUniqueId(input: any) {
+    return String(input || '').trim().slice(0, 64);
+  }
+
+  private normalizeGameNickname(input: any) {
+    const value = String(input || '').trim();
+    return value ? value.slice(0, 64) : '';
+  }
+
+  private isGameNumericId(value: string) {
+    return /^[0-9]{1,64}$/.test(String(value || '').trim());
+  }
+
+  private getTopLevelGameCategories(tree: any[]) {
+    return (Array.isArray(tree) ? tree : [])
+      .map((item: any) => ({
+        id: this.normalizeGameCategoryId(item?.id),
+        name: this.normalizeGameCategoryName(item?.name || item?.label || item?.title),
+      }))
+      .filter((item) => item.id && item.name);
+  }
+
+  private toMiniGameCardView(card: any) {
+    return {
+      id: Number(card?.id || 0),
+      gameCategoryId: this.normalizeGameCategoryId(card?.gameCategoryId),
+      gameCategoryName: this.normalizeGameCategoryName(card?.gameCategoryName),
+      gameUniqueId: this.normalizeGameUniqueId(card?.gameUniqueId),
+      gameNickname: this.normalizeGameNickname(card?.gameNickname),
+      isPrimary: Boolean(card?.isPrimary),
+      createdAt: card?.createdAt || null,
+      updatedAt: card?.updatedAt || null,
+    };
+  }
+
+  private async resolveMiniOrderGameCategory(projectId: number) {
+    const normalizedProjectId = Number(projectId || 0);
+    if (!normalizedProjectId) return null;
+    const project = await this.prisma.gameProject.findUnique({
+      where: { id: normalizedProjectId },
+      select: {
+        id: true,
+        name: true,
+        gameType: true,
+      },
+    });
+    if (!project) {
+      throw new BadRequestException('项目不存在');
+    }
+    const gameCategoryId = this.normalizeGameCategoryId(project.gameType);
+    if (!gameCategoryId) {
+      throw new BadRequestException('当前商品未配置所属游戏，暂时无法使用游戏名片');
+    }
+    return {
+      projectId: project.id,
+      projectName: String(project.name || '').trim(),
+      gameCategoryId,
+    };
+  }
+
+  private buildMiniGameCardFormMeta(params?: {
+    lockedCategoryId?: string | null;
+    lockedCategoryName?: string | null;
+    allowCategorySelect?: boolean;
+  }) {
+    const lockedCategoryId = this.normalizeGameCategoryId(params?.lockedCategoryId);
+    const lockedCategoryName = this.normalizeGameCategoryName(params?.lockedCategoryName);
+    const allowCategorySelect = params?.allowCategorySelect !== false;
+    return {
+      mode: allowCategorySelect ? 'FREE_CREATE' : 'ORDER_CREATE',
+      allowCategorySelect,
+      submitButton: {
+        text: '新增并绑定',
+        fixedBottom: true,
+        enabledWhenValid: true,
+      },
+      fields: [
+        {
+          key: 'gameCategoryId',
+          label: '游戏分类',
+          required: true,
+          requiredLabel: '必填',
+          disabled: !allowCategorySelect,
+          placeholder: allowCategorySelect ? '请选择游戏分类' : (lockedCategoryName || '已按商品自动锁定'),
+          value: lockedCategoryId || null,
+          valueLabel: lockedCategoryName || null,
+        },
+        {
+          key: 'gameUniqueId',
+          label: '游戏数字ID',
+          required: true,
+          requiredLabel: '必填',
+          inputType: 'number',
+          placeholder: '请填入游戏账号的唯一ID进行绑定',
+          validation: {
+            pattern: '^[0-9]{1,64}$',
+            message: '请填写正确的游戏数字ID',
+          },
+        },
+        {
+          key: 'gameNickname',
+          label: '游戏昵称',
+          required: false,
+          requiredLabel: '选填',
+          inputType: 'text',
+          placeholder: '请输入游戏昵称',
+        },
+      ],
+    };
   }
 
   private normalizePaymentTestWhitelist(input: any) {
@@ -535,12 +796,15 @@ export class MemberService {
   async createRechargePlan(data: any) {
     const amount = this.round2(Number(data?.amount || 0));
     if (amount <= 0) throw new BadRequestException('充值金额必须大于 0');
+    const couponBenefits = this.normalizeRechargeCouponBenefits(data?.couponBenefits);
     return this.prisma.memberRechargePlan.create({
       data: {
         title: String(data?.title || `充${amount}元`).trim().slice(0, 64),
         amount,
         bonusAmount: this.round2(Number(data?.bonusAmount || 0)),
         giftPoints: Math.max(0, Math.floor(Number(data?.giftPoints || 0))),
+        giftGrowthValue: Math.max(0, Math.floor(Number(data?.giftGrowthValue || 0))),
+        couponBenefits: couponBenefits.length ? (couponBenefits as any) : null,
         couponText: data?.couponText ? String(data.couponText).trim().slice(0, 120) : null,
         badgeText: data?.badgeText ? String(data.badgeText).trim().slice(0, 32) : null,
         sortOrder: Math.floor(Number(data?.sortOrder ?? 100)),
@@ -552,6 +816,9 @@ export class MemberService {
   async updateRechargePlan(id: number, data: any) {
     const exists = await this.prisma.memberRechargePlan.findUnique({ where: { id } });
     if (!exists) throw new NotFoundException('充值方案不存在');
+    const couponBenefits = data?.couponBenefits !== undefined
+      ? this.normalizeRechargeCouponBenefits(data?.couponBenefits)
+      : undefined;
     return this.prisma.memberRechargePlan.update({
       where: { id },
       data: {
@@ -559,6 +826,8 @@ export class MemberService {
         amount: data?.amount !== undefined ? this.round2(Number(data.amount || 0)) : undefined,
         bonusAmount: data?.bonusAmount !== undefined ? this.round2(Number(data.bonusAmount || 0)) : undefined,
         giftPoints: data?.giftPoints !== undefined ? Math.max(0, Math.floor(Number(data.giftPoints || 0))) : undefined,
+        giftGrowthValue: data?.giftGrowthValue !== undefined ? Math.max(0, Math.floor(Number(data.giftGrowthValue || 0))) : undefined,
+        couponBenefits: couponBenefits !== undefined ? (couponBenefits.length ? (couponBenefits as any) : null) : undefined,
         couponText: data?.couponText !== undefined ? (data.couponText ? String(data.couponText).trim().slice(0, 120) : null) : undefined,
         badgeText: data?.badgeText !== undefined ? (data.badgeText ? String(data.badgeText).trim().slice(0, 32) : null) : undefined,
         sortOrder: data?.sortOrder !== undefined ? Math.floor(Number(data.sortOrder || 100)) : undefined,
@@ -586,6 +855,8 @@ export class MemberService {
 
     const bonusAmount = this.round2(plan ? this.toAmount(plan.bonusAmount) : 0);
     const giftPoints = Math.max(0, plan ? Number(plan.giftPoints || 0) : 0);
+    const giftGrowthValue = Math.max(0, plan ? Number((plan as any).giftGrowthValue || 0) : 0);
+    const couponBenefits = plan ? this.normalizeRechargeCouponBenefits((plan as any).couponBenefits) : [];
     const grantedAmount = this.round2(amount + bonusAmount);
 
     return this.prisma.memberRechargeOrder.create({
@@ -597,6 +868,8 @@ export class MemberService {
         bonusAmount,
         grantedAmount,
         giftPoints,
+        giftGrowthValue,
+        couponBenefits: couponBenefits.length ? (couponBenefits as any) : null,
         payAmount: amount,
         payerOpenid: body?.payerOpenid ? String(body.payerOpenid).trim() : null,
       },
@@ -685,7 +958,9 @@ export class MemberService {
 
       const profile = await tx.memberProfile.findUnique({ where: { userId: order.userId } });
       const totalRechargeAmount = this.round2(this.toAmount(profile?.totalRechargeAmount) + this.toAmount(order.payAmount));
-      const annualContribution = Number(profile?.annualContribution || 0) + Math.max(0, Math.floor(this.toAmount(order.payAmount)));
+      const annualContribution = Number(profile?.annualContribution || 0)
+        + Math.max(0, Math.floor(this.toAmount(order.payAmount)))
+        + Math.max(0, Math.floor(Number((order as any)?.giftGrowthValue || 0)));
       const levelConfig = await this.resolveLevelConfig(totalRechargeAmount, annualContribution, tx as any);
       await tx.memberProfile.update({
         where: { userId: order.userId },
@@ -708,7 +983,136 @@ export class MemberService {
         }, tx as any);
       }
 
+      const couponBenefits = this.normalizeRechargeCouponBenefits((order as any)?.couponBenefits);
+      if (couponBenefits.length) {
+        await this.grantRechargeCouponBenefits({
+          userId: Number(order.userId),
+          sourceId: Number(order.id),
+          couponBenefits,
+        }, tx as any);
+      }
+
       return settled;
+    });
+  }
+
+  async manualRecharge(input: {
+    userId: number;
+    planId?: number;
+    amount?: number;
+    bonusAmount?: number;
+    giftPoints?: number;
+    giftGrowthValue?: number;
+    couponBenefits?: Array<{ templateId: number; count: number }>;
+    remark?: string;
+  }, operatorId?: number) {
+    const userId = Number(input?.userId || 0);
+    if (!userId) throw new BadRequestException('userId 必填');
+    await this.ensureUserAssets(userId);
+
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, phone: true } });
+    if (!user) throw new NotFoundException('会员不存在');
+
+    let plan: any = null;
+    if (input?.planId) {
+      plan = await this.prisma.memberRechargePlan.findUnique({ where: { id: Number(input.planId) } });
+      if (!plan || !plan.enabled) throw new BadRequestException('充值方案不存在或已停用');
+    }
+
+    const amount = this.round2(input?.amount !== undefined ? Number(input.amount) : this.toAmount(plan?.amount));
+    if (amount <= 0) throw new BadRequestException('充值金额必须大于 0');
+
+    const bonusAmount = this.round2(input?.bonusAmount !== undefined ? Number(input.bonusAmount) : this.toAmount(plan?.bonusAmount));
+    const giftPoints = Math.max(0, Math.floor(input?.giftPoints !== undefined ? Number(input.giftPoints) : Number(plan?.giftPoints || 0)));
+    const giftGrowthValue = Math.max(0, Math.floor(input?.giftGrowthValue !== undefined ? Number(input.giftGrowthValue) : Number((plan as any)?.giftGrowthValue || 0)));
+    const couponBenefits = this.normalizeRechargeCouponBenefits(
+      input?.couponBenefits !== undefined ? input.couponBenefits : (plan as any)?.couponBenefits,
+    );
+
+    const created = await this.prisma.memberRechargeOrder.create({
+      data: {
+        rechargeNo: this.buildRechargeNo(userId),
+        userId,
+        planId: plan?.id ?? null,
+        amount,
+        bonusAmount,
+        grantedAmount: this.round2(amount + bonusAmount),
+        giftPoints,
+        giftGrowthValue,
+        couponBenefits: couponBenefits.length ? (couponBenefits as any) : null,
+        payAmount: amount,
+        channel: 'MANUAL',
+        operatorId: operatorId ? Number(operatorId) : null,
+        remark: input?.remark ? String(input.remark).trim().slice(0, 255) : null,
+      },
+    });
+
+    try {
+      await this.settleRechargeSuccess(created.rechargeNo, {
+        notifyRaw: {
+          channel: 'MANUAL',
+          operatorId: operatorId ? Number(operatorId) : null,
+          remark: input?.remark ? String(input.remark).trim().slice(0, 255) : null,
+        },
+      });
+    } catch (error) {
+      await this.prisma.memberRechargeOrder.update({
+        where: { id: Number(created.id) },
+        data: {
+          status: 'FAILED' as any,
+          notifyRaw: {
+            channel: 'MANUAL',
+            operatorId: operatorId ? Number(operatorId) : null,
+            remark: input?.remark ? String(input.remark).trim().slice(0, 255) : null,
+            errorMessage: error instanceof Error ? error.message : String(error || 'manual recharge failed'),
+          } as any,
+        },
+      });
+      throw error;
+    }
+
+    return this.prisma.memberRechargeOrder.findUnique({ where: { id: created.id } });
+  }
+
+  async adjustGrowth(input: { userId: number; growthValue: number; remark?: string }) {
+    const userId = Number(input?.userId || 0);
+    const delta = Math.trunc(Number(input?.growthValue || 0));
+    if (!userId) throw new BadRequestException('userId 必填');
+    if (!delta) throw new BadRequestException('成长值调整值不能为 0');
+
+    return this.prisma.$transaction(async (tx) => {
+      await this.ensureUserAssets(userId, tx as any);
+      const profile = await tx.memberProfile.findUnique({ where: { userId } });
+      if (!profile) throw new NotFoundException('会员档案不存在');
+
+      const nextAnnualContribution = Math.max(0, Number(profile.annualContribution || 0) + delta);
+      const levelConfig = await this.resolveLevelConfig(
+        this.round2(this.toAmount(profile.totalRechargeAmount)),
+        nextAnnualContribution,
+        tx as any,
+      );
+
+      const updated = await tx.memberProfile.update({
+        where: { userId },
+        data: {
+          annualContribution: nextAnnualContribution,
+          levelCode: String(levelConfig?.code || 'NONE'),
+        },
+      });
+
+      await tx.userLog.create({
+        data: {
+          userId,
+          action: 'ADMIN_ADJUST_MEMBER_GROWTH',
+          targetType: 'MEMBER_PROFILE',
+          targetId: Number(updated.id),
+          oldData: { annualContribution: Number(profile.annualContribution || 0), levelCode: String(profile.levelCode || 'NONE') } as any,
+          newData: { annualContribution: nextAnnualContribution, levelCode: String(updated.levelCode || 'NONE'), delta } as any,
+          remark: input?.remark ? String(input.remark).slice(0, 255) : (delta > 0 ? '后台人工增加成长值' : '后台人工扣减成长值'),
+        },
+      });
+
+      return updated;
     });
   }
 
@@ -768,6 +1172,262 @@ export class MemberService {
       },
       memberLevels: levelConfigs,
     };
+  }
+
+  async listMiniGameCategories() {
+    const tree = await this.systemConfigService.getGoodsCategoryTree();
+    return this.getTopLevelGameCategories(tree);
+  }
+
+  async listMiniGameCards(userId: number, options?: { projectId?: number }) {
+    const orderContext = options?.projectId
+      ? await this.resolveMiniOrderGameCategory(Number(options.projectId))
+      : null;
+
+    const [categories, cards, orderCount] = await Promise.all([
+      this.listMiniGameCategories(),
+      this.prisma.memberGameCard.findMany({
+        where: { userId },
+        orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
+      }),
+      this.prisma.order.count({
+        where: { customerUserId: userId },
+      }),
+    ]);
+
+    const normalizedCards = cards.map((item) => this.toMiniGameCardView(item));
+    const filteredCards = orderContext
+      ? normalizedCards.filter((item) => item.gameCategoryId === orderContext.gameCategoryId)
+      : normalizedCards;
+    const lockedCategory = orderContext
+      ? categories.find((item) => item.id === orderContext.gameCategoryId) || {
+          id: orderContext.gameCategoryId,
+          name: '',
+        }
+      : null;
+
+    return {
+      categories,
+      cards: filteredCards,
+      rules: {
+        maxCardsPerGame: 2,
+        allowEdit: false,
+        allowDelete: false,
+      },
+      isFirstOrder: orderCount <= 0,
+      orderContext: orderContext
+        ? {
+            projectId: orderContext.projectId,
+            projectName: orderContext.projectName,
+            gameCategoryId: orderContext.gameCategoryId,
+            gameCategoryName: this.normalizeGameCategoryName(lockedCategory?.name || ''),
+            hasBoundCards: filteredCards.length > 0,
+            createDirectly: filteredCards.length <= 0,
+          }
+        : null,
+      createForm: this.buildMiniGameCardFormMeta(
+        orderContext
+          ? {
+              lockedCategoryId: orderContext.gameCategoryId,
+              lockedCategoryName: lockedCategory?.name || '',
+              allowCategorySelect: false,
+            }
+          : {
+              allowCategorySelect: true,
+            },
+      ),
+    };
+  }
+
+  async createMiniGameCard(userId: number, body: any) {
+    const orderContext = body?.projectId ? await this.resolveMiniOrderGameCategory(Number(body.projectId)) : null;
+    const gameCategoryId = orderContext?.gameCategoryId || this.normalizeGameCategoryId(body?.gameCategoryId);
+    const gameUniqueId = this.normalizeGameUniqueId(body?.gameUniqueId);
+    const gameNickname = this.normalizeGameNickname(body?.gameNickname);
+    const requestedPrimary = Boolean(body?.isPrimary);
+
+    if (!gameCategoryId) throw new BadRequestException('请选择所属游戏');
+    if (!gameUniqueId) throw new BadRequestException('请输入游戏数字ID');
+    if (!this.isGameNumericId(gameUniqueId)) throw new BadRequestException('请填写正确的游戏数字ID');
+
+    const categories = await this.listMiniGameCategories();
+    const category = categories.find((item) => item.id === gameCategoryId);
+    if (!category) {
+      throw new BadRequestException('所属游戏无效，仅支持一级游戏分类');
+    }
+
+    const existingGlobal = await this.prisma.memberGameCard.findFirst({
+      where: {
+        gameCategoryId,
+        gameUniqueId,
+      },
+      select: {
+        id: true,
+        userId: true,
+      },
+    });
+    if (existingGlobal) {
+      throw new BadRequestException(
+        Number(existingGlobal.userId) === Number(userId)
+          ? '该游戏数字ID已绑定到你的游戏名片'
+          : '该游戏数字ID已被其他会员绑定',
+      );
+    }
+
+    const [sameGameCount, hasPrimary] = await Promise.all([
+      this.prisma.memberGameCard.count({
+        where: { userId, gameCategoryId },
+      }),
+      this.prisma.memberGameCard.count({
+        where: { userId, isPrimary: true },
+      }),
+    ]);
+
+    if (sameGameCount >= 2) {
+      throw new BadRequestException('每款游戏最多仅可添加 2 张游戏名片');
+    }
+
+    const shouldSetPrimary = requestedPrimary || hasPrimary <= 0;
+
+    return this.prisma.$transaction(async (tx) => {
+      if (shouldSetPrimary) {
+        await tx.memberGameCard.updateMany({
+          where: { userId, isPrimary: true },
+          data: { isPrimary: false },
+        });
+      }
+
+      const created = await tx.memberGameCard.create({
+        data: {
+          userId,
+          gameCategoryId,
+          gameCategoryName: category.name,
+          gameUniqueId,
+          gameNickname: gameNickname || null,
+          isPrimary: shouldSetPrimary,
+        },
+      });
+
+      return this.toMiniGameCardView(created);
+    });
+  }
+
+  async listAdminGameCards(userId: number) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true },
+    });
+    if (!user) {
+      throw new NotFoundException('用户不存在');
+    }
+    return this.listMiniGameCards(userId);
+  }
+
+  async createAdminGameCard(userId: number, body: any) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true },
+    });
+    if (!user) {
+      throw new NotFoundException('用户不存在');
+    }
+    return this.createMiniGameCard(userId, body || {});
+  }
+
+  async setAdminGameCardPrimary(userId: number, cardId: number) {
+    if (!userId || !cardId) throw new BadRequestException('参数非法');
+
+    return this.prisma.$transaction(async (tx) => {
+      const card = await tx.memberGameCard.findFirst({
+        where: { id: cardId, userId },
+      });
+      if (!card) {
+        throw new NotFoundException('游戏名片不存在');
+      }
+
+      await tx.memberGameCard.updateMany({
+        where: { userId, isPrimary: true },
+        data: { isPrimary: false },
+      });
+
+      const updated = await tx.memberGameCard.update({
+        where: { id: cardId },
+        data: { isPrimary: true },
+      });
+
+      return this.toMiniGameCardView(updated);
+    });
+  }
+
+  async deleteAdminGameCard(userId: number, cardId: number) {
+    if (!userId || !cardId) throw new BadRequestException('参数非法');
+
+    return this.prisma.$transaction(async (tx) => {
+      const card = await tx.memberGameCard.findFirst({
+        where: { id: cardId, userId },
+      });
+      if (!card) {
+        throw new NotFoundException('游戏名片不存在');
+      }
+
+      await tx.memberGameCard.delete({
+        where: { id: cardId },
+      });
+
+      if (card.isPrimary) {
+        const nextPrimary = await tx.memberGameCard.findFirst({
+          where: { userId },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        });
+        if (nextPrimary) {
+          await tx.memberGameCard.update({
+            where: { id: nextPrimary.id },
+            data: { isPrimary: true },
+          });
+        }
+      }
+
+      return { success: true };
+    });
+  }
+
+  async assertMiniGameCardForOrder(userId: number, projectId: number, customerGameId: any) {
+    const normalizedProjectId = Number(projectId || 0);
+    const gameUniqueId = this.normalizeGameUniqueId(customerGameId);
+    if (!normalizedProjectId) throw new BadRequestException('projectId 必填');
+    if (!gameUniqueId) throw new BadRequestException('请先选择游戏名片');
+
+    const project = await this.prisma.gameProject.findUnique({
+      where: { id: normalizedProjectId },
+      select: {
+        id: true,
+        gameType: true,
+        name: true,
+      },
+    });
+    if (!project) throw new BadRequestException('项目不存在');
+
+    const gameCategoryId = this.normalizeGameCategoryId(project.gameType);
+    if (!gameCategoryId) {
+      throw new BadRequestException('当前商品未配置所属游戏，暂时无法使用游戏名片下单');
+    }
+
+    const matched = await this.prisma.memberGameCard.findFirst({
+      where: {
+        userId,
+        gameCategoryId,
+        gameUniqueId,
+      },
+      select: {
+        id: true,
+        gameUniqueId: true,
+      },
+    });
+    if (!matched) {
+      throw new BadRequestException('当前订单请选择该游戏下已维护的游戏名片');
+    }
+
+    return matched.gameUniqueId;
   }
 
   async canUseMiniPaymentTestMode(
@@ -1122,11 +1782,17 @@ export class MemberService {
       }
 
       if (sourceWallet && targetWallet) {
+        const targetEarningFrozen = this.toAmount((targetWallet as any).earningFrozenBalance ?? 0);
+        const sourceEarningFrozen = this.toAmount((sourceWallet as any).earningFrozenBalance ?? 0);
+        const targetWithdrawFrozen = this.toAmount((targetWallet as any).withdrawFrozenBalance ?? 0);
+        const sourceWithdrawFrozen = this.toAmount((sourceWallet as any).withdrawFrozenBalance ?? 0);
         await tx.walletAccount.update({
           where: { userId: targetUserId },
           data: {
             availableBalance: this.round2(this.toAmount(targetWallet.availableBalance) + this.toAmount(sourceWallet.availableBalance)),
             frozenBalance: this.round2(this.toAmount(targetWallet.frozenBalance) + this.toAmount(sourceWallet.frozenBalance)),
+            earningFrozenBalance: this.round2(targetEarningFrozen + sourceEarningFrozen),
+            withdrawFrozenBalance: this.round2(targetWithdrawFrozen + sourceWithdrawFrozen),
             depositBalance: this.round2(this.toAmount(targetWallet.depositBalance) + this.toAmount(sourceWallet.depositBalance)),
           },
         });

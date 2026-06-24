@@ -61,6 +61,30 @@ export class WalletController {
             startAt: query?.startAt,
             endAt: query?.endAt,
             limitMismatches: query?.limitMismatches ? Number(query.limitMismatches) : undefined,
+            mode: String(query?.mode || 'full').trim().toLowerCase() === 'legacy' ? 'legacy' : 'full',
+        });
+    }
+
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE)
+    @Get('anomalies')
+    async auditAnomalies(@Query() query: any) {
+        return this.walletService.auditWalletAnomalies({
+            userId: query?.userId ? Number(query.userId) : undefined,
+            onlyIssues: String(query?.onlyIssues ?? 'true').trim().toLowerCase() !== 'false',
+            limit: query?.limit ? Number(query.limit) : undefined,
+        });
+    }
+
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE)
+    @Post('anomalies/repair')
+    async repairAnomalies(@Body() body: any) {
+        return this.walletService.repairWalletAnomalies({
+            userId: body?.userId ? Number(body.userId) : undefined,
+            apply: body?.apply === true,
+            includeDeficitUsers: body?.includeDeficitUsers === true,
+            limit: body?.limit ? Number(body.limit) : undefined,
         });
     }
     /**
@@ -71,15 +95,6 @@ export class WalletController {
     async listMyHolds(@Query() query: QueryWalletHoldsDto, @Request() req: any) {
         const userId = Number(req?.user?.userId ?? req?.user?.id ?? req?.user?.sub);
         return this.walletService.listMyHolds(userId, query);
-    }
-
-    /**
-     * 钱包统计
-     * GET /wallet/statistics
-     */
-    @Get('statistics')
-    async getWalletStatistics() {
-        return this.walletService.getWalletStatistics();
     }
 
     @Post('withdraw/qr-code')

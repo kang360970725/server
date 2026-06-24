@@ -91,7 +91,15 @@ function calcDelta(tx: TxLite) {
   if (biz === 'WITHDRAW_RELEASE') return { da: amount, df: -amount };
   if (biz === 'WITHDRAW_PAYOUT') return { da: 0, df: -amount };
 
-  if (biz === 'REFUND_REVERSAL' || biz === 'OFFLINE_FEE_PAYMENT' || biz === 'DEPOSIT_ADD' || biz === 'DEPOSIT_DEDUCT') {
+  if (
+    biz === 'REFUND_REVERSAL' ||
+    biz === 'OFFLINE_FEE_PAYMENT' ||
+    biz === 'DEPOSIT_ADD' ||
+    biz === 'DEPOSIT_DEDUCT' ||
+    biz === 'DEPOSIT_REFUND' ||
+    biz === 'STAFF_EXIT_RELEASE' ||
+    biz === 'STAFF_EXIT_CLEAR'
+  ) {
     if (direction === 'IN') return { da: amount, df: 0 };
     if (direction === 'OUT') return { da: -amount, df: 0 };
     return { da: 0, df: 0 };

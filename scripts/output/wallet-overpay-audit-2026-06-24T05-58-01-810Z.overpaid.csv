@@ -1,0 +1,4 @@
+userId,txCount,overpaidAmount,diffTotal,diffAvailable,diffFrozen,accountTotal,replayTotal,accountAvailable,accountFrozen,replayAvailable,replayFrozen,payoutTotal,settlementTotal,bombLossTotal,refundReversalNet,depositAdjustNet,offlineFeeNet,hasNegativeMoment,lastTxAt
+96,92,288,-288,-288,0,992.4,704.4,992.4,0,704.4,0,3473,4190.9,13.5,0,0,0,false,2026-06-14T14:02:55.304Z
+66,457,49,-49,-394.1,345.1,11762.2,11713.2,9772.2,1990,9378.1,2335.1,24090,35903.8,59.6,-41,0,0,true,2026-06-23T11:00:00.130Z
+87,2568,1.2,-1.2,-1.2,0,1292.8,1291.6,795.4,497.4,794.2,497.4,4000,5295.5,0,-1.2,0,0,true,2026-06-14T19:00:00.125Z

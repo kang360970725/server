@@ -7,6 +7,7 @@ import {
     IsBoolean, Min,
     IsIn,
     IsDateString,
+    IsArray,
 } from 'class-validator';
 import { UserType, UserStatus } from '@prisma/client';
 
@@ -75,4 +76,8 @@ export class CreateUserDto {
     @IsOptional()
     @IsDateString()
     offlineJoinedAt?: string;
+
+    @IsOptional()
+    @IsArray()
+    staffTags?: string[];
 }

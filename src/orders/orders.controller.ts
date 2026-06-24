@@ -1,6 +1,7 @@
 import {
     Body,
     Controller,
+    Get,
     Post,
     UseGuards,
     Request,
@@ -8,6 +9,7 @@ import {
     BadRequestException,
     Req,
     Param,
+    Query,
     ForbiddenException,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -166,7 +168,7 @@ export class OrdersController {
     async archive(@Body() body: any, @Request() req: any) {
         const dispatchId = Number(body.dispatchId);
         if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
-        return this.ordersService.archiveDispatch(DispatchStatus.ARCHIVED,dispatchId, req.user, body);
+        return this.ordersService.adminArchiveDispatch(DispatchStatus.ARCHIVED,dispatchId, req.user, body);
     }
 
     /** 结单（管理端） */
@@ -177,8 +179,35 @@ export class OrdersController {
     async complete(@Body() body: any, @Request() req: any) {
         const dispatchId = Number(body.dispatchId);
         if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
-        return this.ordersService.archiveDispatch(DispatchStatus.COMPLETED,dispatchId, req.user, body);
+        return this.ordersService.adminArchiveDispatch(DispatchStatus.COMPLETED,dispatchId, req.user, body);
         // return this.ordersService.completeDispatch('',dispatchId, req.user?.userId, body);
+    }
+
+    @Post('dispatch/admin-accept')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:detail:page')
+    async adminAccept(@Body() body: any, @Request() req: any) {
+        const dispatchId = Number(body.dispatchId);
+        if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
+        return this.ordersService.adminAcceptDispatch(dispatchId, req.user, body.remark);
+    }
+
+    @Post('dispatch/rollback-to-accepted')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:detail:page')
+    async rollbackToAccepted(@Body() body: any, @Request() req: any) {
+        const dispatchId = Number(body.dispatchId);
+        if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
+        return this.ordersService.rollbackDispatchToAccepted(dispatchId, req.user, body.remark);
+    }
+
+    @Post('dispatch/rollback-to-archived')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:detail:page')
+    async rollbackToArchived(@Body() body: any, @Request() req: any) {
+        const dispatchId = Number(body.dispatchId);
+        if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
+        return this.ordersService.rollbackCompletedDispatchToArchived(dispatchId, req.user, body.remark);
     }
 
     /** 修改实付金额（管理端） */
@@ -264,6 +293,7 @@ export class OrdersController {
             liableUserIds?: number[];
             hasCompensation?: boolean;
             compensationAmount?: number;
+            refundAmount?: number;
         },
         @Req() req: any,
     ) {
@@ -278,7 +308,34 @@ export class OrdersController {
                 body?.compensationAmount === undefined || body?.compensationAmount === null
                     ? undefined
                     : Number(body.compensationAmount),
+            refundAmount:
+                body?.refundAmount === undefined || body?.refundAmount === null
+                    ? undefined
+                    : Number(body.refundAmount),
         });
+    }
+
+    @Get('complaints')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:list:page')
+    listComplaints(@Query() query: any) {
+        return this.ordersService.listComplaintWorkOrders(query || {});
+    }
+
+    @Post('complaints/:id/review')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:list:page')
+    reviewComplaint(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Req() req: any) {
+        const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+        return this.ordersService.reviewComplaintWorkOrder(id, operatorId, body || {});
+    }
+
+    @Post('complaints/:id/refund')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:list:page')
+    refundComplaint(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Req() req: any) {
+        const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+        return this.ordersService.refundComplaintWorkOrder(id, operatorId, body || {});
     }
 
     /** 订单编辑（管理端） */

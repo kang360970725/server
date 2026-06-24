@@ -58,8 +58,16 @@ export class CreateOrderDto {
     customerGameId?: string;
 
     @IsOptional()
+    @IsInt()
+    customerUserId?: number;
+
+    @IsOptional()
     @IsString()
     orderSource?: string;
+
+    @IsOptional()
+    @IsString()
+    paymentChannel?: string;
 
     @IsOptional()
     @IsNumber()

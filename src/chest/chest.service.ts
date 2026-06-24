@@ -1,6 +1,5 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
-import * as crypto from 'crypto';
 
 const CHEST_ACTIVITY_KEY = 'treasure_box_demo';
 const CHEST_TEST_CODE = 'CHEST8888';
@@ -733,62 +732,27 @@ export class ChestService {
     return { total, page: safePage, pageSize: safePageSize, list };
   }
 
-  private guestPhoneByDevice(deviceId: string) {
-    const hash = crypto.createHash('md5').update(String(deviceId || '')).digest('hex').slice(0, 12);
-    return `guest_${hash}`;
-  }
-
-  private async ensureGuestUserByDevice(deviceIdRaw: string) {
-    const deviceId = String(deviceIdRaw || '').trim();
-    if (!deviceId) throw new BadRequestException('deviceId 不能为空');
-    const phone = this.guestPhoneByDevice(deviceId);
-    const existed = await this.prisma.user.findUnique({ where: { phone }, select: { id: true } });
-    if (existed?.id) return Number(existed.id);
-    try {
-      const created = await this.prisma.user.create({
-        data: {
-          phone,
-          password: 'guest-no-login',
-          name: `访客${phone.slice(-4)}`,
-          userType: 'REGISTERED_USER' as any,
-        },
-        select: { id: true },
-      });
-      return Number(created.id);
-    } catch (e: any) {
-      const msg = String(e?.message || '').toLowerCase();
-      const isPhoneUniqueConflict = msg.includes('users_phone_key') || msg.includes('unique constraint');
-      if (!isPhoneUniqueConflict) throw e;
-      const row = await this.prisma.user.findUnique({ where: { phone }, select: { id: true } });
-      if (row?.id) return Number(row.id);
-      throw e;
-    }
-  }
-
-  private async ensureUserByDeviceOrPhone(deviceId: string, phoneRaw?: string) {
+  private async resolvePublicUserId(phoneRaw?: string, required = false) {
     const normalizedPhone = String(phoneRaw || '').trim();
-    if (normalizedPhone) {
-      const phoneUser = await this.prisma.user.findUnique({
-        where: { phone: normalizedPhone },
-        select: { id: true },
-      });
-      if (phoneUser?.id) return Number(phoneUser.id);
-      const created = await this.prisma.user.create({
-        data: {
-          phone: normalizedPhone,
-          password: 'guest-no-login',
-          name: `用户${normalizedPhone.slice(-4)}`,
-          userType: 'REGISTERED_USER' as any,
-        },
-        select: { id: true },
-      });
-      return Number(created.id);
+    if (!normalizedPhone) {
+      if (required) {
+        throw new BadRequestException('请先绑定手机号后再参与活动');
+      }
+      return null;
     }
-    return this.ensureGuestUserByDevice(deviceId);
+    const phoneUser = await this.prisma.user.findUnique({
+      where: { phone: normalizedPhone },
+      select: { id: true },
+    });
+    if (!phoneUser?.id) {
+      throw new NotFoundException('当前手机号未注册，请先在小程序完成注册或绑定');
+    }
+    return Number(phoneUser.id);
   }
 
   async publicRedeem(deviceId: string, code: string, phone?: string) {
-    const userId = await this.ensureUserByDeviceOrPhone(deviceId, phone);
+    void deviceId;
+    const userId = await this.resolvePublicUserId(phone, true);
     return this.redeemCode(userId, code);
   }
 
@@ -899,8 +863,9 @@ export class ChestService {
   }
 
   async publicStatus(deviceId: string, phone?: string, codeRaw?: string) {
+    void deviceId;
     const config = await this.ensureConfig();
-    await this.ensureUserByDeviceOrPhone(deviceId, phone);
+    await this.resolvePublicUserId(phone, false);
     const code = String(codeRaw || '').trim().toUpperCase();
     if (!code) {
       return { enabled: config.enabled, title: config.title, keyCount: 0, code: null, remaining: 0 };
@@ -914,9 +879,10 @@ export class ChestService {
   }
 
   async publicOpen(deviceId: string, costKeys?: number, phone?: string, codeRaw?: string) {
+    void deviceId;
     const config = await this.ensureConfig();
     if (!config.enabled) throw new BadRequestException('活动未开启');
-    const userId = await this.ensureUserByDeviceOrPhone(deviceId, phone);
+    const userId = await this.resolvePublicUserId(phone, true);
     const consume = Math.max(1, Math.min(10, Math.floor(Number(costKeys || 1))));
     const code = String(codeRaw || '').trim().toUpperCase();
     if (!code) throw new BadRequestException('请先提供兑换码');
@@ -973,7 +939,8 @@ export class ChestService {
   }
 
   async publicHistory(deviceId: string, page?: number, pageSize?: number, phone?: string, codeRaw?: string) {
-    await this.ensureUserByDeviceOrPhone(deviceId, phone);
+    void deviceId;
+    await this.resolvePublicUserId(phone, true);
     const code = String(codeRaw || '').trim().toUpperCase();
     if (!code) return { total: 0, page: 1, pageSize: 20, list: [] };
     return this.getCodeOpenHistory({ code, page, pageSize });
@@ -1004,9 +971,10 @@ export class ChestService {
   }
 
   async publicPromoStatus(deviceId: string, promoCodeRaw: string, phone?: string) {
+    void deviceId;
     const promoCode = String(promoCodeRaw || '').trim().toUpperCase();
     if (!promoCode) throw new BadRequestException('推广码不能为空');
-    await this.ensureUserByDeviceOrPhone(deviceId, phone);
+    await this.resolvePublicUserId(phone, false);
     let bundle: any = null;
     try {
       bundle = await this.prisma.chestPromoBundle.findUnique({
@@ -1035,7 +1003,7 @@ export class ChestService {
     const normalizedDeviceId = String(deviceId || '').trim();
     if (!normalizedDeviceId) throw new BadRequestException('deviceId 不能为空');
     if (!promoCode) throw new BadRequestException('推广码不能为空');
-    const userId = await this.ensureUserByDeviceOrPhone(normalizedDeviceId, phone);
+    const userId = await this.resolvePublicUserId(phone, true);
 
     try {
       return this.prisma.$transaction(async (tx) => {

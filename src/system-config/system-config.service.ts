@@ -1,7 +1,7 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import { UpsertSystemConfigDto } from './dto/upsert-system-config.dto';
-import { UserType } from '@prisma/client';
+import { ProjectStatus, UserType } from '@prisma/client';
 
 @Injectable()
 export class SystemConfigService implements OnModuleInit {
@@ -45,6 +45,45 @@ export class SystemConfigService implements OnModuleInit {
     return normalized;
   }
 
+  private async filterMiniappHomeProductTargets(config: any) {
+    const normalized = this.normalizeMiniappHomeConfig(config);
+    const sections = ['banners', 'hotSales', 'limitedBenefits', 'recommendedStaff', 'hotEvents', 'quickEntries', 'esportsGoods'];
+    const productIds = new Set<number>();
+
+    for (const section of sections) {
+      const list = Array.isArray(normalized?.[section]) ? normalized[section] : [];
+      for (const item of list) {
+        if (String(item?.targetType || '').toLowerCase() !== 'product') continue;
+        const productId = Number(item?.targetValue);
+        if (Number.isFinite(productId) && productId > 0) productIds.add(productId);
+      }
+    }
+
+    if (!productIds.size) return normalized;
+
+    const visibleProjects = await this.prisma.gameProject.findMany({
+      where: {
+        id: { in: Array.from(productIds) },
+        status: ProjectStatus.ACTIVE,
+        showInMenuList: true,
+      },
+      select: { id: true },
+    });
+
+    const visibleSet = new Set(visibleProjects.map((item) => Number(item.id)));
+
+    for (const section of sections) {
+      const list = Array.isArray(normalized?.[section]) ? normalized[section] : [];
+      normalized[section] = list.filter((item: any) => {
+        if (String(item?.targetType || '').toLowerCase() !== 'product') return true;
+        const productId = Number(item?.targetValue);
+        return Number.isFinite(productId) && visibleSet.has(productId);
+      });
+    }
+
+    return normalized;
+  }
+
   async onModuleInit() {
     await this.ensureDefaults();
   }
@@ -65,6 +104,7 @@ export class SystemConfigService implements OnModuleInit {
     WECHAT_PAY_RECHARGE_NOTIFY_URL: 'wechat_pay_recharge_notify_url',
     WECHAT_MINI_APPID: 'wechat_mini_appid',
     WECHAT_MINI_APPSECRET: 'wechat_mini_appsecret',
+    WECHAT_MINI_SUBSCRIBE_MESSAGE_TEMPLATES: 'wechat_mini_subscribe_message_templates',
     COS_SECRET_ID: 'cos_secret_id',
     COS_SECRET_KEY: 'cos_secret_key',
     COS_BUCKET: 'cos_bucket',
@@ -77,6 +117,7 @@ export class SystemConfigService implements OnModuleInit {
     MINIAPP_PROTOCOLS: 'miniapp_protocols',
     GOODS_CATEGORY_TREE: 'goods_category_tree',
     GOODS_TAG_LIST: 'goods_tag_list',
+    STAFF_RULE_ENGINE_V1: 'staff_rule_engine_v1',
   } as const;
 
   async ensureDefaults() {
@@ -175,6 +216,68 @@ export class SystemConfigService implements OnModuleInit {
         value: String(process.env.WECHAT_MINI_APPSECRET || '').trim(),
         valueType: 'STRING',
         remark: '微信小程序 AppSecret',
+      },
+      {
+        key: SystemConfigService.KEYS.WECHAT_MINI_SUBSCRIBE_MESSAGE_TEMPLATES,
+        value: JSON.stringify({
+          orderProgress: {
+            enabled: false,
+            title: '订单进度提醒',
+            description: '用于提醒订单创建、派单、接单、完成、退款等进度变化',
+            templateId: '',
+            page: '/pages/order-details/index',
+            fields: {
+              orderNo: 'character_string1',
+              projectName: 'thing2',
+              status: 'thing3',
+              updatedAt: 'time4',
+              remark: 'thing5',
+            },
+          },
+          memberAsset: {
+            enabled: false,
+            title: '会员资产变动提醒',
+            description: '用于提醒积分到账、成长值变动、退款回退等会员资产变化',
+            templateId: '',
+            page: '/pages/membership/index',
+            fields: {
+              assetType: 'thing1',
+              changeAmount: 'thing2',
+              balanceAfter: 'thing3',
+              updatedAt: 'time4',
+              remark: 'thing5',
+            },
+          },
+          afterSalesResult: {
+            enabled: false,
+            title: '售后/退款处理结果提醒',
+            description: '用于提醒售后审核通过、审核驳回、退款完成等结果',
+            templateId: '',
+            page: '/pages/after-sales/index',
+            fields: {
+              orderNo: 'character_string1',
+              result: 'thing2',
+              refundAmount: 'amount3',
+              reviewedAt: 'time4',
+              remark: 'thing5',
+            },
+          },
+          marketingActivity: {
+            enabled: false,
+            title: '新玩法活动通知',
+            description: '用于通知新玩法上新、活动开售、福利提醒',
+            templateId: '',
+            page: '/pages/index/index',
+            fields: {
+              activityName: 'thing1',
+              startAt: 'time2',
+              benefit: 'thing3',
+              remark: 'thing4',
+            },
+          },
+        }, null, 2),
+        valueType: 'JSON',
+        remark: '微信小程序订阅消息模板配置',
       },
       {
         key: SystemConfigService.KEYS.COS_SECRET_ID,
@@ -441,6 +544,12 @@ export class SystemConfigService implements OnModuleInit {
         valueType: 'JSON',
         remark: '商品标签列表（按一级分类绑定）',
       },
+      {
+        key: SystemConfigService.KEYS.STAFF_RULE_ENGINE_V1,
+        value: JSON.stringify({ tags: [], rules: [] }, null, 2),
+        valueType: 'JSON',
+        remark: '员工标签与提现/退店规则配置',
+      },
     ] as const;
 
     for (const item of defaults) {
@@ -605,7 +714,8 @@ export class SystemConfigService implements OnModuleInit {
       quickEntries: [],
       esportsGoods: [],
     };
-    return this.getJson(SystemConfigService.KEYS.MINIAPP_HOME_CONFIG_PUBLISHED, fallback);
+    const config = await this.getJson(SystemConfigService.KEYS.MINIAPP_HOME_CONFIG_PUBLISHED, fallback);
+    return this.filterMiniappHomeProductTargets(config);
   }
 
   async publishMiniappHomeConfig() {

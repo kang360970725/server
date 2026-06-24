@@ -124,7 +124,10 @@ export class MiniProjectsController {
 
     const discountMap = await this.getActiveDiscountProductMap();
     const hiddenIds = Array.from(discountMap.keys());
-    const where: any = { status: ProjectStatus.ACTIVE };
+    const where: any = {
+      status: ProjectStatus.ACTIVE,
+      showInMenuList: true,
+    };
     if (hiddenIds.length) {
       where.id = { notIn: hiddenIds };
     }
@@ -236,8 +239,16 @@ export class MiniProjectsController {
     const discountMap = await this.getActiveDiscountProductMap();
     const discount = discountMap.get(id);
     const st = (await this.getProjectRatingStats([id])).get(id) || { ratingAvg: 0, ratingCount: 0 };
+    const categoryTree = await this.systemConfigService.getGoodsCategoryTree();
+    const categoryNameMap = this.buildCategoryNameMap(categoryTree);
+    const gameTypeId = String(row?.gameType || '').trim();
+    const categoryId = String(row?.category || '').trim() || gameTypeId;
     return miniOk({
       ...row,
+      gameTypeId: gameTypeId || null,
+      gameTypeName: gameTypeId ? categoryNameMap.get(gameTypeId) || null : null,
+      categoryId: categoryId || null,
+      categoryName: categoryId ? categoryNameMap.get(categoryId) || null : null,
       ratingAvg: st.ratingAvg,
       discountOriginPrice: discount?.discountOriginPrice ?? null,
       discountTag: discount?.badge || null,

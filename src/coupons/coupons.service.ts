@@ -23,6 +23,18 @@ export class CouponsService {
     return Number(Number(value || 0).toFixed(2));
   }
 
+  private async markExpiredUserCoupons(userId?: number) {
+    const now = new Date();
+    await this.prisma.userCoupon.updateMany({
+      where: {
+        status: UserCouponStatus.UNUSED,
+        expiresAt: { lt: now },
+        ...(userId ? { userId } : {}),
+      },
+      data: { status: UserCouponStatus.EXPIRED },
+    });
+  }
+
   async listTemplates(body: any) {
     const page = Math.max(1, Number(body?.page || 1));
     const limit = Math.min(100, Math.max(1, Number(body?.limit || 20)));
@@ -125,16 +137,24 @@ export class CouponsService {
   }
 
   async grantUserCoupon(dto: GrantUserCouponDto, operatorId?: number) {
-    const userId = Number(dto.userId);
+    const userIds = Array.from(
+      new Set(
+        (Array.isArray(dto.userIds) ? dto.userIds : [dto.userId])
+          .map((item) => Number(item))
+          .filter((item) => Number.isFinite(item) && item > 0),
+      ),
+    );
     const templateId = Number(dto.templateId);
     const count = Math.max(1, Number(dto.count || 1));
     if (count > 200) throw new BadRequestException('单次发券数量不能超过200');
+    if (!userIds.length) throw new BadRequestException('至少选择一个发券用户');
+    if (userIds.length > 200) throw new BadRequestException('单次发券用户数量不能超过200');
 
-    const [user, template] = await Promise.all([
-      this.prisma.user.findUnique({ where: { id: userId }, select: { id: true } }),
+    const [users, template] = await Promise.all([
+      this.prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true } }),
       this.prisma.couponTemplate.findUnique({ where: { id: templateId } }),
     ]);
-    if (!user) throw new NotFoundException('用户不存在');
+    if (users.length !== userIds.length) throw new NotFoundException('存在无效用户，无法发券');
     if (!template) throw new NotFoundException('券模板不存在');
     if (template.status !== CouponTemplateStatus.ACTIVE) {
       throw new BadRequestException('券模板未生效，不能发券');
@@ -144,15 +164,22 @@ export class CouponsService {
     if (template.endAt && now > template.endAt) throw new BadRequestException('券模板已过期');
 
     return this.prisma.$transaction(async (tx) => {
-      if (template.totalLimit && template.issuedCount + count > template.totalLimit) {
+      const totalGrantCount = count * userIds.length;
+      if (template.totalLimit && template.issuedCount + totalGrantCount > template.totalLimit) {
         throw new BadRequestException('超出券模板总发放上限');
       }
       if (template.perUserLimit && template.perUserLimit > 0) {
-        const userCount = await tx.userCoupon.count({
-          where: { userId, templateId },
+        const userCounts = await tx.userCoupon.groupBy({
+          by: ['userId'],
+          where: { userId: { in: userIds }, templateId },
+          _count: { _all: true },
         });
-        if (userCount + count > template.perUserLimit) {
-          throw new BadRequestException('超出用户领券上限');
+        const countMap = new Map<number, number>(
+          userCounts.map((row) => [Number(row.userId), Number((row as any)?._count?._all || 0)]),
+        );
+        const exceededUserId = userIds.find((userId) => Number(countMap.get(userId) || 0) + count > template.perUserLimit);
+        if (exceededUserId) {
+          throw new BadRequestException(`用户 ${exceededUserId} 超出领券上限`);
         }
       }
 
@@ -161,23 +188,26 @@ export class CouponsService {
         throw new BadRequestException('券过期时间必须晚于当前时间');
       }
 
-      const rows = Array.from({ length: count }).map(() => ({
-        userId,
-        templateId,
-        status: UserCouponStatus.UNUSED,
-        receivedAt: now,
-        expiresAt,
-      }));
+      const rows = userIds.flatMap((userId) =>
+        Array.from({ length: count }).map(() => ({
+          userId,
+          templateId,
+          status: UserCouponStatus.UNUSED,
+          receivedAt: now,
+          expiresAt,
+        })),
+      );
       await tx.userCoupon.createMany({ data: rows });
       await tx.couponTemplate.update({
         where: { id: templateId },
-        data: { issuedCount: { increment: count } },
+        data: { issuedCount: { increment: totalGrantCount } },
       });
-      return { success: true, count };
+      return { success: true, countPerUser: count, userCount: userIds.length, totalCount: totalGrantCount };
     });
   }
 
   async listUserCoupons(body: any) {
+    await this.markExpiredUserCoupons(body?.userId ? Number(body.userId) : undefined);
     const page = Math.max(1, Number(body?.page || 1));
     const limit = Math.min(100, Math.max(1, Number(body?.limit || 20)));
     const skip = (page - 1) * limit;
@@ -187,6 +217,15 @@ export class CouponsService {
     if (body?.templateId) where.templateId = Number(body.templateId);
     if (body?.status) where.status = body.status;
     if (body?.orderId) where.orderId = Number(body.orderId);
+    if (body?.keyword) {
+      const keyword = String(body.keyword).trim();
+      if (keyword) {
+        where.OR = [
+          { user: { name: { contains: keyword } } },
+          { user: { phone: { contains: keyword } } },
+        ];
+      }
+    }
 
     const [data, total] = await Promise.all([
       this.prisma.userCoupon.findMany({

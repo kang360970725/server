@@ -140,10 +140,22 @@ export class MetaController {
                 DEPOSIT_DEDUCT: '押金扣减',
                 RELEASE_FROZEN: '解冻入账',
                 REFUND_REVERSAL: '退款冲正',
+                STAFF_EXIT_RELEASE: '退店解冻转可用',
+                STAFF_EXIT_CLEAR: '退店一键清零',
 
                 WITHDRAW_RESERVE: '提现预扣',
                 WITHDRAW_RELEASE: '提现退回',
                 WITHDRAW_PAYOUT: '提现出款',
+            },
+
+            DepositBizType: {
+                WITHDRAW_PERCENT: '提现按比例转保证金',
+                REWARD_TRANSFER: '奖励转保证金',
+                MANUAL_DEPOSIT: '手动缴纳保证金',
+                PENALTY_DEDUCT: '处罚扣保证金',
+                DEPOSIT_REFUND: '保证金退还',
+                STAFF_EXIT_RELEASE: '退店转出保证金',
+                STAFF_EXIT_CLEAR: '退店清零保证金',
             },
 
             WithdrawalChannel: {

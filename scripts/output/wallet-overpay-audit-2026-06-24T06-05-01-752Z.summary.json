@@ -1,0 +1,38 @@
+{
+  "runAt": "2026-06-24T06:05:01.789Z",
+  "databaseUrl": "mysql://root:123456@127.0.0.1:3306/system_db_624",
+  "scopedUserId": 86,
+  "usersInAccounts": 1,
+  "usersInTransactions": 1,
+  "auditedUsers": 1,
+  "overpaidUserCount": 0,
+  "underpaidUserCount": 1,
+  "overpaidTotalAmount": 0,
+  "underpaidTotalAmount": 110,
+  "overpaidTop": [],
+  "underpaidTop": [
+    {
+      "userId": 86,
+      "txCount": 138,
+      "replayAvailable": 1548.1,
+      "replayFrozen": -426.7,
+      "replayTotal": 1121.4,
+      "accountAvailable": 1419.3,
+      "accountFrozen": -407.9,
+      "accountTotal": 1011.4,
+      "diffAvailable": 128.8,
+      "diffFrozen": -18.8,
+      "diffTotal": 110,
+      "overpaidAmount": 0,
+      "underpaidAmount": 110,
+      "payoutTotal": 7920,
+      "settlementTotal": 9412.6,
+      "bombLossTotal": 0,
+      "refundReversalNet": 0,
+      "depositAdjustNet": -390,
+      "offlineFeeNet": 0,
+      "hasNegativeMoment": true,
+      "lastTxAt": "2026-06-23T14:33:26.099Z"
+    }
+  ]
+}

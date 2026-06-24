@@ -4,11 +4,15 @@ import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import { SystemConfigService } from './system-config.service';
 import { UpsertSystemConfigDto } from './dto/upsert-system-config.dto';
+import { StaffRuleEngineService } from './staff-rule-engine.service';
 
 @Controller('system-configs')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 export class SystemConfigController {
-  constructor(private readonly service: SystemConfigService) {}
+  constructor(
+    private readonly service: SystemConfigService,
+    private readonly staffRuleEngineService: StaffRuleEngineService,
+  ) {}
 
   @Post('list')
   @Permissions('system:role:page')
@@ -81,5 +85,18 @@ export class SystemConfigController {
   @Permissions('system:game-project:page')
   async upsertGoodsTagList(@Body() body: { tags: any[] }) {
     return this.service.upsertGoodsTagList(body?.tags || []);
+  }
+
+  @Post('staff-rule-engine/get')
+  @Permissions('users:staff:page')
+  async getStaffRuleEngine() {
+    await this.service.ensureDefaults();
+    return this.staffRuleEngineService.getConfig();
+  }
+
+  @Post('staff-rule-engine/upsert')
+  @Permissions('users:staff:page')
+  async upsertStaffRuleEngine(@Body() body: { config?: any }) {
+    return this.staffRuleEngineService.upsertConfig(body?.config || {});
   }
 }

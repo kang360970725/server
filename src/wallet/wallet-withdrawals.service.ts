@@ -3,6 +3,10 @@ import { PrismaService } from '../prisma.service';
 import {tcbGetTempFileURL} from "../common/cloudbase.storage";
 import { WalletDepositService } from './wallet.deposit.service';
 import { OfflineFeeService } from '../offline-fee/offline-fee.service';
+import { PlayerWorkStatus, StaffEmploymentStatus } from '@prisma/client';
+import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
+import { isDispatchMonitoredStaff } from '../common/utils/staff-role-scope.util';
+import { WalletService } from './wallet.service';
 
 /** ✅ 截断到 2 位小数（不四舍五入） */
 const round2 = (v: any): number => {
@@ -24,9 +28,80 @@ const round2 = (v: any): number => {
 export class WalletWithdrawalsService {
     constructor(
         private readonly prisma: PrismaService,
+        private readonly walletService: WalletService,
         private readonly walletDepositService: WalletDepositService,
         private readonly offlineFeeService: OfflineFeeService,
+        private readonly staffRuleEngineService: StaffRuleEngineService,
     ) {}
+
+    private async autoFreezeDormantStaffIfNeeded(userId: number, tx: any) {
+        const user = await tx.user.findUnique({
+            where: { id: Number(userId) },
+            select: {
+                id: true,
+                userType: true,
+                createdAt: true,
+                staffEmploymentStatus: true,
+                Role: {
+                    select: {
+                        name: true,
+                    },
+                },
+            },
+        });
+        if (!user) return null;
+        if (
+            String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN &&
+            !isDispatchMonitoredStaff(user)
+        ) {
+            await tx.user.update({
+                where: { id: Number(user.id) },
+                data: {
+                    staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
+                    canWithdraw: true,
+                },
+            });
+            return {
+                ...user,
+                staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
+                canWithdraw: true,
+            };
+        }
+        if (!isDispatchMonitoredStaff(user)) return user;
+        if (String(user?.staffEmploymentStatus || StaffEmploymentStatus.ACTIVE) !== StaffEmploymentStatus.ACTIVE) return user;
+
+        const lastAccepted = await tx.orderParticipant.findFirst({
+            where: {
+                userId: Number(user.id),
+                acceptedAt: { not: null },
+            },
+            orderBy: { acceptedAt: 'desc' },
+            select: { acceptedAt: true },
+        });
+
+        const baseDate = lastAccepted?.acceptedAt ? new Date(lastAccepted.acceptedAt) : (user?.createdAt ? new Date(user.createdAt) : null);
+        if (!baseDate) return user;
+
+        const freezeAt = new Date(baseDate);
+        freezeAt.setDate(freezeAt.getDate() + 7);
+        if (freezeAt.getTime() > Date.now()) return user;
+
+        await tx.user.update({
+            where: { id: Number(user.id) },
+            data: {
+                staffEmploymentStatus: StaffEmploymentStatus.FROZEN,
+                canWithdraw: false,
+                workStatus: PlayerWorkStatus.IDLE,
+                workMode: 'OFFLINE',
+                workOnlineExpiresAt: null,
+            },
+        });
+
+        return {
+            ...user,
+            staffEmploymentStatus: StaffEmploymentStatus.FROZEN,
+        };
+    }
 
     /**
      * 生成展示/对账用提现单号
@@ -64,16 +139,42 @@ export class WalletWithdrawalsService {
         return { reviewedAt, fromDate, toDate };
     }
 
+    private buildTodayReviewedAtRange() {
+        const now = new Date();
+        const fromDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+        const toDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+        return {
+            reviewedAt: {
+                gte: fromDate,
+                lte: toDate,
+            },
+            fromDate,
+            toDate,
+        };
+    }
+
     /**
      * ✅ 获取提现相关信息
      * 用于前端提现弹窗计算押金
      */
     async getWithdrawInfo(userId: number) {
+        await this.prisma.$transaction(async (tx) => {
+            await this.autoFreezeDormantStaffIfNeeded(userId, tx);
+            await this.walletService.ensureWalletAccountBucketsReady(userId, tx as any, { throwOnDeficit: false });
+        });
 
         const user = await this.prisma.user.findUnique({
             where: { id: userId },
             select: {
                 depositLimit: true,
+                staffTags: true,
+                staffEmploymentStatus: true,
+                userType: true,
+                Role: {
+                    select: {
+                        name: true,
+                    },
+                },
                 walletAccount: {
                     select: {
                         availableBalance: true,
@@ -87,11 +188,23 @@ export class WalletWithdrawalsService {
         if (!user) {
             throw new BadRequestException('用户不存在');
         }
+        if (isDispatchMonitoredStaff(user) && String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {
+            throw new ForbiddenException('账户已冻结，请联系管理员');
+        }
+
+        const matchedRule = isDispatchMonitoredStaff(user)
+            ? this.staffRuleEngineService.resolveMatchedRule(
+                await this.staffRuleEngineService.getConfig(),
+                user.staffTags,
+            )
+            : null;
 
         return {
             availableBalance: Number(user.walletAccount?.availableBalance || 0),
             depositBalance: Number(user.walletAccount?.depositBalance || 0),
-            depositLimit: Number(user.depositLimit || 500),
+            depositLimit: Number(matchedRule?.depositAmount ?? user.depositLimit ?? 500),
+            firstWithdrawMinBalance: Number(matchedRule?.firstWithdrawMinBalance ?? 1000),
+            matchedStaffRule: matchedRule,
             workMode: user.workMode,
         };
     }
@@ -124,6 +237,10 @@ export class WalletWithdrawalsService {
         }
 
         return this.prisma.$transaction(async (tx) => {
+            const freezeCheckedUser = await this.autoFreezeDormantStaffIfNeeded(userId, tx);
+            if (isDispatchMonitoredStaff(freezeCheckedUser) && String(freezeCheckedUser?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {
+                throw new ForbiddenException('账户已冻结，请联系管理员');
+            }
 
             // =========================
             // Step 0：读取用户信息
@@ -135,6 +252,7 @@ export class WalletWithdrawalsService {
                     canWithdraw: true,
                     userType: true,
                     depositLimit: true,
+                    staffTags: true,
                     workMode: true,
                 },
             });
@@ -204,6 +322,11 @@ export class WalletWithdrawalsService {
             });
 
             if (historyCount === 0 && isStaff) {
+                const matchedRule = this.staffRuleEngineService.resolveMatchedRule(
+                    await this.staffRuleEngineService.getConfig(),
+                    u.staffTags,
+                );
+                const firstWithdrawMinBalance = Number(matchedRule?.firstWithdrawMinBalance ?? 1000);
 
                 const firstDispatch = await tx.orderParticipant.findFirst({
                     where: { userId },
@@ -229,8 +352,8 @@ export class WalletWithdrawalsService {
                     select: { availableBalance: true },
                 });
 
-                if (Number(accountCheck?.availableBalance || 0) < 1000 && isStaff) {
-                    throw new BadRequestException('首次提现余额需达到 1000');
+                if (Number(accountCheck?.availableBalance || 0) < firstWithdrawMinBalance && isStaff) {
+                    throw new BadRequestException(`首次提现余额需达到 ${firstWithdrawMinBalance}`);
                 }
             }
 
@@ -242,8 +365,13 @@ export class WalletWithdrawalsService {
             });
 
             if (!account) throw new BadRequestException('钱包账户不存在');
+            await this.walletService.ensureWalletAccountBucketsReady(userId, tx as any);
 
-            const available = Number(account.availableBalance || 0);
+            const refreshedAccount = await tx.walletAccount.findUnique({
+                where: { userId },
+            });
+
+            const available = Number(refreshedAccount?.availableBalance || 0);
 
             if (available < amount) {
                 throw new BadRequestException('可用余额不足');
@@ -269,7 +397,7 @@ export class WalletWithdrawalsService {
                     userId,
                     withdrawAmount: amount,
                     availableBalance: available,
-                    frozenBalance: Number(account.frozenBalance || 0),
+                    frozenBalance: Number(refreshedAccount?.frozenBalance || 0),
                     payOfflineFeeAmount,
                 });
             }
@@ -280,8 +408,12 @@ export class WalletWithdrawalsService {
             let depositAdd = 0;
 
             if (isStaff) {
-                const depositLimit = Number(u.depositLimit || 2000);
-                const currentDeposit = Number(account.depositBalance || 0);
+                const matchedRule = this.staffRuleEngineService.resolveMatchedRule(
+                    await this.staffRuleEngineService.getConfig(),
+                    u.staffTags,
+                );
+                const depositLimit = Number(matchedRule?.depositAmount ?? u.depositLimit ?? 2000);
+                const currentDeposit = Number(refreshedAccount?.depositBalance || 0);
 
                 const depositNeed = depositLimit - currentDeposit;
 
@@ -298,17 +430,10 @@ export class WalletWithdrawalsService {
             // =========================
             // Step 4：更新钱包
             // =========================
-            const accountAfterUpdate = await tx.walletAccount.update({
-                where: { userId },
-                data: {
-                    availableBalance: { decrement: amount },
-                    depositBalance: { increment: depositAdd },
-                    frozenBalance: { increment: withdrawAmount },
-                },
-                select: {
-                    availableBalance: true,
-                    frozenBalance: true,
-                },
+            const accountAfterUpdate = await this.walletService.applyWalletAccountDelta(tx as any, userId, {
+                availableDelta: -amount,
+                depositDelta: depositAdd,
+                withdrawFrozenDelta: withdrawAmount,
             });
 
             // =========================
@@ -449,18 +574,14 @@ export class WalletWithdrawalsService {
                 });
 
                 if (!existingPayout) {
+                    await this.walletService.ensureWalletAccountBucketsReady(req.userId, tx as any);
                     // 2) 扣除冻结余额（真正扣款）
-                    const accountAfterPayout = await tx.walletAccount.update({
-                        where: { userId: req.userId },
-                        data: {
-                            frozenBalance: { decrement: req.amount },
-                            // availableBalance 不动（因为申请时就已扣过 available）
-                        },
-                        select: { availableBalance: true, frozenBalance: true },
+                    const accountAfterPayout = await this.walletService.applyWalletAccountDelta(tx as any, req.userId, {
+                        withdrawFrozenDelta: -req.amount,
                     });
 
                     // 3) 写出款流水（WITHDRAW_PAYOUT）
-                    await tx.walletTransaction.upsert({
+                    const payoutTx = await tx.walletTransaction.upsert({
                         where: {
                             sourceType_sourceId: { sourceType: PAYOUT_SOURCE_TYPE, sourceId: req.id },
                         },
@@ -485,6 +606,17 @@ export class WalletWithdrawalsService {
                             frozenAfter: round2(Number((accountAfterPayout as any).frozenBalance ?? 0)),
                         },
                     });
+
+                    return tx.walletWithdrawalRequest.update({
+                        where: { id: requestId },
+                        data: {
+                            status: 'PAID',
+                            reviewedBy: reviewerId,
+                            reviewedAt: now,
+                            reviewRemark,
+                            payoutTxId: payoutTx.id,
+                        },
+                    });
                 }
 
                 // 4) 更新申请单为 PAID（并记录审核信息）
@@ -495,6 +627,7 @@ export class WalletWithdrawalsService {
                         reviewedBy: reviewerId,
                         reviewedAt: now,
                         reviewRemark,
+                        payoutTxId: existingPayout.id,
                     },
                 });
             }
@@ -513,14 +646,11 @@ export class WalletWithdrawalsService {
             });
 
             if (!existingReleaseTx) {
+                await this.walletService.ensureWalletAccountBucketsReady(req.userId, tx as any);
                 // 2) 资金退回：frozen -amount, available +amount
-                const accountAfterRelease = await tx.walletAccount.update({
-                    where: { userId: req.userId },
-                    data: {
-                        frozenBalance: { decrement: req.amount },
-                        availableBalance: { increment: req.amount },
-                    },
-                    select: { availableBalance: true, frozenBalance: true },
+                const accountAfterRelease = await this.walletService.applyWalletAccountDelta(tx as any, req.userId, {
+                    withdrawFrozenDelta: -req.amount,
+                    availableDelta: req.amount,
                 });
 
                 // 3) 写退回流水（WITHDRAW_RELEASE）
@@ -573,14 +703,29 @@ export class WalletWithdrawalsService {
         return list.map((row: any) => ({
             ...row,
             reviewTime: row.reviewedAt ?? null,
+            statusText: this.getStatusText(row.status),
         }));
+    }
+
+    private getStatusText(status: string | null | undefined) {
+        const map: Record<string, string> = {
+            PENDING_REVIEW: '待审核',
+            APPROVED: '已通过',
+            REJECTED: '已驳回',
+            PAYING: '打款中',
+            PAID: '已打款',
+            FAILED: '打款失败',
+            CANCELED: '已取消',
+        };
+        return map[String(status || '')] || String(status || '-');
     }
 
     /** 管理端：待审核列表（带用户昵称 + 钱包余额 + 收款码临时URL） */
     async listPending() {
         const where = { status: 'PENDING_REVIEW' as any };
+        const { reviewedAt, fromDate, toDate } = this.buildTodayReviewedAtRange();
 
-        const [count, aggregate, list] = await this.prisma.$transaction([
+        const [count, aggregate, list, todayApprovedAgg, todayPaidAgg] = await this.prisma.$transaction([
             this.prisma.walletWithdrawalRequest.count({ where }),
             this.prisma.walletWithdrawalRequest.aggregate({
                 where,
@@ -600,13 +745,34 @@ export class WalletWithdrawalsService {
                     },
                 },
             }),
+            this.prisma.walletWithdrawalRequest.aggregate({
+                where: {
+                    reviewedAt,
+                    status: { in: ['APPROVED', 'PAYING', 'PAID', 'FAILED'] as any },
+                },
+                _sum: { amount: true },
+                _count: true,
+            }),
+            this.prisma.walletWithdrawalRequest.aggregate({
+                where: {
+                    reviewedAt,
+                    status: 'PAID',
+                },
+                _sum: { amount: true },
+                _count: true,
+            }),
         ]);
 
         const enriched = await Promise.all(
             list.map(async (r: any) => {
                 const wallet = await this.prisma.walletAccount.findUnique({
                     where: { userId: r.userId },
-                    select: { availableBalance: true, frozenBalance: true },
+                    select: {
+                        availableBalance: true,
+                        frozenBalance: true,
+                        earningFrozenBalance: true,
+                        withdrawFrozenBalance: true,
+                    },
                 });
 
                 let withdrawQrCodeUrl: string | null = null;
@@ -620,7 +786,12 @@ export class WalletWithdrawalsService {
 
                 return {
                     ...r,
-                    wallet: wallet || { availableBalance: 0, frozenBalance: 0 },
+                    wallet: wallet || {
+                        availableBalance: 0,
+                        frozenBalance: 0,
+                        earningFrozenBalance: 0,
+                        withdrawFrozenBalance: 0,
+                    },
                     withdrawQrCodeUrl: withdrawQrCodeUrl || null,
                 };
             }),
@@ -629,6 +800,14 @@ export class WalletWithdrawalsService {
         return {
             count,
             totalAmount: aggregate._sum.amount || 0,
+            todayReviewSummary: {
+                reviewedAtFrom: fromDate.toISOString(),
+                reviewedAtTo: toDate.toISOString(),
+                approvedAmount: Number(todayApprovedAgg?._sum?.amount || 0),
+                approvedCount: Number(todayApprovedAgg?._count || 0),
+                paidAmount: Number(todayPaidAgg?._sum?.amount || 0),
+                paidCount: Number(todayPaidAgg?._count || 0),
+            },
             list: enriched,
         };
     }

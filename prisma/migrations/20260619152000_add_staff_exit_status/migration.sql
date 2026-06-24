@@ -1,0 +1,46 @@
+-- Add staff employment status fields
+ALTER TABLE `users`
+  ADD COLUMN `staffEmploymentStatus` ENUM('ACTIVE', 'EXITED', 'BLACKLISTED') NOT NULL DEFAULT 'ACTIVE',
+  ADD COLUMN `staffCooldownUntil` DATETIME(3) NULL,
+  ADD COLUMN `staffExitedAt` DATETIME(3) NULL;
+
+CREATE INDEX `users_userType_staffEmploymentStatus_idx`
+  ON `users`(`userType`, `staffEmploymentStatus`);
+
+-- Extend wallet / deposit biz enums
+ALTER TABLE `wallet_transactions`
+  MODIFY COLUMN `bizType` ENUM(
+    'SETTLEMENT_EARNING',
+    'SETTLEMENT_EARNING_BASE',
+    'SETTLEMENT_EARNING_CARRY',
+    'SETTLEMENT_BOMB_LOSS',
+    'SETTLEMENT_EARNING_CS',
+    'RELEASE_FROZEN',
+    'REFUND_REVERSAL',
+    'WITHDRAW_RESERVE',
+    'WITHDRAW_RELEASE',
+    'WITHDRAW_PAYOUT',
+    'DEPOSIT_REFUND',
+    'DEPOSIT_ADD',
+    'DEPOSIT_DEDUCT',
+    'OFFLINE_FEE_PAYMENT',
+    'SETTLEMENT_REVERSAL',
+    'SETTLEMENT_RECALC',
+    'MEMBER_RECHARGE',
+    'MEMBER_RECHARGE_BONUS',
+    'MEMBER_ORDER_CONSUME',
+    'MEMBER_RECHARGE_REFUND',
+    'STAFF_EXIT_RELEASE',
+    'STAFF_EXIT_CLEAR'
+  ) NOT NULL DEFAULT 'SETTLEMENT_EARNING';
+
+ALTER TABLE `wallet_deposit_transactions`
+  MODIFY COLUMN `bizType` ENUM(
+    'WITHDRAW_PERCENT',
+    'REWARD_TRANSFER',
+    'MANUAL_DEPOSIT',
+    'PENALTY_DEDUCT',
+    'DEPOSIT_REFUND',
+    'STAFF_EXIT_RELEASE',
+    'STAFF_EXIT_CLEAR'
+  ) NOT NULL;

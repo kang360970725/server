@@ -38,6 +38,8 @@
     "wallet:repair-snapshots:batch:apply": "ts-node --transpile-only scripts/repair-wallet-snapshots.ts --apply --batchSize=1000 --maxBatches=500",
     "wallet:audit-overpay": "ts-node --transpile-only scripts/audit-wallet-overpay.ts",
     "wallet:audit-anomalies": "ts-node --transpile-only scripts/audit-wallet-anomalies.ts",
+    "wallet:audit-frozen-buckets": "ts-node --transpile-only scripts/repair-wallet-frozen-buckets.ts",
+    "wallet:repair-frozen-buckets:apply": "ts-node --transpile-only scripts/repair-wallet-frozen-buckets.ts --apply",
     "penalty:ensure-tables": "ts-node --transpile-only scripts/ensure-penalty-tables.ts"
   },
   "prisma": {

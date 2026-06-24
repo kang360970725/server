@@ -37,6 +37,20 @@ export class MiniMemberController {
     return miniOk(await this.memberService.listPointTransactions(userId, query || {}));
   }
 
+  @Get('game-cards')
+  async gameCards(@Req() req: any, @Query('projectId') projectIdRaw?: string) {
+    const userId = Number(req?.user?.userId ?? req?.user?.id ?? req?.user?.sub);
+    return miniOk(await this.memberService.listMiniGameCards(userId, {
+      projectId: projectIdRaw == null || projectIdRaw === '' ? undefined : Number(projectIdRaw),
+    }));
+  }
+
+  @Post('game-cards')
+  async createGameCard(@Req() req: any, @Body() body: any) {
+    const userId = Number(req?.user?.userId ?? req?.user?.id ?? req?.user?.sub);
+    return miniOk(await this.memberService.createMiniGameCard(userId, body || {}), '新增成功');
+  }
+
   @Post('wechat-bind')
   async wechatBind(@Req() req: any, @Body() body: { code: string }) {
     const userId = Number(req?.user?.userId ?? req?.user?.id ?? req?.user?.sub);
