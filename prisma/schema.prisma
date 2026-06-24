@@ -1253,6 +1253,7 @@ model WalletDepositTransaction {
   user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@map("wallet_deposit_transactions")
 }
 
 enum BillingMode {

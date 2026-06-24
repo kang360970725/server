@@ -34,6 +34,28 @@ ALTER TABLE `wallet_transactions`
     'STAFF_EXIT_CLEAR'
   ) NOT NULL DEFAULT 'SETTLEMENT_EARNING';
 
+CREATE TABLE IF NOT EXISTS `wallet_deposit_transactions` (
+  `id` INT NOT NULL AUTO_INCREMENT,
+  `userId` INT NOT NULL,
+  `amount` DECIMAL(10,2) NOT NULL,
+  `bizType` ENUM(
+    'WITHDRAW_PERCENT',
+    'REWARD_TRANSFER',
+    'MANUAL_DEPOSIT',
+    'PENALTY_DEDUCT',
+    'DEPOSIT_REFUND',
+    'STAFF_EXIT_RELEASE',
+    'STAFF_EXIT_CLEAR'
+  ) NOT NULL,
+  `remark` VARCHAR(255) NULL,
+  `operatorId` INT NULL,
+  `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`),
+  INDEX `wallet_deposit_transactions_userId_idx`(`userId`),
+  CONSTRAINT `wallet_deposit_transactions_userId_fkey`
+    FOREIGN KEY (`userId`) REFERENCES `users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE
+);
+
 ALTER TABLE `wallet_deposit_transactions`
   MODIFY COLUMN `bizType` ENUM(
     'WITHDRAW_PERCENT',
