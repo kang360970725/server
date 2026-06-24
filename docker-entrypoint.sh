@@ -33,6 +33,9 @@ fi
 # 默认开启：PRISMA_MIGRATE_DEPLOY=1
 # 如需跳过（例如多副本并发迁移、紧急回滚）：设置 PRISMA_MIGRATE_DEPLOY=0
 if [ "${PRISMA_MIGRATE_DEPLOY:-1}" = "1" ]; then
+  echo "[entrypoint] prisma failed-migration repair precheck..."
+  node ./scripts/repair-prisma-failed-migrations.js
+  echo "[entrypoint] prisma failed-migration repair precheck done"
   echo "[entrypoint] prisma migrate deploy..."
   npx prisma migrate deploy
   echo "[entrypoint] prisma migrate deploy done"
