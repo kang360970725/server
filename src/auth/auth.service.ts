@@ -17,6 +17,7 @@ import { isDispatchMonitoredStaff } from '../common/utils/staff-role-scope.util'
 export class AuthService {
   static readonly DEFAULT_ACCESS_TOKEN_EXPIRES_IN = '2h';
   static readonly MINI_ACCESS_TOKEN_EXPIRES_IN = '30d';
+  private static readonly STAFF_AUTO_FROZEN_MESSAGE = '用户活跃度太低，已经超过7天，账号已自动冻结，请联系管理超哥进行处理。';
 
   constructor(
       private prisma: PrismaService,
@@ -77,10 +78,16 @@ export class AuthService {
       select: { acceptedAt: true },
     });
 
-    const baseDate = lastAccepted?.acceptedAt ? new Date(lastAccepted.acceptedAt) : (user?.createdAt ? new Date(user.createdAt) : null);
-    if (!baseDate) return user;
+    const lastAcceptedDate = lastAccepted?.acceptedAt ? new Date(lastAccepted.acceptedAt) : null;
+    const manualBaseDate = user?.staffDormantFreezeBaseAt ? new Date(user.staffDormantFreezeBaseAt) : null;
+    const createdAtDate = user?.createdAt ? new Date(user.createdAt) : null;
+    const resolvedBaseDate =
+      (lastAcceptedDate && !Number.isNaN(lastAcceptedDate.getTime()) ? lastAcceptedDate : null) ||
+      (manualBaseDate && !Number.isNaN(manualBaseDate.getTime()) ? manualBaseDate : null) ||
+      (createdAtDate && !Number.isNaN(createdAtDate.getTime()) ? createdAtDate : null);
+    if (!resolvedBaseDate) return user;
 
-    const freezeAt = new Date(baseDate);
+    const freezeAt = new Date(resolvedBaseDate);
     freezeAt.setDate(freezeAt.getDate() + 7);
     if (freezeAt.getTime() > Date.now()) return user;
 
@@ -208,7 +215,7 @@ export class AuthService {
     }
     user = await this.autoFreezeDormantStaffIfNeeded(user);
     if (!options?.mini && isDispatchMonitoredStaff(user) && String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {
-      return this.buildLoginFailure('ACCOUNT_FROZEN', '账户已冻结，请联系管理员');
+      return this.buildLoginFailure('ACCOUNT_FROZEN', AuthService.STAFF_AUTO_FROZEN_MESSAGE);
     }
     // ✅ 登录成功
     const isStaff = isDispatchMonitoredStaff(user);

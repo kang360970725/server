@@ -90,6 +90,7 @@ model User {
   offlineJoinedAt             DateTime?
   workOnlineExpiresAt         DateTime?
   staffEmploymentStatus       StaffEmploymentStatus      @default(ACTIVE)
+  staffDormantFreezeBaseAt    DateTime?
   staffCooldownUntil          DateTime?
   staffExitedAt               DateTime?
   dispatchedOrders            Order[]                    @relation("OrderDispatcher")

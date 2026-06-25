@@ -8,15 +8,15 @@ export class UsersScheduler {
 
   constructor(private readonly usersService: UsersService) {}
 
-  @Cron('0 10 * * * *', { timeZone: 'Asia/Shanghai' })
-  async autoFreezeDormantStaffHourly() {
+  @Cron('0 0 6 * * *', { timeZone: 'Asia/Shanghai' })
+  async autoFreezeDormantStaffDaily() {
     try {
       const frozenIds = await this.usersService.autoFreezeDormantStaffUsers();
       if (frozenIds.size > 0) {
-        this.logger.log(`[staff-auto-freeze] hourly frozen ${frozenIds.size} staff account(s)`);
+        this.logger.log(`[staff-auto-freeze] daily frozen ${frozenIds.size} staff account(s)`);
       }
     } catch (error: any) {
-      this.logger.error(`autoFreezeDormantStaffHourly failed: ${error?.message || error}`, error?.stack);
+      this.logger.error(`autoFreezeDormantStaffDaily failed: ${error?.message || error}`, error?.stack);
     }
   }
 }

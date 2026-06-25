@@ -40,6 +40,24 @@ export class UsersService {
     return freezeAt;
   }
 
+  private getStaffDormantFreezeBaseDate(input: {
+    staffDormantFreezeBaseAt?: Date | string | null;
+    lastAcceptedAt?: Date | string | null;
+    createdAt?: Date | string | null;
+  }) {
+    const pickDate = (value?: Date | string | null) => {
+      if (!value) return null;
+      const date = value instanceof Date ? value : new Date(value);
+      return Number.isNaN(date.getTime()) ? null : date;
+    };
+
+    return (
+      pickDate(input?.lastAcceptedAt) ||
+      pickDate(input?.staffDormantFreezeBaseAt) ||
+      pickDate(input?.createdAt)
+    );
+  }
+
   async autoFreezeDormantStaffUsers(userIds?: number[]) {
     const idSet = Array.from(new Set((userIds || []).map((item) => Number(item || 0)).filter((item) => item > 0)));
     const users = await this.prisma.user.findMany({
@@ -53,6 +71,7 @@ export class UsersService {
         createdAt: true,
         userType: true,
         staffEmploymentStatus: true,
+        staffDormantFreezeBaseAt: true,
         Role: {
           select: {
             name: true,
@@ -108,7 +127,11 @@ export class UsersService {
 
     const frozenIds = monitoredUsers
       .filter((item) => {
-        const baseDate = lastAcceptedMap.get(Number(item.id)) || (item?.createdAt ? new Date(item.createdAt) : null);
+        const baseDate = this.getStaffDormantFreezeBaseDate({
+          staffDormantFreezeBaseAt: (item as any)?.staffDormantFreezeBaseAt,
+          lastAcceptedAt: lastAcceptedMap.get(Number(item.id)) || null,
+          createdAt: item?.createdAt ? new Date(item.createdAt) : null,
+        });
         const freezeAt = this.getStaffDormantFreezeAt(baseDate);
         return freezeAt ? freezeAt.getTime() <= Date.now() : false;
       })
@@ -341,6 +364,7 @@ export class UsersService {
     search?: string;
     userType?: UserType;
     status?: string;
+    staffEmploymentStatus?: string;
     anonymousOnly?: string | boolean;
     includeStaffMembers?: string | boolean;
     scene?: string;
@@ -354,6 +378,7 @@ export class UsersService {
       search,
       userType,
       status,
+      staffEmploymentStatus,
       anonymousOnly,
       includeStaffMembers,
       scene,
@@ -448,6 +473,10 @@ export class UsersService {
      */
     if (status) {
       AND.push({ status });
+    }
+
+    if (staffEmploymentStatus) {
+      AND.push({ staffEmploymentStatus: String(staffEmploymentStatus).trim() });
     }
 
     if (String(anonymousOnly || '') === 'true') {
@@ -1152,12 +1181,19 @@ export class UsersService {
       ? this.normalizeStaffTags((updateUserDto as any).staffTags)
       : undefined;
 
+    const shouldRestoreWithdrawOnStaffUnfreeze =
+      oldUser.userType === UserType.STAFF &&
+      oldUser.staffEmploymentStatus === StaffEmploymentStatus.FROZEN &&
+      nextStatus === StaffEmploymentStatus.ACTIVE;
+
     return this.prisma.$transaction(async (tx) => {
 
       const user = await tx.user.update({
         where: { id },
         data: {
           ...updateUserDto,
+          ...(shouldRestoreWithdrawOnStaffUnfreeze ? { canWithdraw: true } : {}),
+          ...(shouldRestoreWithdrawOnStaffUnfreeze ? { staffDormantFreezeBaseAt: new Date() } : {}),
           ...(normalizedStaffTags !== undefined ? { staffTags: normalizedStaffTags } : {}),
           ...(workModePayload || {}),
         },
@@ -1653,7 +1689,7 @@ export class UsersService {
     }
     if (current.staffEmploymentStatus !== StaffEmploymentStatus.ACTIVE) {
       if (current.staffEmploymentStatus === StaffEmploymentStatus.FROZEN) {
-        throw new BadRequestException('账户已冻结，请联系管理员');
+        throw new BadRequestException('用户活跃度太低，已经超过7天，账号已自动冻结，请联系管理超哥进行处理。');
       }
       throw new BadRequestException('当前员工已退店或已加入黑名单，无法修改接单状态');
     }
@@ -1689,7 +1725,7 @@ export class UsersService {
     }
     if (current.staffEmploymentStatus !== StaffEmploymentStatus.ACTIVE) {
       if (current.staffEmploymentStatus === StaffEmploymentStatus.FROZEN) {
-        throw new BadRequestException('账户已冻结，请联系管理员');
+        throw new BadRequestException('用户活跃度太低，已经超过7天，账号已自动冻结，请联系管理超哥进行处理。');
       }
       throw new BadRequestException('当前员工已退店或已加入黑名单，无法切换工作模式');
     }

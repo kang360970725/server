@@ -5,6 +5,20 @@ import {PrismaService} from '../prisma.service';
 export class WalletDepositService {
     constructor(private readonly prisma: PrismaService) {}
 
+    private async tableExists(tableName: string) {
+        const rows = await this.prisma.$queryRawUnsafe<Array<{ table_name?: string }>>(
+            `
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = DATABASE()
+                  AND table_name = ?
+                LIMIT 1
+            `,
+            tableName,
+        );
+        return Array.isArray(rows) && rows.length > 0;
+    }
+
     private round2(v: any) {
         return Math.round((Number(v) || 0) * 100) / 100;
     }
@@ -231,11 +245,62 @@ export class WalletDepositService {
     }) {
 
         const { userId, page, limit } = params;
+        const offset = (page - 1) * limit;
 
         const where: any = {};
 
         if (userId) {
             where.userId = userId;
+        }
+
+        const legacyTableExists = await this.tableExists('WalletDepositTransaction');
+
+        if (legacyTableExists) {
+            const whereSql = userId ? 'WHERE userId = ?' : '';
+            const whereArgs = userId ? [userId] : [];
+
+            const data = await this.prisma.$queryRawUnsafe<any[]>(
+                `
+                    SELECT id, userId, amount, bizType, remark, operatorId, createdAt
+                    FROM (
+                        SELECT id, userId, amount, bizType, remark, operatorId, createdAt
+                        FROM wallet_deposit_transactions
+                        ${whereSql}
+                        UNION ALL
+                        SELECT id, userId, amount, bizType, remark, operatorId, createdAt
+                        FROM WalletDepositTransaction
+                        ${whereSql}
+                    ) t
+                    ORDER BY createdAt DESC, id DESC
+                    LIMIT ? OFFSET ?
+                `,
+                ...whereArgs,
+                ...whereArgs,
+                limit,
+                offset,
+            );
+
+            const totalRows = await this.prisma.$queryRawUnsafe<Array<{ total?: bigint | number }>>(
+                `
+                    SELECT SUM(cnt) AS total
+                    FROM (
+                        SELECT COUNT(*) AS cnt
+                        FROM wallet_deposit_transactions
+                        ${whereSql}
+                        UNION ALL
+                        SELECT COUNT(*) AS cnt
+                        FROM WalletDepositTransaction
+                        ${whereSql}
+                    ) c
+                `,
+                ...whereArgs,
+                ...whereArgs,
+            );
+
+            return {
+                data: Array.isArray(data) ? data : [],
+                total: Number(totalRows?.[0]?.total || 0),
+            };
         }
 
         const [data, total] = await this.prisma.$transaction([

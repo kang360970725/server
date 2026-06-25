@@ -42,6 +42,7 @@ export class WalletWithdrawalsService {
                 userType: true,
                 createdAt: true,
                 staffEmploymentStatus: true,
+                staffDormantFreezeBaseAt: true,
                 Role: {
                     select: {
                         name: true,
@@ -79,7 +80,13 @@ export class WalletWithdrawalsService {
             select: { acceptedAt: true },
         });
 
-        const baseDate = lastAccepted?.acceptedAt ? new Date(lastAccepted.acceptedAt) : (user?.createdAt ? new Date(user.createdAt) : null);
+        const lastAcceptedDate = lastAccepted?.acceptedAt ? new Date(lastAccepted.acceptedAt) : null;
+        const manualBaseDate = user?.staffDormantFreezeBaseAt ? new Date(user.staffDormantFreezeBaseAt) : null;
+        const createdAtDate = user?.createdAt ? new Date(user.createdAt) : null;
+        const baseDate =
+            (lastAcceptedDate && !Number.isNaN(lastAcceptedDate.getTime()) ? lastAcceptedDate : null) ||
+            (manualBaseDate && !Number.isNaN(manualBaseDate.getTime()) ? manualBaseDate : null) ||
+            (createdAtDate && !Number.isNaN(createdAtDate.getTime()) ? createdAtDate : null);
         if (!baseDate) return user;
 
         const freezeAt = new Date(baseDate);
@@ -189,7 +196,7 @@ export class WalletWithdrawalsService {
             throw new BadRequestException('用户不存在');
         }
         if (isDispatchMonitoredStaff(user) && String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {
-            throw new ForbiddenException('账户已冻结，请联系管理员');
+            throw new ForbiddenException('用户活跃度太低，已经超过7天，账号已自动冻结，请联系管理超哥进行处理。');
         }
 
         const matchedRule = isDispatchMonitoredStaff(user)
@@ -239,7 +246,7 @@ export class WalletWithdrawalsService {
         return this.prisma.$transaction(async (tx) => {
             const freezeCheckedUser = await this.autoFreezeDormantStaffIfNeeded(userId, tx);
             if (isDispatchMonitoredStaff(freezeCheckedUser) && String(freezeCheckedUser?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {
-                throw new ForbiddenException('账户已冻结，请联系管理员');
+                throw new ForbiddenException('用户活跃度太低，已经超过7天，账号已自动冻结，请联系管理超哥进行处理。');
             }
 
             // =========================

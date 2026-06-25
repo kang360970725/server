@@ -3702,6 +3702,7 @@ export class OrdersService {
                 },
                 data: {
                     workStatus: 'WORKING' as any,
+                    staffDormantFreezeBaseAt: null,
                 },
             });
 
@@ -5820,7 +5821,10 @@ export class OrdersService {
 
         await this.prisma.user.update({
             where: {id: userId},
-            data: {workStatus: 'WORKING' as any},
+            data: {
+                workStatus: 'WORKING' as any,
+                staffDormantFreezeBaseAt: null,
+            },
         });
 
         // 判断是否全员接单完成

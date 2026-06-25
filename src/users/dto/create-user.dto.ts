@@ -9,7 +9,7 @@ import {
     IsDateString,
     IsArray,
 } from 'class-validator';
-import { UserType, UserStatus } from '@prisma/client';
+import { StaffEmploymentStatus, UserType, UserStatus } from '@prisma/client';
 
 export class CreateUserDto {
     @IsString()
@@ -80,4 +80,8 @@ export class CreateUserDto {
     @IsOptional()
     @IsArray()
     staffTags?: string[];
+
+    @IsOptional()
+    @IsEnum(StaffEmploymentStatus)
+    staffEmploymentStatus?: StaffEmploymentStatus;
 }
