@@ -212,6 +212,11 @@ export class UsersService {
       allowed.add(UserType.REGISTERED_USER);
     }
 
+    // 订单建单/派单场景允许客服按会员范围检索用户，用于关联会员与储值支付。
+    if (permissions.includes('orders:list:page')) {
+      allowed.add(UserType.REGISTERED_USER);
+    }
+
     if (permissions.includes('users:staff:page')) {
       allowed.add(UserType.STAFF);
     }

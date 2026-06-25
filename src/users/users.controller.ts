@@ -50,7 +50,7 @@ export class UsersController {
 
   @Get()
   @UseGuards(PermissionsGuard)
-  @Permissions(...UsersController.userManagePermissions)
+  @Permissions(...UsersController.userManagePermissions, 'orders:list:page')
   findAll(
       @Query('page') page?: number,
       @Query('limit') limit?: number,

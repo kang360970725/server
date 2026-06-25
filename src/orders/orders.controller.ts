@@ -45,6 +45,10 @@ export class OrdersController {
       }
     }
 
+    private isStaffDispatchOperator(user: any) {
+        return String(user?.userType || '').trim().toUpperCase() === 'STAFF';
+    }
+
     /** 订单列表（管理端） */
     @Post('list')
     @UseGuards(PermissionsGuard)
@@ -164,10 +168,13 @@ export class OrdersController {
     @UseGuards(JwtAuthGuard)
     @Post('dispatch/archive')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:detail:page')
+    @Permissions('orders:detail:page', 'staff:my-orders:page')
     async archive(@Body() body: any, @Request() req: any) {
         const dispatchId = Number(body.dispatchId);
         if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
+        if (this.isStaffDispatchOperator(req.user)) {
+            return this.ordersService.archiveDispatch(DispatchStatus.ARCHIVED, dispatchId, req.user, body);
+        }
         return this.ordersService.adminArchiveDispatch(DispatchStatus.ARCHIVED,dispatchId, req.user, body);
     }
 
@@ -175,10 +182,13 @@ export class OrdersController {
     @UseGuards(JwtAuthGuard)
     @Post('dispatch/complete')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:detail:page')
+    @Permissions('orders:detail:page', 'staff:my-orders:page')
     async complete(@Body() body: any, @Request() req: any) {
         const dispatchId = Number(body.dispatchId);
         if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
+        if (this.isStaffDispatchOperator(req.user)) {
+            return this.ordersService.archiveDispatch(DispatchStatus.COMPLETED, dispatchId, req.user, body);
+        }
         return this.ordersService.adminArchiveDispatch(DispatchStatus.COMPLETED,dispatchId, req.user, body);
         // return this.ordersService.completeDispatch('',dispatchId, req.user?.userId, body);
     }
