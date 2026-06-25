@@ -808,6 +808,8 @@ export class UsersService {
     const nextEmploymentStatus = addToBlacklist ? StaffEmploymentStatus.BLACKLISTED : StaffEmploymentStatus.EXITED;
 
     return this.prisma.$transaction(async (tx) => {
+      await this.wallet.ensureWalletAccount(id, tx as any);
+
       const log = await tx.userLog.create({
         data: {
           userId: operatorId || 0,
@@ -948,6 +950,8 @@ export class UsersService {
     const nextEmploymentStatus = addToBlacklist ? StaffEmploymentStatus.BLACKLISTED : StaffEmploymentStatus.EXITED;
 
     return this.prisma.$transaction(async (tx) => {
+      await this.wallet.ensureWalletAccount(id, tx as any);
+
       const log = await tx.userLog.create({
         data: {
           userId: operatorId || 0,
