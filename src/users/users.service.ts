@@ -6,7 +6,7 @@ import { ChangeLevelDto } from './dto/change-level.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { StaffExitDto, StaffExitMode } from './dto/staff-exit.dto';
 import { StaffClearDto } from './dto/staff-clear.dto';
-import { PlayerWorkStatus, StaffEmploymentStatus, UserType, WalletHoldStatus, WalletTxStatus } from '@prisma/client';
+import { PlayerWorkStatus, StaffEmploymentStatus, UserStatus, UserType, WalletHoldStatus, WalletTxStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { WalletService } from '../wallet/wallet.service';
 import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
@@ -52,8 +52,8 @@ export class UsersService {
     };
 
     return (
-      pickDate(input?.lastAcceptedAt) ||
       pickDate(input?.staffDormantFreezeBaseAt) ||
+      pickDate(input?.lastAcceptedAt) ||
       pickDate(input?.createdAt)
     );
   }
@@ -1194,6 +1194,7 @@ export class UsersService {
           ...updateUserDto,
           ...(shouldRestoreWithdrawOnStaffUnfreeze ? { canWithdraw: true } : {}),
           ...(shouldRestoreWithdrawOnStaffUnfreeze ? { staffDormantFreezeBaseAt: new Date() } : {}),
+          ...(shouldRestoreWithdrawOnStaffUnfreeze ? { status: UserStatus.ACTIVE } : {}),
           ...(normalizedStaffTags !== undefined ? { staffTags: normalizedStaffTags } : {}),
           ...(workModePayload || {}),
         },

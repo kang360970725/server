@@ -84,8 +84,8 @@ export class WalletWithdrawalsService {
         const manualBaseDate = user?.staffDormantFreezeBaseAt ? new Date(user.staffDormantFreezeBaseAt) : null;
         const createdAtDate = user?.createdAt ? new Date(user.createdAt) : null;
         const baseDate =
-            (lastAcceptedDate && !Number.isNaN(lastAcceptedDate.getTime()) ? lastAcceptedDate : null) ||
             (manualBaseDate && !Number.isNaN(manualBaseDate.getTime()) ? manualBaseDate : null) ||
+            (lastAcceptedDate && !Number.isNaN(lastAcceptedDate.getTime()) ? lastAcceptedDate : null) ||
             (createdAtDate && !Number.isNaN(createdAtDate.getTime()) ? createdAtDate : null);
         if (!baseDate) return user;
 
