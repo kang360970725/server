@@ -18,11 +18,20 @@ const distributeRoundedMoney = (total: number, count: number) => {
 };
 
 const getSettlementParticipants = (dispatch: any) => {
+    const dispatchStatus = String(dispatch?.status || '').trim().toUpperCase();
+    const isFinalized =
+        dispatchStatus === String(DispatchStatus.COMPLETED) ||
+        dispatchStatus === String(DispatchStatus.ARCHIVED);
+
     return (dispatch?.participants ?? []).filter((p: any) => {
         const userId = Number(p?.userId ?? 0);
         if (!Number.isFinite(userId) || userId <= 0) return false;
         if (p?.rejectedAt) return false;
-        return true;
+
+        // 已完成轮次只结算真实接过单的人，避免把“被替换但未接单”的历史参与人算进去。
+        if (isFinalized) return !!p?.acceptedAt;
+
+        return !!p?.isActive;
     });
 };
 
