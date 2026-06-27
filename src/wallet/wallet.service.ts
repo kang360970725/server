@@ -3235,15 +3235,12 @@ export class WalletService {
         const sourceSettlementStatusHints: Array<{ settlementId: number; statusHint: 'FROZEN' | 'AVAILABLE' }> = [];
 
         /**
-         * Step 3.1：主收益流水 reversal plan
+         * Step 3：每笔旧收益只生成一条 reversal plan
          *
-         * 关键修复：
-         * - 如果该主收益已经存在 releaseTx，说明它的 available 侧影响应由 release reversal 抵消
-         * - 此时主收益 reversal 必须固定回 frozen 侧，不能再按 t.status=AVAILABLE 去冲 available
-         *
-         * 规则：
-         * - hasRelease = true  -> statusHint = FROZEN
-         * - hasRelease = false -> statusHint = t.status
+         * 回滚重算的目标是撤销“当前仍在账户上的余额影响”，不是重演完整冻结/解冻生命周期。
+         * 因此规则必须按旧收益当前落在哪个余额桶来决定：
+         * - 已存在 releaseTx：说明这笔收益已经进 available，只冲 available
+         * - 不存在 releaseTx：仍按原主流水当前状态处理（通常是 FROZEN）
          */
         for (const t of baseTxs) {
             const userId = Number(t.userId ?? 0);
@@ -3256,15 +3253,13 @@ export class WalletService {
             const relatedReleaseTxs = releaseTxMap.get(Number(t.id)) ?? [];
             const hasRelease = relatedReleaseTxs.length > 0;
 
-            // ✅ 已解冻主收益：主流水 reversal 固定回 frozen
-            // ✅ 未解冻主收益：按原主流水当前状态处理
-            const mainTxStatusHint = hasRelease ? 'FROZEN' : t.status;
-            const recalcTxStatusHint = hasRelease ? 'AVAILABLE' : (String(t.status) === 'FROZEN' ? 'FROZEN' : 'AVAILABLE');
+            const currentStatusHint =
+                hasRelease || String(t.status) === 'AVAILABLE' ? 'AVAILABLE' : 'FROZEN';
 
             if (Number(t.sourceId ?? 0) > 0) {
                 sourceSettlementStatusHints.push({
                     settlementId: Number(t.sourceId ?? t.settlementId ?? 0),
-                    statusHint: recalcTxStatusHint as 'FROZEN' | 'AVAILABLE',
+                    statusHint: currentStatusHint,
                 });
             }
 
@@ -3283,53 +3278,13 @@ export class WalletService {
                 amount,
                 direction: reversalDirection,
 
-                statusHint: mainTxStatusHint,
+                statusHint: currentStatusHint,
                 bizType: 'SETTLEMENT_REVERSAL',
 
                 sourceTypeOverride: 'ORDER_SETTLEMENT_REVERSAL',
                 sourceIdOverride: Number(t.id),
 
-                note: `冲正旧结算主流水 txId=${t.id}, bizType=${t.bizType}, hasRelease=${hasRelease}`,
-            });
-        }
-
-        /**
-         * Step 3.2：releaseTx reversal plan
-         *
-         * release 的本质是 frozen -> available 的内部迁移
-         * 所以反向时，只抵消 available 侧影响
-         */
-        for (const r of releaseTxs) {
-            const userId = Number(r.userId ?? 0);
-            const amount = round2(Number(r.amount ?? 0));
-            if (!userId || !amount) continue;
-
-            const originalDirection = String(r.direction);
-            const reversalDirection = originalDirection === 'OUT' ? 'IN' : 'OUT';
-
-            reversalPlans.push({
-                kind: 'RELEASE_TX_REVERSAL',
-
-                userId,
-                orderId: null,
-                dispatchId: null,
-                settlementId: null,
-
-                sourceTxId: Number(r.id),
-                sourceSettlementId: null,
-
-                finalEarnings: reversalDirection === 'IN' ? amount : -amount,
-                amount,
-                direction: reversalDirection,
-
-                // ✅ release 只影响 available
-                statusHint: 'AVAILABLE',
-                bizType: 'SETTLEMENT_REVERSAL',
-
-                sourceTypeOverride: 'WALLET_HOLD_RELEASE_REVERSAL',
-                sourceIdOverride: Number(r.id),
-
-                note: `冲正旧解冻流水 txId=${r.id}, earningTxId=${r.sourceId}`,
+                note: `冲正旧结算主流水 txId=${t.id}, bizType=${t.bizType}, currentStatus=${currentStatusHint}, hasRelease=${hasRelease}`,
             });
         }
 
