@@ -72,7 +72,6 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         staffEmploymentStatus: StaffEmploymentStatus.FROZEN,
         canWithdraw: false,
         workStatus: PlayerWorkStatus.IDLE,
-        workMode: 'OFFLINE' as any,
         workOnlineExpiresAt: null,
       },
     });
@@ -82,7 +81,6 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       staffEmploymentStatus: StaffEmploymentStatus.FROZEN,
       canWithdraw: false,
       workStatus: PlayerWorkStatus.IDLE,
-      workMode: 'OFFLINE',
       workOnlineExpiresAt: null,
     };
   }
@@ -169,15 +167,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
             workMode: 'ONLINE',
           },
           data: {
-            workMode: 'OFFLINE',
             workStatus: 'IDLE',
-            offlineJoinedAt: leaseNow,
             workOnlineExpiresAt: null,
           },
         });
-        user.workMode = 'OFFLINE';
         user.workStatus = 'IDLE';
-        user.offlineJoinedAt = leaseNow;
         user.workOnlineExpiresAt = null;
       }
     }

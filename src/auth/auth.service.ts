@@ -97,7 +97,6 @@ export class AuthService {
         staffEmploymentStatus: StaffEmploymentStatus.FROZEN,
         canWithdraw: false,
         workStatus: PlayerWorkStatus.IDLE,
-        workMode: 'OFFLINE' as any,
         workOnlineExpiresAt: null,
       },
     });
@@ -107,7 +106,6 @@ export class AuthService {
       staffEmploymentStatus: StaffEmploymentStatus.FROZEN,
       canWithdraw: false,
       workStatus: PlayerWorkStatus.IDLE,
-      workMode: 'OFFLINE',
       workOnlineExpiresAt: null,
     };
   }

@@ -69,6 +69,28 @@ export class OfflineFeeController {
     });
   }
 
+  @Post('bills/waive')
+  @Permissions('finance:records:list')
+  async waive(@Body() body: { billId: number; remark?: string }, @Req() req: any) {
+    const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.waiveBill({
+      billId: Number(body.billId),
+      operatorId: Number.isFinite(operatorId) ? operatorId : undefined,
+      remark: body?.remark,
+    });
+  }
+
+  @Post('bills/refund')
+  @Permissions('finance:records:list')
+  async refund(@Body() body: { billId: number; remark?: string }, @Req() req: any) {
+    const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.refundBillPayments({
+      billId: Number(body.billId),
+      operatorId: Number.isFinite(operatorId) ? operatorId : undefined,
+      remark: body?.remark,
+    });
+  }
+
   @Post('withdrawal/guard-info')
   async guardInfo(@Req() req: any) {
     const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);

@@ -150,7 +150,6 @@ export class UsersService {
         staffEmploymentStatus: StaffEmploymentStatus.FROZEN,
         canWithdraw: false,
         workStatus: PlayerWorkStatus.IDLE,
-        workMode: 'OFFLINE',
         workOnlineExpiresAt: null,
       },
     });
@@ -839,8 +838,6 @@ export class UsersService {
           staffCooldownUntil: addToBlacklist ? null : this.buildStaffCooldownUntil(now, Number(preview.quitCoolingDays || this.staffExitCooldownDays)),
           staffExitedAt: now,
           workStatus: PlayerWorkStatus.IDLE,
-          workMode: 'OFFLINE',
-          offlineJoinedAt: now,
           workOnlineExpiresAt: null,
           canWithdraw: false,
         },
@@ -979,8 +976,6 @@ export class UsersService {
           staffCooldownUntil: addToBlacklist ? null : this.buildStaffCooldownUntil(now),
           staffExitedAt: now,
           workStatus: PlayerWorkStatus.IDLE,
-          workMode: 'OFFLINE',
-          offlineJoinedAt: now,
           workOnlineExpiresAt: null,
           canWithdraw: false,
         },
@@ -1776,9 +1771,7 @@ export class UsersService {
           ],
         },
         data: {
-          workMode: 'OFFLINE',
           workStatus: PlayerWorkStatus.IDLE,
-          offlineJoinedAt: leaseNow,
           workOnlineExpiresAt: null,
         },
       });
@@ -1791,6 +1784,7 @@ export class UsersService {
     if (onlyIdle) where.workStatus = PlayerWorkStatus.IDLE;
     if (onlyOnline) {
       where.workMode = 'ONLINE';
+      where.workOnlineExpiresAt = { gt: leaseNow };
     }
 
     if (keyword) {

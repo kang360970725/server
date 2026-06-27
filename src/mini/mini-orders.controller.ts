@@ -51,6 +51,7 @@ export class MiniOrdersController {
         userType: UserType.STAFF,
         workStatus: PlayerWorkStatus.IDLE,
         workMode: 'ONLINE',
+        workOnlineExpiresAt: { gt: new Date() },
       },
       select: { id: true },
     });

@@ -99,7 +99,6 @@ export class WalletWithdrawalsService {
                 staffEmploymentStatus: StaffEmploymentStatus.FROZEN,
                 canWithdraw: false,
                 workStatus: PlayerWorkStatus.IDLE,
-                workMode: 'OFFLINE',
                 workOnlineExpiresAt: null,
             },
         });

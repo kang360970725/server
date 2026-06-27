@@ -418,6 +418,97 @@ export class OfflineFeeService {
     });
   }
 
+  async waiveBill(params: { billId: number; operatorId?: number; remark?: string }) {
+    const billId = Number(params.billId);
+
+    return this.prisma.$transaction(async (tx) => {
+      const bill = await (tx as any).offlineFeeBill.findUnique({ where: { id: billId } });
+      if (!bill) throw new NotFoundException('线下费用账单不存在');
+
+      const paidAmount = this.toFixed2(Number(bill.paidAmount || 0));
+      if (paidAmount > 0) {
+        throw new BadRequestException('账单存在已缴金额，请先回退已缴金额后再废除');
+      }
+
+      return (tx as any).offlineFeeBill.update({
+        where: { id: billId },
+        data: {
+          remainingAmount: 0,
+          status: 'WAIVED',
+          enforceFullPayment: false,
+          lastRemindAt: null,
+          generatedAt: new Date(),
+        },
+      });
+    });
+  }
+
+  async refundBillPayments(params: { billId: number; operatorId?: number; remark?: string }) {
+    const billId = Number(params.billId);
+    const remark = String(params.remark || '').trim() || '线下费用误扣回退';
+
+    return this.prisma.$transaction(async (tx) => {
+      const bill = await (tx as any).offlineFeeBill.findUnique({
+        where: { id: billId },
+        include: {
+          payments: {
+            select: { id: true, amount: true },
+          },
+        },
+      });
+      if (!bill) throw new NotFoundException('线下费用账单不存在');
+
+      const refundAmount = this.toFixed2(
+        (Array.isArray(bill.payments) ? bill.payments : []).reduce(
+          (sum: number, item: any) => sum + Number(item.amount || 0),
+          0,
+        ),
+      );
+      if (refundAmount <= 0) {
+        throw new BadRequestException('当前账单不存在可回退的已缴金额');
+      }
+
+      const account = await (tx as any).walletAccount.upsert({
+        where: { userId: bill.userId },
+        create: {
+          userId: bill.userId,
+          availableBalance: refundAmount,
+          frozenBalance: 0,
+          earningFrozenBalance: 0,
+          withdrawFrozenBalance: 0,
+          depositBalance: 0,
+        },
+        update: {
+          availableBalance: { increment: refundAmount },
+        },
+        select: {
+          availableBalance: true,
+          frozenBalance: true,
+        },
+      });
+
+      await (tx as any).walletTransaction.create({
+        data: {
+          userId: bill.userId,
+          direction: 'IN',
+          bizType: 'OFFLINE_FEE_PAYMENT',
+          amount: refundAmount,
+          status: 'AVAILABLE',
+          sourceType: 'OFFLINE_FEE_REFUND',
+          sourceId: bill.id,
+          availableAfter: this.toFixed2(Number(account.availableBalance || 0)),
+          frozenAfter: this.toFixed2(Number(account.frozenBalance || 0)),
+        },
+      });
+
+      await (tx as any).offlineFeeBillPayment.deleteMany({
+        where: { billId: bill.id },
+      });
+
+      return this.refreshBillPaymentStatusTx(tx as any, bill.id);
+    });
+  }
+
   private async getLastMonthOutstandingBillTx(db: PrismaTx, userId: number, now = new Date()) {
     const billMonth = this.getPreviousMonth(now);
     // 仅在账单不存在时补生成，避免覆盖人工修订后的账单
