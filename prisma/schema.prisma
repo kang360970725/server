@@ -1163,6 +1163,7 @@ model WalletTransaction {
   /// - 兼容历史：允许为空；新写入必须赋值
   availableAfter           Decimal?                 @db.Decimal(18, 2)
   frozenAfter              Decimal?                 @db.Decimal(18, 2)
+  remark                   String?                  @db.Text
   hold                     WalletHold?              @relation("WalletEarningHold")
   reversalOfTx             WalletTransaction?       @relation("WalletReversal", fields: [reversalOfTxId], references: [id])
   reversals                WalletTransaction[]      @relation("WalletReversal")

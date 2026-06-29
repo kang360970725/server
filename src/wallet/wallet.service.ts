@@ -72,6 +72,199 @@ export class WalletService {
         return ['PENDING_REVIEW', 'APPROVED', 'PAYING', 'FAILED'] as const;
     }
 
+    private buildWalletRepairRemark(input: {
+        currentAvailable: number;
+        currentFrozen: number;
+        currentTotal: number;
+        targetAvailable: number;
+        targetFrozen: number;
+        targetTotal: number;
+        reason?: string;
+    }) {
+        const parts = [
+            '修复冻结流水统计错误',
+            `修复前冻结 ${round2Amount(input.currentFrozen)}`,
+            `可用 ${round2Amount(input.currentAvailable)}`,
+            `总余额 ${round2Amount(input.currentTotal)}`,
+            `修复后冻结 ${round2Amount(input.targetFrozen)}`,
+            `可用 ${round2Amount(input.targetAvailable)}`,
+            `总余额 ${round2Amount(input.targetTotal)}`,
+        ];
+        if (input.reason) {
+            parts.push(`原因：${String(input.reason).trim()}`);
+        }
+        return parts.join('；');
+    }
+
+    private async buildWalletRepairPreviewItem(audit: any, options?: { reason?: string }) {
+        const replay = await this.previewReplayByUser({
+            userId: Number(audit.userId),
+            mode: 'full',
+            limitMismatches: 200,
+        });
+
+        const currentAvailable = round2Amount(audit.currentAvailable);
+        const currentFrozen = round2Amount(audit.currentFrozen);
+        const currentTotal = round2Amount(audit.currentTotal);
+
+        const expectedEarningFrozen = round2Amount(audit.expectedEarningFrozen);
+        const expectedWithdrawFrozen = round2Amount(audit.expectedWithdrawFrozen);
+        const expectedFrozen = round2Amount(expectedEarningFrozen + expectedWithdrawFrozen);
+
+        const replayTotal = round2Amount(replay?.replayBalance?.total);
+        const replayFrozen = round2Amount(replay?.replayBalance?.frozen);
+
+        const targetFrozen = round2Amount(Math.max(expectedFrozen, replayFrozen));
+        const targetTotal = round2Amount(Math.max(replayTotal, targetFrozen));
+        const targetAvailable = round2Amount(targetTotal - targetFrozen);
+
+        let targetEarningFrozen = expectedEarningFrozen;
+        let targetWithdrawFrozen = expectedWithdrawFrozen;
+        const frozenBucketTotal = round2Amount(targetEarningFrozen + targetWithdrawFrozen);
+
+        if (frozenBucketTotal < targetFrozen) {
+            targetEarningFrozen = round2Amount(targetEarningFrozen + (targetFrozen - frozenBucketTotal));
+        } else if (frozenBucketTotal > targetFrozen) {
+            let overflow = round2Amount(frozenBucketTotal - targetFrozen);
+            const earningReduce = Math.min(targetEarningFrozen, overflow);
+            targetEarningFrozen = round2Amount(targetEarningFrozen - earningReduce);
+            overflow = round2Amount(overflow - earningReduce);
+            if (overflow > 0) {
+                targetWithdrawFrozen = round2Amount(Math.max(0, targetWithdrawFrozen - overflow));
+            }
+        }
+
+        const availableDelta = round2Amount(targetAvailable - currentAvailable);
+        const frozenDelta = round2Amount(targetFrozen - currentFrozen);
+        const totalDelta = round2Amount(targetTotal - currentTotal);
+        const remark = this.buildWalletRepairRemark({
+            currentAvailable,
+            currentFrozen,
+            currentTotal,
+            targetAvailable,
+            targetFrozen,
+            targetTotal,
+            reason: options?.reason,
+        });
+
+        return {
+            ...audit,
+            replayBalance: {
+                available: round2Amount(replay?.replayBalance?.available),
+                frozen: replayFrozen,
+                total: replayTotal,
+            },
+            repairPreview: {
+                currentAvailable,
+                currentFrozen,
+                currentTotal,
+                targetAvailable,
+                targetFrozen,
+                targetTotal,
+                targetEarningFrozen,
+                targetWithdrawFrozen,
+                availableDelta,
+                frozenDelta,
+                totalDelta,
+                reason: options?.reason || '',
+                remark,
+            },
+        };
+    }
+
+    private async applyWalletRepairPlan(params: {
+        userId: number;
+        reason?: string;
+        operatorId?: number;
+    }) {
+        return this.prisma.$transaction(async (tx) => {
+            const audit = await this.inspectWalletAccountState(params.userId, tx as any);
+            const preview = await this.buildWalletRepairPreviewItem(audit, { reason: params.reason });
+            const repair = preview.repairPreview;
+
+            let accountAfter = await this.getWalletAccountBalance(params.userId, tx as any);
+            const createdTxs: any[] = [];
+            const sourceToken = `U${params.userId}:${Date.now()}:${Math.floor(Math.random() * 1000)}`;
+
+            if (Math.abs(repair.availableDelta) > 0.009) {
+                accountAfter = await this.applyWalletAccountDelta(tx as any, params.userId, {
+                    availableDelta: repair.availableDelta,
+                });
+
+                const txRow = await (tx as any).walletTransaction.create({
+                    data: {
+                        userId: params.userId,
+                        direction: repair.availableDelta >= 0 ? WalletDirection.IN : WalletDirection.OUT,
+                        bizType: WalletBizType.SETTLEMENT_RECALC,
+                        amount: round2(Math.abs(repair.availableDelta)),
+                        status: WalletTxStatus.AVAILABLE,
+                        sourceType: `WALLET_ANOMALY_REPAIR_AVAILABLE:${sourceToken}`,
+                        sourceId: 0,
+                        availableAfter: round2(Number((accountAfter as any)?.availableBalance ?? 0)),
+                        frozenAfter: round2(Number((accountAfter as any)?.frozenBalance ?? 0)),
+                        remark: repair.remark,
+                    } as any,
+                });
+                createdTxs.push(txRow);
+            }
+
+            const earningFrozenDelta = round2Amount(repair.targetEarningFrozen - Number((accountAfter as any)?.earningFrozenBalance ?? 0));
+            const withdrawFrozenDelta = round2Amount(repair.targetWithdrawFrozen - Number((accountAfter as any)?.withdrawFrozenBalance ?? 0));
+            const frozenDelta = round2Amount(earningFrozenDelta + withdrawFrozenDelta);
+
+            if (Math.abs(earningFrozenDelta) > 0.009 || Math.abs(withdrawFrozenDelta) > 0.009) {
+                accountAfter = await this.applyWalletAccountDelta(tx as any, params.userId, {
+                    earningFrozenDelta,
+                    withdrawFrozenDelta,
+                });
+
+                if (Math.abs(frozenDelta) > 0.009) {
+                    const txRow = await (tx as any).walletTransaction.create({
+                        data: {
+                            userId: params.userId,
+                            direction: frozenDelta >= 0 ? WalletDirection.IN : WalletDirection.OUT,
+                            bizType: WalletBizType.SETTLEMENT_RECALC,
+                            amount: round2(Math.abs(frozenDelta)),
+                            status: WalletTxStatus.FROZEN,
+                            sourceType: `WALLET_ANOMALY_REPAIR_FROZEN:${sourceToken}`,
+                            sourceId: 0,
+                            availableAfter: round2(Number((accountAfter as any)?.availableBalance ?? 0)),
+                            frozenAfter: round2(Number((accountAfter as any)?.frozenBalance ?? 0)),
+                            remark: repair.remark,
+                        } as any,
+                    });
+                    createdTxs.push(txRow);
+                }
+            }
+
+            const finalAccount = await (tx as any).walletAccount.update({
+                where: { userId: params.userId },
+                data: buildWalletAccountSetData({
+                    availableBalance: repair.targetAvailable,
+                    earningFrozenBalance: repair.targetEarningFrozen,
+                    withdrawFrozenBalance: repair.targetWithdrawFrozen,
+                    depositBalance: Number(preview.depositBalance || 0),
+                }),
+                select: walletAccountBalanceSelect,
+            });
+
+            return {
+                ...preview,
+                applied: true,
+                operatorId: params.operatorId || null,
+                transactions: createdTxs.map((row: any) => ({
+                    id: row.id,
+                    direction: row.direction,
+                    bizType: row.bizType,
+                    amount: row.amount,
+                    status: row.status,
+                    remark: row.remark ?? repair.remark,
+                })),
+                account: normalizeWalletAccountBuckets(finalAccount),
+            };
+        });
+    }
+
     async getWalletAccountBalance(userId: number, tx?: PrismaTx) {
         const db = (tx as any) ?? this.prisma;
         return db.walletAccount.findUnique({
@@ -208,7 +401,16 @@ export class WalletService {
         };
     }
 
-    async ensureWalletAccountBucketsReady(userId: number, tx?: PrismaTx, options?: { throwOnDeficit?: boolean }) {
+    async ensureWalletAccountBucketsReady(
+        userId: number,
+        tx?: PrismaTx,
+        options?: {
+            throwOnDeficit?: boolean;
+            autoRepairOnDeficit?: boolean;
+            repairReason?: string;
+            operatorId?: number;
+        },
+    ) {
         const db = (tx as any) ?? this.prisma;
         const audit = await this.inspectWalletAccountState(userId, db);
         if (!audit.hasIssue) {
@@ -216,6 +418,17 @@ export class WalletService {
         }
 
         if (audit.deficitAmount > 0) {
+            if (options?.autoRepairOnDeficit) {
+                await this.applyWalletRepairPlan({
+                    userId,
+                    reason: options?.repairReason || '钱包关键操作前自动执行异常修复',
+                    operatorId: options?.operatorId,
+                });
+                const repairedAudit = await this.inspectWalletAccountState(userId, db);
+                if (!repairedAudit.hasIssue || repairedAudit.deficitAmount <= 0) {
+                    return this.getWalletAccountBalance(userId, db);
+                }
+            }
             if (options?.throwOnDeficit !== false) {
                 throw new BadRequestException('钱包冻结余额存在缺口，请先执行钱包异常修复');
             }
@@ -282,7 +495,14 @@ export class WalletService {
         };
     }
 
-    async repairWalletAnomalies(params?: { userId?: number; apply?: boolean; includeDeficitUsers?: boolean; limit?: number }) {
+    async repairWalletAnomalies(params?: {
+        userId?: number;
+        apply?: boolean;
+        includeDeficitUsers?: boolean;
+        limit?: number;
+        reason?: string;
+        operatorId?: number;
+    }) {
         const apply = params?.apply === true;
         const includeDeficitUsers = params?.includeDeficitUsers === true;
         const audit = await this.auditWalletAnomalies({
@@ -291,29 +511,31 @@ export class WalletService {
             limit: params?.limit,
         });
 
-        const safeItems = audit.items.filter((item: any) => item.safeToRepair);
-        const blockedItems = audit.items.filter((item: any) => !item.safeToRepair);
+        const repairableItems: any[] = [];
+        const blockedItems: any[] = [];
+        for (const item of audit.items) {
+            try {
+                repairableItems.push(await this.buildWalletRepairPreviewItem(item, { reason: params?.reason }));
+            } catch (e: any) {
+                blockedItems.push({
+                    ...item,
+                    blockedReason: e?.message || '生成修复预览失败',
+                });
+            }
+        }
+
+        const safeItems = includeDeficitUsers
+            ? repairableItems
+            : repairableItems.filter((item: any) => item.safeToRepair);
         const applied: any[] = [];
 
         if (apply) {
             for (const item of safeItems) {
-                const account = await this.prisma.walletAccount.update({
-                    where: { userId: Number(item.userId) },
-                    data: buildWalletAccountSetData({
-                        availableBalance: Number(item.expectedAvailable || 0),
-                        earningFrozenBalance: Number(item.expectedEarningFrozen || 0),
-                        withdrawFrozenBalance: Number(item.expectedWithdrawFrozen || 0),
-                        depositBalance: Number(item.depositBalance || 0),
-                    }),
-                    select: walletAccountBalanceSelect,
-                });
-
-                applied.push({
-                    userId: item.userId,
-                    phone: item.phone,
-                    name: item.name,
-                    account: normalizeWalletAccountBuckets(account),
-                });
+                applied.push(await this.applyWalletRepairPlan({
+                    userId: Number(item.userId),
+                    reason: params?.reason,
+                    operatorId: params?.operatorId,
+                }));
             }
         }
 

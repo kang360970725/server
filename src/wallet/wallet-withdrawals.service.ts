@@ -371,7 +371,11 @@ export class WalletWithdrawalsService {
             });
 
             if (!account) throw new BadRequestException('钱包账户不存在');
-            await this.walletService.ensureWalletAccountBucketsReady(userId, tx as any);
+            await this.walletService.ensureWalletAccountBucketsReady(userId, tx as any, {
+                autoRepairOnDeficit: true,
+                repairReason: '提现申请前自动修复钱包异常',
+                operatorId: userId,
+            });
 
             const refreshedAccount = await tx.walletAccount.findUnique({
                 where: { userId },
@@ -580,7 +584,11 @@ export class WalletWithdrawalsService {
                 });
 
                 if (!existingPayout) {
-                    await this.walletService.ensureWalletAccountBucketsReady(req.userId, tx as any);
+                    await this.walletService.ensureWalletAccountBucketsReady(req.userId, tx as any, {
+                        autoRepairOnDeficit: true,
+                        repairReason: '提现审核通过前自动修复钱包异常',
+                        operatorId: reviewerId,
+                    });
                     // 2) 扣除冻结余额（真正扣款）
                     const accountAfterPayout = await this.walletService.applyWalletAccountDelta(tx as any, req.userId, {
                         withdrawFrozenDelta: -req.amount,
@@ -652,7 +660,11 @@ export class WalletWithdrawalsService {
             });
 
             if (!existingReleaseTx) {
-                await this.walletService.ensureWalletAccountBucketsReady(req.userId, tx as any);
+                await this.walletService.ensureWalletAccountBucketsReady(req.userId, tx as any, {
+                    autoRepairOnDeficit: true,
+                    repairReason: '提现审核驳回前自动修复钱包异常',
+                    operatorId: reviewerId,
+                });
                 // 2) 资金退回：frozen -amount, available +amount
                 const accountAfterRelease = await this.walletService.applyWalletAccountDelta(tx as any, req.userId, {
                     withdrawFrozenDelta: -req.amount,

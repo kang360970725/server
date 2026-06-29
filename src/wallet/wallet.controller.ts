@@ -79,12 +79,15 @@ export class WalletController {
     @UseGuards(PermissionsGuard)
     @Permissions(WITHDRAWALS_PAGE)
     @Post('anomalies/repair')
-    async repairAnomalies(@Body() body: any) {
+    async repairAnomalies(@Body() body: any, @Req() req: any) {
+        const operatorId = Number(req?.user?.userId ?? req?.user?.id ?? req?.user?.sub ?? 0) || undefined;
         return this.walletService.repairWalletAnomalies({
             userId: body?.userId ? Number(body.userId) : undefined,
             apply: body?.apply === true,
             includeDeficitUsers: body?.includeDeficitUsers === true,
             limit: body?.limit ? Number(body.limit) : undefined,
+            reason: body?.reason ? String(body.reason).trim() : undefined,
+            operatorId,
         });
     }
     /**
