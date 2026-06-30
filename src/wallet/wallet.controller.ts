@@ -90,6 +90,21 @@ export class WalletController {
             operatorId,
         });
     }
+
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE)
+    @Post('anomalies/repair-rollback')
+    async rollbackRepairAdjustments(@Body() body: any, @Req() req: any) {
+        const operatorId = Number(req?.user?.userId ?? req?.user?.id ?? req?.user?.sub ?? 0) || undefined;
+        return this.walletService.rollbackWalletRepairAdjustments({
+            userId: body?.userId ? Number(body.userId) : undefined,
+            apply: body?.apply === true,
+            limit: body?.limit ? Number(body.limit) : undefined,
+            onlyBalanceIncrease: body?.onlyBalanceIncrease !== false,
+            reason: body?.reason ? String(body.reason).trim() : undefined,
+            operatorId,
+        });
+    }
     /**
      * 查询当前用户冻结单
      * GET /wallet/holds?page&limit&status

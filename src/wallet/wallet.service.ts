@@ -96,6 +96,54 @@ export class WalletService {
         return parts.join('；');
     }
 
+    private parseWalletRepairSource(sourceType: string | null | undefined) {
+        const text = String(sourceType || '').trim();
+        const availablePrefix = 'WALLET_ANOMALY_REPAIR_AVAILABLE:';
+        const frozenPrefix = 'WALLET_ANOMALY_REPAIR_FROZEN:';
+        const rollbackAvailablePrefix = 'WALLET_ANOMALY_REPAIR_ROLLBACK_AVAILABLE:';
+        const rollbackFrozenPrefix = 'WALLET_ANOMALY_REPAIR_ROLLBACK_FROZEN:';
+
+        if (text.startsWith(availablePrefix)) {
+            return { kind: 'AVAILABLE' as const, token: text.slice(availablePrefix.length), rollback: false };
+        }
+        if (text.startsWith(frozenPrefix)) {
+            return { kind: 'FROZEN' as const, token: text.slice(frozenPrefix.length), rollback: false };
+        }
+        if (text.startsWith(rollbackAvailablePrefix)) {
+            return { kind: 'AVAILABLE' as const, token: text.slice(rollbackAvailablePrefix.length), rollback: true };
+        }
+        if (text.startsWith(rollbackFrozenPrefix)) {
+            return { kind: 'FROZEN' as const, token: text.slice(rollbackFrozenPrefix.length), rollback: true };
+        }
+        return null;
+    }
+
+    private buildWalletRepairRollbackRemark(input: {
+        currentAvailable: number;
+        currentFrozen: number;
+        currentTotal: number;
+        targetAvailable: number;
+        targetFrozen: number;
+        targetTotal: number;
+        sourceToken: string;
+        reason?: string;
+    }) {
+        const parts = [
+            '回滚异常修复流水',
+            `修复标记 ${input.sourceToken}`,
+            `回滚前冻结 ${round2Amount(input.currentFrozen)}`,
+            `可用 ${round2Amount(input.currentAvailable)}`,
+            `总余额 ${round2Amount(input.currentTotal)}`,
+            `回滚后冻结 ${round2Amount(input.targetFrozen)}`,
+            `可用 ${round2Amount(input.targetAvailable)}`,
+            `总余额 ${round2Amount(input.targetTotal)}`,
+        ];
+        if (input.reason) {
+            parts.push(`原因：${String(input.reason).trim()}`);
+        }
+        return parts.join('；');
+    }
+
     private async buildWalletRepairPreviewItem(audit: any, options?: { reason?: string }) {
         const replay = await this.previewReplayByUser({
             userId: Number(audit.userId),
@@ -107,32 +155,20 @@ export class WalletService {
         const currentFrozen = round2Amount(audit.currentFrozen);
         const currentTotal = round2Amount(audit.currentTotal);
 
-        const expectedEarningFrozen = round2Amount(audit.expectedEarningFrozen);
-        const expectedWithdrawFrozen = round2Amount(audit.expectedWithdrawFrozen);
-        const expectedFrozen = round2Amount(expectedEarningFrozen + expectedWithdrawFrozen);
-
-        const replayTotal = round2Amount(replay?.replayBalance?.total);
+        const replayAvailable = round2Amount(replay?.replayBalance?.available);
         const replayFrozen = round2Amount(replay?.replayBalance?.frozen);
+        const replayTotal = round2Amount(replay?.replayBalance?.total);
+        const replayEarningFrozen = round2Amount(replay?.replayBuckets?.earningFrozen);
+        const replayWithdrawFrozen = round2Amount(replay?.replayBuckets?.withdrawFrozen);
 
-        const targetFrozen = round2Amount(Math.max(expectedFrozen, replayFrozen));
-        const targetTotal = round2Amount(Math.max(replayTotal, targetFrozen));
-        const targetAvailable = round2Amount(targetTotal - targetFrozen);
+        const totalGap = round2Amount(replayTotal - currentTotal);
+        const totalUnchanged = Math.abs(totalGap) <= 0.009;
 
-        let targetEarningFrozen = expectedEarningFrozen;
-        let targetWithdrawFrozen = expectedWithdrawFrozen;
-        const frozenBucketTotal = round2Amount(targetEarningFrozen + targetWithdrawFrozen);
-
-        if (frozenBucketTotal < targetFrozen) {
-            targetEarningFrozen = round2Amount(targetEarningFrozen + (targetFrozen - frozenBucketTotal));
-        } else if (frozenBucketTotal > targetFrozen) {
-            let overflow = round2Amount(frozenBucketTotal - targetFrozen);
-            const earningReduce = Math.min(targetEarningFrozen, overflow);
-            targetEarningFrozen = round2Amount(targetEarningFrozen - earningReduce);
-            overflow = round2Amount(overflow - earningReduce);
-            if (overflow > 0) {
-                targetWithdrawFrozen = round2Amount(Math.max(0, targetWithdrawFrozen - overflow));
-            }
-        }
+        const targetAvailable = totalUnchanged ? replayAvailable : currentAvailable;
+        const targetFrozen = totalUnchanged ? replayFrozen : currentFrozen;
+        const targetTotal = totalUnchanged ? replayTotal : currentTotal;
+        const targetEarningFrozen = totalUnchanged ? replayEarningFrozen : round2Amount(audit.currentEarningFrozen);
+        const targetWithdrawFrozen = totalUnchanged ? replayWithdrawFrozen : round2Amount(audit.currentWithdrawFrozen);
 
         const availableDelta = round2Amount(targetAvailable - currentAvailable);
         const frozenDelta = round2Amount(targetFrozen - currentFrozen);
@@ -166,6 +202,8 @@ export class WalletService {
                 availableDelta,
                 frozenDelta,
                 totalDelta,
+                totalGap,
+                totalUnchanged,
                 reason: options?.reason || '',
                 remark,
             },
@@ -176,11 +214,16 @@ export class WalletService {
         userId: number;
         reason?: string;
         operatorId?: number;
+        tx?: PrismaTx;
     }) {
-        return this.prisma.$transaction(async (tx) => {
+        const runner = async (tx: PrismaTx) => {
             const audit = await this.inspectWalletAccountState(params.userId, tx as any);
             const preview = await this.buildWalletRepairPreviewItem(audit, { reason: params.reason });
             const repair = preview.repairPreview;
+
+            if (!repair.totalUnchanged) {
+                throw new BadRequestException(`异常修复已阻断：本次修复将改动账户总余额 ${round2Amount(repair.totalGap)}，存在资金风险，需人工核对。`);
+            }
 
             let accountAfter = await this.getWalletAccountBalance(params.userId, tx as any);
             const createdTxs: any[] = [];
@@ -262,7 +305,264 @@ export class WalletService {
                 })),
                 account: normalizeWalletAccountBuckets(finalAccount),
             };
+        };
+
+        if (params.tx) {
+            return runner(params.tx);
+        }
+        return this.prisma.$transaction(async (tx) => runner(tx as any));
+    }
+
+    private async collectWalletRepairRollbackCandidates(params?: {
+        userId?: number;
+        limit?: number;
+        onlyBalanceIncrease?: boolean;
+    }) {
+        const userId = Number(params?.userId || 0);
+        const limit = Math.min(1000, Math.max(1, Number(params?.limit || 200)));
+        const onlyBalanceIncrease = params?.onlyBalanceIncrease !== false;
+
+        const repairRows: any[] = await this.prisma.walletTransaction.findMany({
+            where: {
+                ...(userId ? { userId } : {}),
+                OR: [
+                    { sourceType: { startsWith: 'WALLET_ANOMALY_REPAIR_AVAILABLE:' } },
+                    { sourceType: { startsWith: 'WALLET_ANOMALY_REPAIR_FROZEN:' } },
+                ],
+            } as any,
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+            take: userId ? undefined : limit * 4,
+            select: {
+                id: true,
+                userId: true,
+                amount: true,
+                direction: true,
+                status: true,
+                sourceType: true,
+                sourceId: true,
+                createdAt: true,
+                remark: true,
+            } as any,
         });
+
+        const rollbackRows: any[] = await this.prisma.walletTransaction.findMany({
+            where: {
+                ...(userId ? { userId } : {}),
+                OR: [
+                    { sourceType: { startsWith: 'WALLET_ANOMALY_REPAIR_ROLLBACK_AVAILABLE:' } },
+                    { sourceType: { startsWith: 'WALLET_ANOMALY_REPAIR_ROLLBACK_FROZEN:' } },
+                ],
+            } as any,
+            select: {
+                userId: true,
+                sourceType: true,
+            },
+        });
+
+        const rolledBackKeys = new Set<string>();
+        for (const row of rollbackRows) {
+            const parsed = this.parseWalletRepairSource(row.sourceType);
+            if (!parsed?.rollback || !parsed.token) continue;
+            rolledBackKeys.add(`${Number(row.userId)}:${parsed.token}`);
+        }
+
+        const groups = new Map<string, any>();
+        for (const row of repairRows) {
+            const parsed = this.parseWalletRepairSource(row.sourceType);
+            if (!parsed || parsed.rollback || !parsed.token) continue;
+
+            const key = `${Number(row.userId)}:${parsed.token}`;
+            const signedAmount = String(row.direction) === 'OUT' ? -round2Amount(row.amount) : round2Amount(row.amount);
+
+            if (!groups.has(key)) {
+                groups.set(key, {
+                    userId: Number(row.userId),
+                    sourceToken: parsed.token,
+                    createdAt: row.createdAt,
+                    lastCreatedAt: row.createdAt,
+                    repairTxIds: [],
+                    availableDelta: 0,
+                    frozenDelta: 0,
+                    totalDelta: 0,
+                    originalRemark: row.remark || '',
+                });
+            }
+
+            const group = groups.get(key);
+            group.repairTxIds.push(Number(row.id));
+            group.lastCreatedAt = row.createdAt;
+            if (!group.originalRemark && row.remark) {
+                group.originalRemark = row.remark;
+            }
+            if (parsed.kind === 'AVAILABLE') {
+                group.availableDelta = round2Amount(group.availableDelta + signedAmount);
+            } else {
+                group.frozenDelta = round2Amount(group.frozenDelta + signedAmount);
+            }
+            group.totalDelta = round2Amount(group.availableDelta + group.frozenDelta);
+        }
+
+        const candidates = Array.from(groups.values())
+            .filter((item) => !rolledBackKeys.has(`${item.userId}:${item.sourceToken}`))
+            .filter((item) => Math.abs(Number(item.totalDelta || 0)) > 0.009)
+            .filter((item) => (onlyBalanceIncrease ? Number(item.totalDelta || 0) > 0.009 : true))
+            .sort((a, b) => {
+                const at = new Date(a.createdAt).getTime();
+                const bt = new Date(b.createdAt).getTime();
+                if (at !== bt) return at - bt;
+                return Number(a.userId) - Number(b.userId);
+            });
+
+        return candidates.slice(0, userId ? candidates.length : limit);
+    }
+
+    private async buildWalletRepairRollbackPreviewItem(group: any, options?: { reason?: string }) {
+        const audit = await this.inspectWalletAccountState(Number(group.userId), this.prisma as any);
+
+        const currentAvailable = round2Amount(audit.currentAvailable);
+        const currentFrozen = round2Amount(audit.currentFrozen);
+        const currentTotal = round2Amount(audit.currentTotal);
+        const targetTotal = round2Amount(currentTotal - Number(group.totalDelta || 0));
+        const targetEarningFrozen = round2Amount(audit.expectedEarningFrozen);
+        const targetWithdrawFrozen = round2Amount(audit.expectedWithdrawFrozen);
+        const targetFrozen = round2Amount(targetEarningFrozen + targetWithdrawFrozen);
+        const targetAvailable = round2Amount(targetTotal - targetFrozen);
+        const availableDelta = round2Amount(targetAvailable - currentAvailable);
+        const frozenDelta = round2Amount(targetFrozen - currentFrozen);
+        const canApply = targetTotal >= -0.009;
+        const blockedReason = canApply
+            ? ''
+            : `回滚后总余额将变为 ${round2Amount(targetTotal)}，已阻断自动回滚，请人工核对。`;
+        const remark = this.buildWalletRepairRollbackRemark({
+            currentAvailable,
+            currentFrozen,
+            currentTotal,
+            targetAvailable,
+            targetFrozen,
+            targetTotal,
+            sourceToken: String(group.sourceToken || ''),
+            reason: options?.reason,
+        });
+
+        return {
+            ...group,
+            currentAvailable,
+            currentFrozen,
+            currentTotal,
+            targetAvailable,
+            targetFrozen,
+            targetTotal,
+            targetEarningFrozen,
+            targetWithdrawFrozen,
+            availableDelta,
+            frozenDelta,
+            totalDelta: round2Amount(targetTotal - currentTotal),
+            repairTotalDelta: round2Amount(group.totalDelta),
+            canApply,
+            blockedReason,
+            reason: options?.reason || '',
+            remark,
+            audit,
+        };
+    }
+
+    private async applyWalletRepairRollbackPlan(params: {
+        preview: any;
+        reason?: string;
+        operatorId?: number;
+        tx?: PrismaTx;
+    }) {
+        const runner = async (tx: PrismaTx) => {
+            const preview = await this.buildWalletRepairRollbackPreviewItem(params.preview, { reason: params.reason });
+            if (!preview.canApply) {
+                throw new BadRequestException(preview.blockedReason || '当前回滚已被阻断');
+            }
+
+            let accountAfter = await this.getWalletAccountBalance(Number(preview.userId), tx as any);
+            const createdTxs: any[] = [];
+
+            if (Math.abs(preview.availableDelta) > 0.009) {
+                accountAfter = await this.applyWalletAccountDelta(tx as any, Number(preview.userId), {
+                    availableDelta: preview.availableDelta,
+                });
+
+                const txRow = await (tx as any).walletTransaction.create({
+                    data: {
+                        userId: Number(preview.userId),
+                        direction: preview.availableDelta >= 0 ? WalletDirection.IN : WalletDirection.OUT,
+                        bizType: WalletBizType.SETTLEMENT_RECALC,
+                        amount: round2(Math.abs(preview.availableDelta)),
+                        status: WalletTxStatus.AVAILABLE,
+                        sourceType: `WALLET_ANOMALY_REPAIR_ROLLBACK_AVAILABLE:${preview.sourceToken}`,
+                        sourceId: Number(preview.userId),
+                        availableAfter: round2(Number((accountAfter as any)?.availableBalance ?? 0)),
+                        frozenAfter: round2(Number((accountAfter as any)?.frozenBalance ?? 0)),
+                        remark: preview.remark,
+                    } as any,
+                });
+                createdTxs.push(txRow);
+            }
+
+            const earningFrozenDelta = round2Amount(preview.targetEarningFrozen - Number((accountAfter as any)?.earningFrozenBalance ?? 0));
+            const withdrawFrozenDelta = round2Amount(preview.targetWithdrawFrozen - Number((accountAfter as any)?.withdrawFrozenBalance ?? 0));
+            const frozenDelta = round2Amount(earningFrozenDelta + withdrawFrozenDelta);
+
+            if (Math.abs(earningFrozenDelta) > 0.009 || Math.abs(withdrawFrozenDelta) > 0.009) {
+                accountAfter = await this.applyWalletAccountDelta(tx as any, Number(preview.userId), {
+                    earningFrozenDelta,
+                    withdrawFrozenDelta,
+                });
+
+                if (Math.abs(frozenDelta) > 0.009) {
+                    const txRow = await (tx as any).walletTransaction.create({
+                        data: {
+                            userId: Number(preview.userId),
+                            direction: frozenDelta >= 0 ? WalletDirection.IN : WalletDirection.OUT,
+                            bizType: WalletBizType.SETTLEMENT_RECALC,
+                            amount: round2(Math.abs(frozenDelta)),
+                            status: WalletTxStatus.FROZEN,
+                            sourceType: `WALLET_ANOMALY_REPAIR_ROLLBACK_FROZEN:${preview.sourceToken}`,
+                            sourceId: Number(preview.userId),
+                            availableAfter: round2(Number((accountAfter as any)?.availableBalance ?? 0)),
+                            frozenAfter: round2(Number((accountAfter as any)?.frozenBalance ?? 0)),
+                            remark: preview.remark,
+                        } as any,
+                    });
+                    createdTxs.push(txRow);
+                }
+            }
+
+            const finalAccount = await (tx as any).walletAccount.update({
+                where: { userId: Number(preview.userId) },
+                data: buildWalletAccountSetData({
+                    availableBalance: preview.targetAvailable,
+                    earningFrozenBalance: preview.targetEarningFrozen,
+                    withdrawFrozenBalance: preview.targetWithdrawFrozen,
+                    depositBalance: Number(preview.audit?.depositBalance || 0),
+                }),
+                select: walletAccountBalanceSelect,
+            });
+
+            return {
+                ...preview,
+                applied: true,
+                operatorId: params.operatorId || null,
+                transactions: createdTxs.map((row: any) => ({
+                    id: row.id,
+                    direction: row.direction,
+                    bizType: row.bizType,
+                    amount: row.amount,
+                    status: row.status,
+                    remark: row.remark ?? preview.remark,
+                })),
+                account: normalizeWalletAccountBuckets(finalAccount),
+            };
+        };
+
+        if (params.tx) {
+            return runner(params.tx);
+        }
+        return this.prisma.$transaction(async (tx) => runner(tx as any));
     }
 
     async getWalletAccountBalance(userId: number, tx?: PrismaTx) {
@@ -423,6 +723,7 @@ export class WalletService {
                     userId,
                     reason: options?.repairReason || '钱包关键操作前自动执行异常修复',
                     operatorId: options?.operatorId,
+                    tx,
                 });
                 const repairedAudit = await this.inspectWalletAccountState(userId, db);
                 if (!repairedAudit.hasIssue || repairedAudit.deficitAmount <= 0) {
@@ -548,6 +849,64 @@ export class WalletService {
             blockedItems: includeDeficitUsers ? blockedItems : blockedItems.slice(0, 50),
             appliedItems: applied,
             previewItems: apply ? [] : safeItems,
+        };
+    }
+
+    async rollbackWalletRepairAdjustments(params?: {
+        userId?: number;
+        apply?: boolean;
+        limit?: number;
+        onlyBalanceIncrease?: boolean;
+        reason?: string;
+        operatorId?: number;
+    }) {
+        const apply = params?.apply === true;
+        const onlyBalanceIncrease = params?.onlyBalanceIncrease !== false;
+        const groups = await this.collectWalletRepairRollbackCandidates({
+            userId: params?.userId,
+            limit: params?.limit,
+            onlyBalanceIncrease,
+        });
+
+        const previewItems: any[] = [];
+        const blockedItems: any[] = [];
+        for (const group of groups) {
+            try {
+                const preview = await this.buildWalletRepairRollbackPreviewItem(group, { reason: params?.reason });
+                if (preview.canApply) {
+                    previewItems.push(preview);
+                } else {
+                    blockedItems.push(preview);
+                }
+            } catch (e: any) {
+                blockedItems.push({
+                    ...group,
+                    blockedReason: e?.message || '生成回滚预览失败',
+                });
+            }
+        }
+
+        const appliedItems: any[] = [];
+        if (apply) {
+            for (const item of previewItems) {
+                appliedItems.push(await this.applyWalletRepairRollbackPlan({
+                    preview: item,
+                    reason: params?.reason,
+                    operatorId: params?.operatorId,
+                }));
+            }
+        }
+
+        return {
+            generatedAt: new Date().toISOString(),
+            apply,
+            onlyBalanceIncrease,
+            rollbackableCount: previewItems.length,
+            blockedCount: blockedItems.length,
+            appliedCount: appliedItems.length,
+            blockedItems,
+            appliedItems,
+            previewItems: apply ? [] : previewItems,
         };
     }
 
@@ -2351,34 +2710,134 @@ export class WalletService {
                 status?: string | null;
                 direction?: string | null;
                 amount?: number | null;
+                available?: number;
+                earningFrozen?: number;
+                withdrawFrozen?: number;
             },
         ) => {
             const biz = String(row?.bizType || '');
             const status = String(row?.status || '');
             const direction = String(row?.direction || '');
             const amount = r2(row?.amount);
+            let available = r2((row as any)?.available);
+            let earningFrozen = r2((row as any)?.earningFrozen);
+            let withdrawFrozen = r2((row as any)?.withdrawFrozen);
 
             // 指定类型仅做“范围统计”，不改余额
             if (noBalanceBizSet.has(biz)) {
-                return { deltaAvailable: 0, deltaFrozen: 0, ignored: true, ignoredReason: 'BIZ_NO_BALANCE' as const };
+                return {
+                    available,
+                    earningFrozen,
+                    withdrawFrozen,
+                    deltaAvailable: 0,
+                    deltaFrozen: 0,
+                    ignored: true,
+                    ignoredReason: 'BIZ_NO_BALANCE' as const,
+                };
             }
 
             if (status === 'REVERSED') {
-                return { deltaAvailable: 0, deltaFrozen: 0, ignored: true, ignoredReason: 'REVERSED' as const };
+                return {
+                    available,
+                    earningFrozen,
+                    withdrawFrozen,
+                    deltaAvailable: 0,
+                    deltaFrozen: 0,
+                    ignored: true,
+                    ignoredReason: 'REVERSED' as const,
+                };
+            }
+
+            if (biz === 'WITHDRAW_RESERVE') {
+                available = r2(available - amount);
+                withdrawFrozen = r2(withdrawFrozen + amount);
+                return {
+                    available,
+                    earningFrozen,
+                    withdrawFrozen,
+                    deltaAvailable: r2(-amount),
+                    deltaFrozen: r2(amount),
+                    ignored: false as const,
+                };
+            }
+
+            if (biz === 'WITHDRAW_RELEASE') {
+                available = r2(available + amount);
+                withdrawFrozen = r2(withdrawFrozen - amount);
+                return {
+                    available,
+                    earningFrozen,
+                    withdrawFrozen,
+                    deltaAvailable: r2(amount),
+                    deltaFrozen: r2(-amount),
+                    ignored: false as const,
+                };
+            }
+
+            if (biz === 'WITHDRAW_PAYOUT') {
+                const consumeFrozen = Math.min(withdrawFrozen, amount);
+                const consumeAvailable = r2(amount - consumeFrozen);
+                withdrawFrozen = r2(withdrawFrozen - consumeFrozen);
+                available = r2(available - consumeAvailable);
+                return {
+                    available,
+                    earningFrozen,
+                    withdrawFrozen,
+                    deltaAvailable: r2(-consumeAvailable),
+                    deltaFrozen: r2(-consumeFrozen),
+                    ignored: false as const,
+                };
+            }
+
+            if (biz === 'RELEASE_FROZEN') {
+                earningFrozen = r2(earningFrozen - amount);
+                available = r2(available + amount);
+                return {
+                    available,
+                    earningFrozen,
+                    withdrawFrozen,
+                    deltaAvailable: r2(amount),
+                    deltaFrozen: r2(-amount),
+                    ignored: false as const,
+                };
             }
 
             const sign = direction === 'OUT' ? -1 : 1;
 
             if (status === 'FROZEN') {
-                return { deltaAvailable: 0, deltaFrozen: r2(sign * amount), ignored: false as const };
+                earningFrozen = r2(earningFrozen + sign * amount);
+                return {
+                    available,
+                    earningFrozen,
+                    withdrawFrozen,
+                    deltaAvailable: 0,
+                    deltaFrozen: r2(sign * amount),
+                    ignored: false as const,
+                };
             }
 
             if (status === 'AVAILABLE') {
-                return { deltaAvailable: r2(sign * amount), deltaFrozen: 0, ignored: false as const };
+                available = r2(available + sign * amount);
+                return {
+                    available,
+                    earningFrozen,
+                    withdrawFrozen,
+                    deltaAvailable: r2(sign * amount),
+                    deltaFrozen: 0,
+                    ignored: false as const,
+                };
             }
 
             // 未知状态：不动余额，只计入忽略
-            return { deltaAvailable: 0, deltaFrozen: 0, ignored: true, ignoredReason: 'UNKNOWN_STATUS' as const };
+            return {
+                available,
+                earningFrozen,
+                withdrawFrozen,
+                deltaAvailable: 0,
+                deltaFrozen: 0,
+                ignored: true,
+                ignoredReason: 'UNKNOWN_STATUS' as const,
+            };
         };
 
         const where: any = { userId };
@@ -2390,6 +2849,8 @@ export class WalletService {
 
         // 若传了 startAt，先回放 startAt 前流水，得到区间起始余额
         let openingAvailable = 0;
+        let openingEarningFrozen = 0;
+        let openingWithdrawFrozen = 0;
         let openingFrozen = 0;
         if (params?.startAt) {
             const beforeRows = await this.prisma.walletTransaction.findMany({
@@ -2407,9 +2868,16 @@ export class WalletService {
             });
 
             for (const row of beforeRows) {
-                const { deltaAvailable, deltaFrozen } = applyDelta(row as any);
-                openingAvailable = r2(openingAvailable + deltaAvailable);
-                openingFrozen = r2(openingFrozen + deltaFrozen);
+                const result = applyDelta({
+                    ...(row as any),
+                    available: openingAvailable,
+                    earningFrozen: openingEarningFrozen,
+                    withdrawFrozen: openingWithdrawFrozen,
+                });
+                openingAvailable = r2(result.available);
+                openingEarningFrozen = r2(result.earningFrozen);
+                openingWithdrawFrozen = r2(result.withdrawFrozen);
+                openingFrozen = r2(openingEarningFrozen + openingWithdrawFrozen);
             }
         }
 
@@ -2434,6 +2902,8 @@ export class WalletService {
         });
 
         let replayAvailable = openingAvailable;
+        let replayEarningFrozen = openingEarningFrozen;
+        let replayWithdrawFrozen = openingWithdrawFrozen;
         let replayFrozen = openingFrozen;
         let ignoredCount = 0;
         let negativeMoments = 0;
@@ -2450,14 +2920,21 @@ export class WalletService {
             const biz = String(row.bizType || 'UNKNOWN');
             bizBreakdown[biz] = (bizBreakdown[biz] || 0) + 1;
 
-            const result = applyDelta(row as any);
+            const result = applyDelta({
+                ...(row as any),
+                available: replayAvailable,
+                earningFrozen: replayEarningFrozen,
+                withdrawFrozen: replayWithdrawFrozen,
+            });
             if ((result as any).ignored) {
                 ignoredCount++;
                 ignoredBizBreakdown[biz] = (ignoredBizBreakdown[biz] || 0) + 1;
             }
 
-            replayAvailable = r2(replayAvailable + result.deltaAvailable);
-            replayFrozen = r2(replayFrozen + result.deltaFrozen);
+            replayAvailable = r2(result.available);
+            replayEarningFrozen = r2(result.earningFrozen);
+            replayWithdrawFrozen = r2(result.withdrawFrozen);
+            replayFrozen = r2(replayEarningFrozen + replayWithdrawFrozen);
 
             if (replayAvailable < 0 || replayFrozen < 0) {
                 negativeMoments++;
@@ -2573,6 +3050,13 @@ export class WalletService {
             },
             replayBalance: {
                 available: replayAvailable,
+                frozen: replayFrozen,
+                total: replayTotal,
+            },
+            replayBuckets: {
+                available: replayAvailable,
+                earningFrozen: replayEarningFrozen,
+                withdrawFrozen: replayWithdrawFrozen,
                 frozen: replayFrozen,
                 total: replayTotal,
             },
