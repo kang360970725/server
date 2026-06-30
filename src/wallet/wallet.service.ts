@@ -96,6 +96,30 @@ export class WalletService {
         return parts.join('；');
     }
 
+    private buildWalletAnomalySignature(input: {
+        currentAvailable: number;
+        currentFrozen: number;
+        currentTotal: number;
+        replayAvailable: number;
+        replayFrozen: number;
+        replayTotal: number;
+        availableGap: number;
+        frozenGap: number;
+        totalGap: number;
+    }) {
+        return [
+            round2Amount(input.currentAvailable),
+            round2Amount(input.currentFrozen),
+            round2Amount(input.currentTotal),
+            round2Amount(input.replayAvailable),
+            round2Amount(input.replayFrozen),
+            round2Amount(input.replayTotal),
+            round2Amount(input.availableGap),
+            round2Amount(input.frozenGap),
+            round2Amount(input.totalGap),
+        ].join('|');
+    }
+
     private parseWalletRepairSource(sourceType: string | null | undefined) {
         const text = String(sourceType || '').trim();
         const availablePrefix = 'WALLET_ANOMALY_REPAIR_AVAILABLE:';
@@ -163,12 +187,14 @@ export class WalletService {
 
         const totalGap = round2Amount(replayTotal - currentTotal);
         const totalUnchanged = Math.abs(totalGap) <= 0.009;
+        const totalDecrease = totalGap < -0.009;
+        const canApplyByReplay = totalUnchanged || totalDecrease;
 
-        const targetAvailable = totalUnchanged ? replayAvailable : currentAvailable;
-        const targetFrozen = totalUnchanged ? replayFrozen : currentFrozen;
-        const targetTotal = totalUnchanged ? replayTotal : currentTotal;
-        const targetEarningFrozen = totalUnchanged ? replayEarningFrozen : round2Amount(audit.currentEarningFrozen);
-        const targetWithdrawFrozen = totalUnchanged ? replayWithdrawFrozen : round2Amount(audit.currentWithdrawFrozen);
+        const targetAvailable = canApplyByReplay ? replayAvailable : currentAvailable;
+        const targetFrozen = canApplyByReplay ? replayFrozen : currentFrozen;
+        const targetTotal = canApplyByReplay ? replayTotal : currentTotal;
+        const targetEarningFrozen = canApplyByReplay ? replayEarningFrozen : round2Amount(audit.currentEarningFrozen);
+        const targetWithdrawFrozen = canApplyByReplay ? replayWithdrawFrozen : round2Amount(audit.currentWithdrawFrozen);
 
         const availableDelta = round2Amount(targetAvailable - currentAvailable);
         const frozenDelta = round2Amount(targetFrozen - currentFrozen);
@@ -204,6 +230,8 @@ export class WalletService {
                 totalDelta,
                 totalGap,
                 totalUnchanged,
+                totalDecrease,
+                canApplyByReplay,
                 reason: options?.reason || '',
                 remark,
             },
@@ -221,8 +249,8 @@ export class WalletService {
             const preview = await this.buildWalletRepairPreviewItem(audit, { reason: params.reason });
             const repair = preview.repairPreview;
 
-            if (!repair.totalUnchanged) {
-                throw new BadRequestException(`异常修复已阻断：本次修复将改动账户总余额 ${round2Amount(repair.totalGap)}，存在资金风险，需人工核对。`);
+            if (!repair.canApplyByReplay) {
+                throw new BadRequestException(`重放修复已阻断：本次修复将上调账户总余额 ${round2Amount(repair.totalGap)}，存在资金风险，需人工核对。`);
             }
 
             let accountAfter = await this.getWalletAccountBalance(params.userId, tx as any);
@@ -718,21 +746,6 @@ export class WalletService {
         }
 
         if (audit.deficitAmount > 0) {
-            if (options?.autoRepairOnDeficit) {
-                await this.applyWalletRepairPlan({
-                    userId,
-                    reason: options?.repairReason || '钱包关键操作前自动执行异常修复',
-                    operatorId: options?.operatorId,
-                    tx,
-                });
-                const repairedAudit = await this.inspectWalletAccountState(userId, db);
-                if (!repairedAudit.hasIssue || repairedAudit.deficitAmount <= 0) {
-                    return this.getWalletAccountBalance(userId, db);
-                }
-            }
-            if (options?.throwOnDeficit !== false) {
-                throw new BadRequestException('钱包冻结余额存在缺口，请先执行钱包异常修复');
-            }
             return this.getWalletAccountBalance(userId, db);
         }
 
@@ -748,13 +761,69 @@ export class WalletService {
         });
     }
 
+    private async buildReplayAuditItem(userId: number) {
+        const audit = await this.inspectWalletAccountState(userId, this.prisma as any);
+        const replay = await this.previewReplayByUser({
+            userId,
+            mode: 'full',
+            limitMismatches: 100,
+        });
+
+        const replayAvailable = round2Amount(replay?.replayBalance?.available);
+        const replayFrozen = round2Amount(replay?.replayBalance?.frozen);
+        const replayTotal = round2Amount(replay?.replayBalance?.total);
+        const totalGap = round2Amount(replayTotal - round2Amount(audit.currentTotal));
+        const availableGap = round2Amount(replayAvailable - round2Amount(audit.currentAvailable));
+        const frozenGap = round2Amount(replayFrozen - round2Amount(audit.currentFrozen));
+        const hasReplayIssue =
+            Math.abs(totalGap) > 0.009 ||
+            Math.abs(availableGap) > 0.009 ||
+            Math.abs(frozenGap) > 0.009;
+        const anomalySignature = this.buildWalletAnomalySignature({
+            currentAvailable: round2Amount(audit.currentAvailable),
+            currentFrozen: round2Amount(audit.currentFrozen),
+            currentTotal: round2Amount(audit.currentTotal),
+            replayAvailable,
+            replayFrozen,
+            replayTotal,
+            availableGap,
+            frozenGap,
+            totalGap,
+        });
+
+        return {
+            ...audit,
+            replayAvailable,
+            replayFrozen,
+            replayTotal,
+            availableGap,
+            frozenGap,
+            totalGap,
+            hasIssue: hasReplayIssue,
+            anomalyType: Math.abs(totalGap) > 0.009 ? 'TOTAL_MISMATCH' : 'BUCKET_MISMATCH',
+            replayAdjustments: replay?.replayAdjustments || null,
+            replayStats: replay?.stats || null,
+            deficitAmount: totalGap > 0 ? totalGap : 0,
+            safeToRepair: totalGap <= 0.009,
+            anomalySignature,
+        };
+    }
+
     async auditWalletAnomalies(params?: { userId?: number; onlyIssues?: boolean; limit?: number }) {
         const userId = Number(params?.userId || 0);
         const limit = Math.min(1000, Math.max(1, Number(params?.limit || 200)));
         const onlyIssues = params?.onlyIssues !== false;
 
         const accounts = await this.prisma.walletAccount.findMany({
-            where: userId ? { userId } : undefined,
+            where: userId
+                ? { userId }
+                : {
+                    user: {
+                        staffEmploymentStatus: {
+                            notIn: ['EXITED', 'BLACKLISTED'],
+                        },
+                    },
+                },
             orderBy: { userId: 'asc' },
             take: userId ? undefined : limit,
             select: { userId: true },
@@ -762,8 +831,9 @@ export class WalletService {
 
         const items: any[] = [];
         for (const row of accounts) {
-            const audit = await this.inspectWalletAccountState(Number(row.userId), this.prisma as any);
-            if (!onlyIssues || audit.hasIssue) {
+            const audit = await this.buildReplayAuditItem(Number(row.userId));
+            const isRiskIssue = Number(audit?.totalGap || 0) < -0.009;
+            if (!onlyIssues || isRiskIssue) {
                 items.push(audit);
             }
         }
@@ -771,10 +841,10 @@ export class WalletService {
         const summary = items.reduce(
             (acc, item) => {
                 acc.totalUsers += 1;
-                if (item.deficitAmount > 0) acc.deficitUsers += 1;
+                if (Number(item.totalGap || 0) < -0.009) acc.deficitUsers += 1;
                 if (item.negativeFrozenSnapshotCount > 0) acc.negativeSnapshotUsers += 1;
                 if (item.hasNegativeBalance) acc.negativeBalanceUsers += 1;
-                acc.totalDeficitAmount = round2Amount(acc.totalDeficitAmount + item.deficitAmount);
+                acc.totalDeficitAmount = round2Amount(acc.totalDeficitAmount + Math.abs(Number(item.totalGap || 0)));
                 return acc;
             },
             {
@@ -806,28 +876,49 @@ export class WalletService {
     }) {
         const apply = params?.apply === true;
         const includeDeficitUsers = params?.includeDeficitUsers === true;
-        const audit = await this.auditWalletAnomalies({
-            userId: params?.userId,
-            onlyIssues: true,
-            limit: params?.limit,
-        });
-
         const repairableItems: any[] = [];
         const blockedItems: any[] = [];
-        for (const item of audit.items) {
+
+        const explicitUserId = Number(params?.userId || 0);
+        if (explicitUserId > 0) {
             try {
-                repairableItems.push(await this.buildWalletRepairPreviewItem(item, { reason: params?.reason }));
+                const audit = await this.buildReplayAuditItem(explicitUserId);
+                repairableItems.push(await this.buildWalletRepairPreviewItem(audit, { reason: params?.reason }));
             } catch (e: any) {
                 blockedItems.push({
-                    ...item,
+                    userId: explicitUserId,
                     blockedReason: e?.message || '生成修复预览失败',
                 });
             }
+        } else {
+            const audit = await this.auditWalletAnomalies({
+                userId: params?.userId,
+                onlyIssues: true,
+                limit: params?.limit,
+            });
+
+            for (const item of audit.items) {
+                try {
+                    repairableItems.push(await this.buildWalletRepairPreviewItem(item, { reason: params?.reason }));
+                } catch (e: any) {
+                    blockedItems.push({
+                        ...item,
+                        blockedReason: e?.message || '生成修复预览失败',
+                    });
+                }
+            }
         }
 
+        const nonApplyableItems = repairableItems
+            .filter((item: any) => item?.repairPreview?.canApplyByReplay !== true)
+            .map((item: any) => ({
+                ...item,
+                blockedReason: `重放修复已阻断：本次修复将上调账户总余额 ${round2Amount(item?.repairPreview?.totalGap)}，存在资金风险，需人工核对。`,
+            }));
+        const executableItems = repairableItems.filter((item: any) => item?.repairPreview?.canApplyByReplay === true);
         const safeItems = includeDeficitUsers
-            ? repairableItems
-            : repairableItems.filter((item: any) => item.safeToRepair);
+            ? executableItems
+            : executableItems.filter((item: any) => item.safeToRepair);
         const applied: any[] = [];
 
         if (apply) {
@@ -845,10 +936,12 @@ export class WalletService {
             apply,
             repairedCount: applied.length,
             safeRepairableCount: safeItems.length,
-            blockedCount: blockedItems.length,
-            blockedItems: includeDeficitUsers ? blockedItems : blockedItems.slice(0, 50),
+            blockedCount: blockedItems.length + nonApplyableItems.length,
+            blockedItems: includeDeficitUsers
+                ? [...blockedItems, ...nonApplyableItems]
+                : [...blockedItems, ...nonApplyableItems].slice(0, 50),
             appliedItems: applied,
-            previewItems: apply ? [] : safeItems,
+            previewItems: apply ? [] : repairableItems,
         };
     }
 
@@ -2152,7 +2245,7 @@ export class WalletService {
         await this.ensureWalletAccount(userId, this.prisma as any);
         const accountNow = await this.prisma.walletAccount.findUnique({
             where: { userId },
-            select: { availableBalance: true, frozenBalance: true },
+            select: { availableBalance: true, frozenBalance: true, depositBalance: true },
         });
 
         const [total, rows] = await this.prisma.$transaction([
@@ -2696,10 +2789,7 @@ export class WalletService {
                 'WITHDRAW_RELEASE',
                 'RELEASE_FROZEN',
             ])
-            : new Set<string>([
-                'WITHDRAW_RESERVE',
-                'WITHDRAW_RELEASE',
-            ]);
+            : new Set<string>([]);
         const settlementBizSet = new Set<string>([
             'SETTLEMENT_EARNING',
             'SETTLEMENT_EARNING_BASE',
@@ -2708,12 +2798,68 @@ export class WalletService {
             'SETTLEMENT_RECALC',
         ]);
 
+        const loadReleaseSourceStatusMap = async (rows: Array<{ bizType?: string | null; sourceId?: number | null }>) => {
+            const sourceIds = Array.from(
+                new Set(
+                    rows
+                        .filter((row) => String(row?.bizType || '') === 'RELEASE_FROZEN')
+                        .map((row) => Number(row?.sourceId || 0))
+                        .filter((id) => Number.isFinite(id) && id > 0),
+                ),
+            );
+
+            if (!sourceIds.length) {
+                return new Map<number, { status: string; bizType: string }>();
+            }
+
+            const sourceRows = await this.prisma.walletTransaction.findMany({
+                where: { id: { in: sourceIds } },
+                select: { id: true, status: true, bizType: true },
+            });
+
+            return new Map<number, { status: string; bizType: string }>(
+                sourceRows.map((row) => [
+                    Number(row.id),
+                    { status: String(row.status || ''), bizType: String(row.bizType || '') },
+                ]),
+            );
+        };
+
+        const loadWithdrawalRequestStatusMap = async (rows: Array<{ bizType?: string | null; sourceId?: number | null }>) => {
+            const requestIds = Array.from(
+                new Set(
+                    rows
+                        .filter((row) =>
+                            ['WITHDRAW_RESERVE', 'WITHDRAW_RELEASE', 'WITHDRAW_PAYOUT'].includes(String(row?.bizType || '')),
+                        )
+                        .map((row) => Number(row?.sourceId || 0))
+                        .filter((id) => Number.isFinite(id) && id > 0),
+                ),
+            );
+
+            if (!requestIds.length) {
+                return new Map<number, string>();
+            }
+
+            const requestRows = await this.prisma.walletWithdrawalRequest.findMany({
+                where: { id: { in: requestIds } },
+                select: { id: true, status: true },
+            });
+
+            return new Map<number, string>(requestRows.map((row) => [Number(row.id), String(row.status || '')]));
+        };
+
+        let releaseSourceStatusMap = new Map<number, { status: string; bizType: string }>();
+        let withdrawalRequestStatusMap = new Map<number, string>();
+
         const applyDelta = (
             row: {
+                id?: number | null;
                 bizType?: string | null;
                 status?: string | null;
                 direction?: string | null;
                 amount?: number | null;
+                sourceId?: number | null;
                 available?: number;
                 earningFrozen?: number;
                 withdrawFrozen?: number;
@@ -2723,9 +2869,22 @@ export class WalletService {
             const status = String(row?.status || '');
             const direction = String(row?.direction || '');
             const amount = r2(row?.amount);
+            const sourceType = String((row as any)?.sourceType || '');
             let available = r2((row as any)?.available);
             let earningFrozen = r2((row as any)?.earningFrozen);
             let withdrawFrozen = r2((row as any)?.withdrawFrozen);
+
+            if (sourceType.startsWith('WALLET_ANOMALY_REPAIR')) {
+                return {
+                    available,
+                    earningFrozen,
+                    withdrawFrozen,
+                    deltaAvailable: 0,
+                    deltaFrozen: 0,
+                    ignored: true,
+                    ignoredReason: 'ANOMALY_REPAIR_TX' as const,
+                };
+            }
 
             // 指定类型仅做“范围统计”，不改余额
             if (noBalanceBizSet.has(biz)) {
@@ -2752,6 +2911,47 @@ export class WalletService {
                 };
             }
 
+            if (biz === 'WITHDRAW_RESERVE') {
+                const requestId = Number((row as any)?.sourceId || 0);
+                const requestStatus = requestId ? withdrawalRequestStatusMap.get(requestId) : '';
+                const keepFrozen = ['PENDING_REVIEW', 'APPROVED', 'PAYING', 'PROCESSING'].includes(String(requestStatus || ''));
+
+                if (!keepFrozen) {
+                    return {
+                        available,
+                        earningFrozen,
+                        withdrawFrozen,
+                        deltaAvailable: 0,
+                        deltaFrozen: 0,
+                        ignored: true,
+                        ignoredReason: 'WITHDRAW_RESERVE_SETTLED' as const,
+                    };
+                }
+
+                available = r2(available - amount);
+                withdrawFrozen = r2(withdrawFrozen + amount);
+                return {
+                    available,
+                    earningFrozen,
+                    withdrawFrozen,
+                    deltaAvailable: r2(-amount),
+                    deltaFrozen: r2(amount),
+                    ignored: false as const,
+                };
+            }
+
+            if (biz === 'WITHDRAW_RELEASE') {
+                return {
+                    available,
+                    earningFrozen,
+                    withdrawFrozen,
+                    deltaAvailable: 0,
+                    deltaFrozen: 0,
+                    ignored: true,
+                    ignoredReason: 'WITHDRAW_RELEASE_TERMINAL' as const,
+                };
+            }
+
             if (biz === 'WITHDRAW_PAYOUT') {
                 available = r2(available - amount);
                 return {
@@ -2764,7 +2964,70 @@ export class WalletService {
                 };
             }
 
+            if (biz === 'DEPOSIT_ADD') {
+                // 押金划转：
+                // - OUT：钱包可用转入押金，需扣减可用
+                // - IN：押金余额增加记录，不应增加钱包可用
+                if (direction === 'OUT') {
+                    available = r2(available - amount);
+                    return {
+                        available,
+                        earningFrozen,
+                        withdrawFrozen,
+                        deltaAvailable: r2(-amount),
+                        deltaFrozen: 0,
+                        ignored: false as const,
+                    };
+                }
+                return {
+                    available,
+                    earningFrozen,
+                    withdrawFrozen,
+                    deltaAvailable: 0,
+                    deltaFrozen: 0,
+                    ignored: true,
+                    ignoredReason: 'DEPOSIT_BUCKET_ONLY' as const,
+                };
+            }
+
+            if (biz === 'DEPOSIT_REFUND') {
+                available = r2(available + amount);
+                return {
+                    available,
+                    earningFrozen,
+                    withdrawFrozen,
+                    deltaAvailable: r2(amount),
+                    deltaFrozen: 0,
+                    ignored: false as const,
+                };
+            }
+
+            if (biz === 'DEPOSIT_DEDUCT') {
+                available = r2(available - amount);
+                return {
+                    available,
+                    earningFrozen,
+                    withdrawFrozen,
+                    deltaAvailable: r2(-amount),
+                    deltaFrozen: 0,
+                    ignored: false as const,
+                };
+            }
+
             if (biz === 'RELEASE_FROZEN') {
+                const sourceId = Number((row as any)?.sourceId || 0);
+                const source = sourceId ? releaseSourceStatusMap.get(sourceId) : null;
+                if (replayMode === 'full' && source?.status === 'AVAILABLE') {
+                    return {
+                        available,
+                        earningFrozen,
+                        withdrawFrozen,
+                        deltaAvailable: 0,
+                        deltaFrozen: 0,
+                        ignored: true,
+                        ignoredReason: 'RELEASE_DUPLICATE_SOURCE_AVAILABLE' as const,
+                    };
+                }
                 earningFrozen = r2(earningFrozen - amount);
                 available = r2(available + amount);
                 return {
@@ -2839,8 +3102,12 @@ export class WalletService {
                     status: true,
                     direction: true,
                     amount: true,
+                    sourceId: true,
                 },
             });
+
+            releaseSourceStatusMap = await loadReleaseSourceStatusMap(beforeRows);
+            withdrawalRequestStatusMap = await loadWithdrawalRequestStatusMap(beforeRows);
 
             for (const row of beforeRows) {
                 const result = applyDelta({
@@ -2876,6 +3143,24 @@ export class WalletService {
             },
         });
 
+        const depositWalletTxCount = rows.filter((row: any) =>
+            ['DEPOSIT_ADD', 'DEPOSIT_REFUND', 'DEPOSIT_DEDUCT', 'STAFF_EXIT_RELEASE', 'STAFF_EXIT_CLEAR'].includes(String(row?.bizType || '')),
+        ).length;
+
+        if (!params?.startAt) {
+            releaseSourceStatusMap = await loadReleaseSourceStatusMap(rows as any);
+            withdrawalRequestStatusMap = await loadWithdrawalRequestStatusMap(rows as any);
+        } else {
+            const rowMap = await loadReleaseSourceStatusMap(rows as any);
+            for (const [key, value] of rowMap.entries()) {
+                releaseSourceStatusMap.set(key, value);
+            }
+            const requestMap = await loadWithdrawalRequestStatusMap(rows as any);
+            for (const [key, value] of requestMap.entries()) {
+                withdrawalRequestStatusMap.set(key, value);
+            }
+        }
+
         let replayAvailable = openingAvailable;
         let replayEarningFrozen = openingEarningFrozen;
         let replayWithdrawFrozen = openingWithdrawFrozen;
@@ -2886,10 +3171,15 @@ export class WalletService {
         const bizBreakdown: Record<string, number> = {};
         const mismatchRows: any[] = [];
         const negativeRows: any[] = [];
+        const replayRows: any[] = [];
         let replaySettlementTotal = 0;
         let historySettlementTotal = 0;
         let replayWithdrawalTotal = 0;
         let historyWithdrawalTotal = 0;
+        let replaySettlementCount = 0;
+        let historySettlementCount = 0;
+        let replayWithdrawalCount = 0;
+        let historyWithdrawalCount = 0;
 
         for (const row of rows) {
             const biz = String(row.bizType || 'UNKNOWN');
@@ -2910,6 +3200,7 @@ export class WalletService {
             replayEarningFrozen = r2(result.earningFrozen);
             replayWithdrawFrozen = r2(result.withdrawFrozen);
             replayFrozen = r2(replayEarningFrozen + replayWithdrawFrozen);
+            const replayTotalAfter = r2(replayAvailable + replayFrozen);
 
             if (replayAvailable < 0 || replayFrozen < 0) {
                 negativeMoments++;
@@ -2940,10 +3231,12 @@ export class WalletService {
                 // 历史：按流水现状统计（排除 REVERSED）
                 if (row.status !== 'REVERSED') {
                     historySettlementTotal = r2(historySettlementTotal + sign * amt);
+                    historySettlementCount += 1;
                 }
                 // 重放：按当前重放规则统计
                 if (!(result as any).ignored) {
                     replaySettlementTotal = r2(replaySettlementTotal + sign * amt);
+                    replaySettlementCount += 1;
                 }
             }
 
@@ -2953,9 +3246,11 @@ export class WalletService {
                 // 历史提现：排除 REVERSED，记为正向“提现总额”
                 if (row.status !== 'REVERSED') {
                     historyWithdrawalTotal = r2(historyWithdrawalTotal + amt);
+                    historyWithdrawalCount += 1;
                 }
                 if (!(result as any).ignored) {
                     replayWithdrawalTotal = r2(replayWithdrawalTotal + amt);
+                    replayWithdrawalCount += 1;
                 }
             }
 
@@ -2988,16 +3283,46 @@ export class WalletService {
                     }
                 }
             }
+
+            replayRows.push({
+                id: row.id,
+                createdAt: row.createdAt,
+                bizType: row.bizType,
+                status: row.status,
+                direction: row.direction,
+                amount: r2(row.amount),
+                sourceType: row.sourceType,
+                sourceId: row.sourceId,
+                orderId: row.orderId,
+                settlementId: row.settlementId,
+                dispatchId: row.dispatchId,
+                replayAvailableAfter: replayAvailable,
+                replayFrozenAfter: replayFrozen,
+                replayTotalAfter,
+                ignored: Boolean((result as any).ignored),
+                ignoredReason: (result as any).ignoredReason || null,
+            });
         }
 
         const accountNow = await this.prisma.walletAccount.findUnique({
             where: { userId },
-            select: { availableBalance: true, frozenBalance: true },
+            select: { availableBalance: true, frozenBalance: true, depositBalance: true },
         });
 
         const currentAvailable = r2(accountNow?.availableBalance);
         const currentFrozen = r2(accountNow?.frozenBalance);
         const currentTotal = r2(currentAvailable + currentFrozen);
+        const currentDepositBalance = r2((accountNow as any)?.depositBalance ?? 0);
+        const depositCompatibilityDeduction =
+            replayMode === 'full' && currentDepositBalance > 0 && depositWalletTxCount === 0
+                ? currentDepositBalance
+                : 0;
+
+        if (depositCompatibilityDeduction > 0) {
+            replayAvailable = r2(replayAvailable - depositCompatibilityDeduction);
+            replayFrozen = r2(replayEarningFrozen + replayWithdrawFrozen);
+        }
+
         const replayTotal = r2(replayAvailable + replayFrozen);
 
         const diffAvailable = r2(replayAvailable - currentAvailable);
@@ -3043,12 +3368,16 @@ export class WalletService {
             settlementSummary: {
                 replayTotal: replaySettlementTotal,
                 historyTotal: historySettlementTotal,
+                replayCount: replaySettlementCount,
+                historyCount: historySettlementCount,
                 diff: settlementDiff, // 负数=历史多结算；正数=历史少结算
                 signRule: 'diff = replay - history; diff < 0 表示历史多结算，diff > 0 表示历史少结算',
             },
             withdrawalSummary: {
                 replayTotal: replayWithdrawalTotal,
                 historyTotal: historyWithdrawalTotal,
+                replayCount: replayWithdrawalCount,
+                historyCount: historyWithdrawalCount,
                 diff: withdrawalDiff, // 负数=历史提现记账更多；正数=历史提现记账更少
                 signRule: 'diff = replay - history',
             },
@@ -3061,6 +3390,12 @@ export class WalletService {
                 bizBreakdown,
                 noBalanceBizTypes: Array.from(noBalanceBizSet),
             },
+            replayAdjustments: {
+                depositCompatibilityDeduction,
+                currentDepositBalance,
+                depositWalletTxCount,
+            },
+            replayRows,
             mismatchRows,
             negativeRows,
         };

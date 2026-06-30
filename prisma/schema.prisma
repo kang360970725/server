@@ -117,6 +117,7 @@ model User {
   Role                        Role?                      @relation(fields: [roleId], references: [id])
   walletAccount               WalletAccount?
   walletHolds                 WalletHold[]
+  walletAnomalyIgnores        WalletAnomalyIgnore[]
   walletTransactions          WalletTransaction[]
   walletWithdrawalRequests    WalletWithdrawalRequest[]
   createdPenaltyRules         PenaltyRule[]              @relation("PenaltyRuleCreator")
@@ -1242,6 +1243,29 @@ model WalletWithdrawalRequest {
   @@index([status, createdAt])
   @@index([status, reviewedAt])
   @@map("wallet_withdrawal_requests")
+}
+
+model WalletAnomalyIgnore {
+  id               Int      @id @default(autoincrement())
+  userId           Int
+  signature        String   @db.VarChar(191)
+  currentAvailable Float
+  currentFrozen    Float
+  currentTotal     Float
+  replayAvailable  Float
+  replayFrozen     Float
+  replayTotal      Float
+  availableGap     Float
+  frozenGap        Float
+  totalGap         Float
+  reason           String?  @db.Text
+  operatorId       Int?
+  createdAt        DateTime @default(now())
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, signature], map: "uniq_wallet_anomaly_ignore_user_signature")
+  @@index([userId, createdAt])
+  @@map("wallet_anomaly_ignores")
 }
 
 model WalletDepositTransaction {
