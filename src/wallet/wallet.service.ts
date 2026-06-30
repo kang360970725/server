@@ -2665,8 +2665,9 @@ export class WalletService {
      * 单用户钱包流水重放预核算（只读，不修改任何余额）
      * - 按 createdAt ASC, id ASC 重放
      * - 默认包含全量历史；可按 startAt/endAt 限定范围
-     * - 业务约束（按当前紧急排查策略）：
-     *   WITHDRAW_PAYOUT / WITHDRAW_RESERVE / WITHDRAW_RELEASE / RELEASE_FROZEN 均不改余额（仅统计）
+     * - 业务约束（当前核查口径）：
+     *   提现预扣 / 提现释放仅作为过程流水，预核算余额不采信；
+     *   提现只以最终出款流水 WITHDRAW_PAYOUT 为准。
      */
     async previewReplayByUser(params: {
         userId: number;
@@ -2695,7 +2696,10 @@ export class WalletService {
                 'WITHDRAW_RELEASE',
                 'RELEASE_FROZEN',
             ])
-            : new Set<string>();
+            : new Set<string>([
+                'WITHDRAW_RESERVE',
+                'WITHDRAW_RELEASE',
+            ]);
         const settlementBizSet = new Set<string>([
             'SETTLEMENT_EARNING',
             'SETTLEMENT_EARNING_BASE',
@@ -2748,43 +2752,14 @@ export class WalletService {
                 };
             }
 
-            if (biz === 'WITHDRAW_RESERVE') {
+            if (biz === 'WITHDRAW_PAYOUT') {
                 available = r2(available - amount);
-                withdrawFrozen = r2(withdrawFrozen + amount);
                 return {
                     available,
                     earningFrozen,
                     withdrawFrozen,
                     deltaAvailable: r2(-amount),
-                    deltaFrozen: r2(amount),
-                    ignored: false as const,
-                };
-            }
-
-            if (biz === 'WITHDRAW_RELEASE') {
-                available = r2(available + amount);
-                withdrawFrozen = r2(withdrawFrozen - amount);
-                return {
-                    available,
-                    earningFrozen,
-                    withdrawFrozen,
-                    deltaAvailable: r2(amount),
-                    deltaFrozen: r2(-amount),
-                    ignored: false as const,
-                };
-            }
-
-            if (biz === 'WITHDRAW_PAYOUT') {
-                const consumeFrozen = Math.min(withdrawFrozen, amount);
-                const consumeAvailable = r2(amount - consumeFrozen);
-                withdrawFrozen = r2(withdrawFrozen - consumeFrozen);
-                available = r2(available - consumeAvailable);
-                return {
-                    available,
-                    earningFrozen,
-                    withdrawFrozen,
-                    deltaAvailable: r2(-consumeAvailable),
-                    deltaFrozen: r2(-consumeFrozen),
+                    deltaFrozen: 0,
                     ignored: false as const,
                 };
             }
