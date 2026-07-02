@@ -1,5 +1,5 @@
 import { BadRequestException, Body, Controller, Get, Param, ParseIntPipe, Post, Query, Req } from '@nestjs/common';
-import { OrderStatus, PlayerWorkStatus, UserType, WalletBizType, WalletDirection, WalletTxStatus } from '@prisma/client';
+import { OrderStatus, PlayerWorkStatus, StaffEmploymentStatus, UserType, WalletBizType, WalletDirection, WalletTxStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { OrdersService } from '../orders/orders.service';
 import { miniOk } from './mini.response';
@@ -49,6 +49,7 @@ export class MiniOrdersController {
       where: {
         id: playerId,
         userType: UserType.STAFF,
+        staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
         workStatus: PlayerWorkStatus.IDLE,
         workMode: 'ONLINE',
         workOnlineExpiresAt: { gt: new Date() },

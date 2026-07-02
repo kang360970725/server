@@ -256,6 +256,7 @@ export class WalletWithdrawalsService {
                 select: {
                     withdrawQrCodeKey: true,
                     canWithdraw: true,
+                    staffEmploymentStatus: true,
                     userType: true,
                     depositLimit: true,
                     staffTags: true,
@@ -265,15 +266,17 @@ export class WalletWithdrawalsService {
 
             if (!u) throw new BadRequestException('用户不存在');
 
-            if (!u.canWithdraw) {
-                throw new BadRequestException('当前账户暂不允许提现');
-            }
-
             if (!u.withdrawQrCodeKey) {
                 throw new BadRequestException('请先上传收款二维码');
             }
 
             const isStaff = u.userType === 'STAFF';
+            const allowExitedStaffWithdraw =
+                isStaff && String(u?.staffEmploymentStatus || '') === StaffEmploymentStatus.EXITED;
+
+            if (!u.canWithdraw && !allowExitedStaffWithdraw) {
+                throw new BadRequestException('当前账户暂不允许提现');
+            }
 
             // =========================
             // Step 1：提现次数限制

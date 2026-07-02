@@ -837,9 +837,10 @@ export class UsersService {
           staffEmploymentStatus: nextEmploymentStatus,
           staffCooldownUntil: addToBlacklist ? null : this.buildStaffCooldownUntil(now, Number(preview.quitCoolingDays || this.staffExitCooldownDays)),
           staffExitedAt: now,
+          workMode: 'OFFLINE',
           workStatus: PlayerWorkStatus.IDLE,
           workOnlineExpiresAt: null,
-          canWithdraw: false,
+          canWithdraw: !addToBlacklist,
         },
         include: this.getUserIncludeFields(),
       });
@@ -1693,9 +1694,19 @@ export class UsersService {
       }
       throw new BadRequestException('当前员工已退店或已加入黑名单，无法修改接单状态');
     }
+    const nextWorkStatus = String(workStatus || '').toUpperCase();
     return this.prisma.user.update({
       where: { id: userId },
-      data: { workStatus },
+      data: {
+        workStatus,
+        ...(nextWorkStatus === PlayerWorkStatus.IDLE
+          ? {
+            workMode: 'ONLINE',
+            workOnlineExpiresAt: this.buildPlayerOnlineLeaseExpiresAt(),
+            offlineJoinedAt: null,
+          }
+          : {}),
+      },
       select: { id: true, name: true, phone: true, workStatus: true },
     });
   }

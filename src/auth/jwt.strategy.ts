@@ -3,7 +3,7 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import { PlayerWorkStatus, StaffEmploymentStatus } from '@prisma/client';
-import { isDispatchMonitoredStaff } from '../common/utils/staff-role-scope.util';
+import { isDispatchMonitoredStaff, isStaffUser } from '../common/utils/staff-role-scope.util';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -125,10 +125,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     const roleName = String(user.Role?.name || '').trim();
     const leaseNow = new Date();
     const leaseExpiresAt = user.workOnlineExpiresAt ? new Date(user.workOnlineExpiresAt) : null;
-    const isStaff = isDispatchMonitoredStaff(user);
+    const isStaff = isStaffUser(user);
+    const isActiveStaff = isStaff && String(user?.staffEmploymentStatus || StaffEmploymentStatus.ACTIVE) === StaffEmploymentStatus.ACTIVE;
     const isOnline = String(user.workMode || '').toUpperCase() === 'ONLINE';
 
-    if (isStaff && isOnline) {
+    if (isActiveStaff && isOnline) {
       if (this.autoOfflineDisabled) {
         if (leaseExpiresAt && leaseExpiresAt > leaseNow) {
           const nextExpiresAt = new Date(leaseNow.getTime() + 2 * 60 * 60 * 1000);

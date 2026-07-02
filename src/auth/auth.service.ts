@@ -11,7 +11,7 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { PlayerWorkStatus, StaffEmploymentStatus, UserStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { isDispatchMonitoredStaff } from '../common/utils/staff-role-scope.util';
+import { isDispatchMonitoredStaff, isStaffUser } from '../common/utils/staff-role-scope.util';
 
 @Injectable()
 export class AuthService {
@@ -216,8 +216,9 @@ export class AuthService {
       return this.buildLoginFailure('ACCOUNT_FROZEN', AuthService.STAFF_AUTO_FROZEN_MESSAGE);
     }
     // ✅ 登录成功
-    const isStaff = isDispatchMonitoredStaff(user);
-    if (isStaff) {
+    const isStaff = isStaffUser(user);
+    const isActiveStaff = isStaff && String(user?.staffEmploymentStatus || StaffEmploymentStatus.ACTIVE) === StaffEmploymentStatus.ACTIVE;
+    if (isActiveStaff) {
       const leaseExpiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
       await this.prisma.user.update({
         where: { id: user.id },
@@ -232,7 +233,7 @@ export class AuthService {
       user.workOnlineExpiresAt = leaseExpiresAt;
       user.offlineJoinedAt = null;
     }
-    if (!isStaff) {
+    if (!isActiveStaff) {
       await this.prisma.user.update({
         where: { id: user.id },
         data: {

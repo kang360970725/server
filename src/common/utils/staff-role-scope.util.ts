@@ -2,9 +2,12 @@ export function resolveRoleName(user: any): string {
   return String(user?.roleName || user?.Role?.name || '').trim();
 }
 
+export function isStaffUser(user: any): boolean {
+  return String(user?.userType || '').trim().toUpperCase() === 'STAFF';
+}
+
 export function isDispatchMonitoredStaff(user: any): boolean {
-  const userType = String(user?.userType || '').trim().toUpperCase();
-  if (userType !== 'STAFF') return false;
+  if (!isStaffUser(user)) return false;
 
   const roleName = resolveRoleName(user).toUpperCase();
   if (!roleName) return true;
