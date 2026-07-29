@@ -32,6 +32,7 @@ import { MiniModule } from './mini/mini.module';
 import { CommonModule } from './common/common.module';
 import { MemberModule } from './member/member.module';
 import { MiniappProtocolsModule } from './miniapp-protocols/miniapp-protocols.module';
+import { QuestionnaireModule } from './questionnaire/questionnaire.module';
 
 
 @Module({
@@ -62,6 +63,7 @@ import { MiniappProtocolsModule } from './miniapp-protocols/miniapp-protocols.mo
         CommonModule,
         MemberModule,
         MiniappProtocolsModule,
+        QuestionnaireModule,
   ],
     controllers: [AppController],
     providers: [AppService, PrismaService,

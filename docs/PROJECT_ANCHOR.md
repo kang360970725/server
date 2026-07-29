@@ -1,5 +1,8 @@
 # 蓝猫陪玩系统 · 项目锚点文档（PROJECT ANCHOR）
 
+> 2026-07 起，新会话首读请优先读取 `docs/PROJECT_CONTEXT.md`。  
+> 本文件保留为历史锚点和早期业务约束记录，部分“当前进度/技术栈/接口约定”可能已与实际代码漂移。实际定位以 `docs/PROJECT_CONTEXT.md`、`prisma/schema.prisma`、`src/app.module.ts` 和对应前端项目的 `docs/PROJECT_CONTEXT.md` 为准。
+
 > 本文档是蓝猫陪玩系统的**全局上下文与最高优先级设计约束**。  
 > 新会话 / 新成员 / AI 协作必须先完整加载本文件。
 

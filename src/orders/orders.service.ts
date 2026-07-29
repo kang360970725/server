@@ -2334,7 +2334,7 @@ export class OrdersService {
                 }
 
                 const now = new Date();
-                if (options.forceByAdmin && dispatch.status === DispatchStatus.WAIT_ACCEPT) {
+                if (options.forceByAdmin) {
                     await tx.orderParticipant.updateMany({
                         where: {
                             dispatchId,
@@ -2346,6 +2346,14 @@ export class OrdersService {
                             acceptedAt: now,
                         },
                     });
+                }
+
+                const currentParticipants = (dispatch.participants || []).filter((p: any) => {
+                    const userId = Number(p?.userId ?? 0);
+                    return Number.isFinite(userId) && userId > 0 && p?.isActive !== false && !p?.rejectedAt;
+                });
+                if (!currentParticipants.length) {
+                    throw new BadRequestException('当前派单没有有效打手，无法存/结单，请先重新派单或调整打手');
                 }
 
                 // ✅ 4) 派单置存/结单

@@ -17,6 +17,7 @@ export type StaffRuleItem = {
   tagCodes: string[];
   depositAmount: number;
   firstWithdrawMinBalance: number;
+  firstWithdrawMinAcceptedDays: number;
   quitCoolingDays: number;
   depositForfeitDays: number;
   refundWhenDepositInsufficient?: boolean;
@@ -102,6 +103,9 @@ export class StaffRuleEngineService {
         tagCodes: Array.from(new Set(tagCodes)),
         depositAmount: this.toSafeNumber(item?.depositAmount, `规则 ${name} 的押金金额`),
         firstWithdrawMinBalance: this.toSafeNumber(item?.firstWithdrawMinBalance, `规则 ${name} 的首次提现金额限制`),
+        firstWithdrawMinAcceptedDays: item?.firstWithdrawMinAcceptedDays === undefined || item?.firstWithdrawMinAcceptedDays === null
+          ? 15
+          : this.toSafeNumber(item?.firstWithdrawMinAcceptedDays, `规则 ${name} 的首次提现接单天数限制`),
         quitCoolingDays: this.toSafeNumber(item?.quitCoolingDays, `规则 ${name} 的退店冷却期`),
         depositForfeitDays: this.toSafeNumber(item?.depositForfeitDays, `规则 ${name} 的押金不退限制`),
         refundWhenDepositInsufficient: true,
@@ -183,6 +187,7 @@ export class StaffRuleEngineService {
         return {
           ...rule,
           tagCodes: ruleTags,
+          firstWithdrawMinAcceptedDays: Number(rule?.firstWithdrawMinAcceptedDays ?? 15),
           refundWhenDepositInsufficient: true,
         };
       }

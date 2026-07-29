@@ -139,6 +139,8 @@ model User {
   memberPointAccount          MemberPointAccount?
   memberPointTransactions     MemberPointTransaction[]
   memberRechargeOrders        MemberRechargeOrder[]
+  createdQuestionnaires       Questionnaire[]            @relation("QuestionnaireCreator")
+  questionnaireSubmissions    QuestionnaireSubmission[]
 
   @@index([workStatus])
   @@index([userType, staffEmploymentStatus])
@@ -147,6 +149,102 @@ model User {
   @@index([rating], map: "users_rating_fkey")
   @@index([roleId], map: "users_roleId_fkey")
   @@map("users")
+}
+
+model Questionnaire {
+  id               Int                        @id @default(autoincrement())
+  title            String                     @db.VarChar(255)
+  description      String?                    @db.Text
+  scope            QuestionnaireScope         @default(UNRESTRICTED)
+  status           QuestionnaireStatus        @default(DRAFT)
+  publishedAt      DateTime?
+  startAt          DateTime?
+  endAt            DateTime?
+  allowEditSubmit  Boolean                    @default(false)
+  createdBy        Int?
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  creator          User?                      @relation("QuestionnaireCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  questions        QuestionnaireQuestion[]
+  submissions      QuestionnaireSubmission[]
+
+  @@index([scope, status, startAt, endAt], map: "idx_questionnaire_scope_status_time")
+  @@index([createdBy], map: "idx_questionnaire_created_by")
+  @@map("questionnaires")
+}
+
+model QuestionnaireQuestion {
+  id               Int                        @id @default(autoincrement())
+  questionnaireId  Int
+  title            String                     @db.VarChar(255)
+  description      String?                    @db.Text
+  type             QuestionnaireQuestionType
+  required         Boolean                    @default(false)
+  sortOrder        Int                        @default(100)
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  questionnaire    Questionnaire              @relation(fields: [questionnaireId], references: [id], onDelete: Cascade)
+  options          QuestionnaireOption[]
+  answers          QuestionnaireAnswer[]
+
+  @@index([questionnaireId, sortOrder], map: "idx_questionnaire_question_order")
+  @@map("questionnaire_questions")
+}
+
+model QuestionnaireOption {
+  id               Int                        @id @default(autoincrement())
+  questionId       Int
+  label            String                     @db.VarChar(255)
+  isOther          Boolean                    @default(false)
+  sortOrder        Int                        @default(100)
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  question         QuestionnaireQuestion      @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  answers          QuestionnaireAnswer[]
+
+  @@index([questionId, sortOrder], map: "idx_questionnaire_option_order")
+  @@map("questionnaire_options")
+}
+
+model QuestionnaireSubmission {
+  id                    Int                      @id @default(autoincrement())
+  questionnaireId       Int
+  userId                Int?
+  submitterName         String?                  @db.VarChar(100)
+  submitterPhone        String?                  @db.VarChar(64)
+  submitterUserType     String?                  @db.VarChar(32)
+  submitterStaffStatus  String?                  @db.VarChar(32)
+  visitorToken          String?                  @db.VarChar(128)
+  clientIp              String?                  @db.VarChar(128)
+  userAgent             String?                  @db.VarChar(512)
+  createdAt             DateTime                 @default(now())
+  updatedAt             DateTime                 @updatedAt
+  questionnaire         Questionnaire            @relation(fields: [questionnaireId], references: [id], onDelete: Cascade)
+  user                  User?                    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  answers               QuestionnaireAnswer[]
+
+  @@unique([questionnaireId, userId], map: "uniq_questionnaire_submission_user")
+  @@index([questionnaireId, createdAt], map: "idx_questionnaire_submission_time")
+  @@index([visitorToken], map: "idx_questionnaire_submission_visitor")
+  @@map("questionnaire_submissions")
+}
+
+model QuestionnaireAnswer {
+  id               Int                        @id @default(autoincrement())
+  submissionId     Int
+  questionId       Int
+  optionId         Int?
+  textValue        String?                    @db.Text
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  submission       QuestionnaireSubmission    @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  question         QuestionnaireQuestion      @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  option           QuestionnaireOption?       @relation(fields: [optionId], references: [id], onDelete: SetNull)
+
+  @@index([submissionId], map: "idx_questionnaire_answer_submission")
+  @@index([questionId], map: "idx_questionnaire_answer_question")
+  @@index([optionId], map: "idx_questionnaire_answer_option")
+  @@map("questionnaire_answers")
 }
 
 model ChestPromoBundle {
@@ -1929,4 +2027,22 @@ model PenaltyFundFlow {
   @@index([userId, createdAt], map: "idx_penalty_fund_flow_user")
   @@index([bizType, createdAt], map: "idx_penalty_fund_flow_biz")
   @@map("penalty_fund_flows")
+}
+
+enum QuestionnaireScope {
+  INTERNAL_STAFF
+  MEMBER_LOGIN
+  UNRESTRICTED
+}
+
+enum QuestionnaireStatus {
+  DRAFT
+  PUBLISHED
+  CLOSED
+}
+
+enum QuestionnaireQuestionType {
+  SINGLE_CHOICE
+  MULTIPLE_CHOICE
+  TEXT
 }

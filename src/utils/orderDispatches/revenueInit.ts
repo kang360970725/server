@@ -43,6 +43,10 @@ const sortSettlementParticipants = (participants: any[]) => {
     });
 };
 
+const shouldSkipEmptySettlementDispatch = (dispatch: any) => {
+    return String(dispatch?.status || '').trim().toUpperCase() === String(DispatchStatus.ARCHIVED);
+};
+
 const splitEvenlyWithResidual = (total: number, count: number) => {
     const safeTotal = roundMix1(Number(total) || 0);
     const safeCount = Math.max(1, Math.floor(Number(count) || 0));
@@ -135,6 +139,7 @@ export const computeBillingHours = (order: any) => {
         const inactive = (d.participants ?? []).filter((p: any) => p.rejectedAt);
 
         if (!active.length) {
+            if (shouldSkipEmptySettlementDispatch(d)) continue;
             throw new BadRequestException(`派单记录有误，无法完成核算`);
         }
 
@@ -281,6 +286,7 @@ export const computeBillingGuaranteed = (order: any) => {
         const inactive = (d.participants ?? []).filter((p: any) => p.rejectedAt);
 
         if (!active.length) {
+            if (shouldSkipEmptySettlementDispatch(d)) continue;
             throw new BadRequestException(`派单记录有误，无法完成核算`);
         }
 
@@ -435,6 +441,7 @@ export const computeBillingMODEPLAY = (order: any, modePlayAllocList: any) => {
         const inactive = (d.participants ?? []).filter((p: any) => p.rejectedAt);
 
         if (!active.length) {
+            if (shouldSkipEmptySettlementDispatch(d)) continue;
             throw new BadRequestException(`派单记录有误，无法完成核算`);
         }
 

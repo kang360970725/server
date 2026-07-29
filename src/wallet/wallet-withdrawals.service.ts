@@ -206,10 +206,13 @@ export class WalletWithdrawalsService {
             : null;
 
         return {
+            userType: user.userType,
+            staffEmploymentStatus: user.staffEmploymentStatus,
             availableBalance: Number(user.walletAccount?.availableBalance || 0),
             depositBalance: Number(user.walletAccount?.depositBalance || 0),
             depositLimit: Number(matchedRule?.depositAmount ?? user.depositLimit ?? 500),
             firstWithdrawMinBalance: Number(matchedRule?.firstWithdrawMinBalance ?? 1000),
+            firstWithdrawMinAcceptedDays: Number(matchedRule?.firstWithdrawMinAcceptedDays ?? 15),
             matchedStaffRule: matchedRule,
             workMode: user.workMode,
         };
@@ -271,6 +274,8 @@ export class WalletWithdrawalsService {
             }
 
             const isStaff = u.userType === 'STAFF';
+            const isActiveStaff =
+                isStaff && String(u?.staffEmploymentStatus || StaffEmploymentStatus.ACTIVE) === StaffEmploymentStatus.ACTIVE;
             const allowExitedStaffWithdraw =
                 isStaff && String(u?.staffEmploymentStatus || '') === StaffEmploymentStatus.EXITED;
 
@@ -330,12 +335,13 @@ export class WalletWithdrawalsService {
                 where: { userId },
             });
 
-            if (historyCount === 0 && isStaff) {
+            if (historyCount === 0 && isActiveStaff) {
                 const matchedRule = this.staffRuleEngineService.resolveMatchedRule(
                     await this.staffRuleEngineService.getConfig(),
                     u.staffTags,
                 );
                 const firstWithdrawMinBalance = Number(matchedRule?.firstWithdrawMinBalance ?? 1000);
+                const firstWithdrawMinAcceptedDays = Number(matchedRule?.firstWithdrawMinAcceptedDays ?? 15);
 
                 const firstDispatch = await tx.orderParticipant.findFirst({
                     where: { userId },
@@ -352,8 +358,8 @@ export class WalletWithdrawalsService {
                     (1000 * 60 * 60 * 24)
                 );
 
-                if (days < 15) {
-                    throw new BadRequestException('首次提现需接单满15天');
+                if (days < firstWithdrawMinAcceptedDays) {
+                    throw new BadRequestException(`首次提现需接单满${firstWithdrawMinAcceptedDays}天`);
                 }
 
                 const accountCheck = await tx.walletAccount.findUnique({
@@ -420,7 +426,7 @@ export class WalletWithdrawalsService {
             // =========================
             let depositAdd = 0;
 
-            if (isStaff) {
+            if (isActiveStaff) {
                 const matchedRule = this.staffRuleEngineService.resolveMatchedRule(
                     await this.staffRuleEngineService.getConfig(),
                     u.staffTags,

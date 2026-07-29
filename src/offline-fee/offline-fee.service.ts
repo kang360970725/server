@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
-import { Prisma, PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient, StaffEmploymentStatus, UserType } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { SystemConfigService } from '../system-config/system-config.service';
 import { QueryOfflineFeeBillsDto } from './dto/query-offline-fee-bills.dto';
@@ -9,6 +9,10 @@ import { UpdateOfflineFeeBillDto } from './dto/update-offline-fee-bill.dto';
 
 const BEIJING_TZ = 'Asia/Shanghai';
 const WITHDRAWAL_PARTIAL_MIN_PAY = 100;
+const BILLABLE_STAFF_EMPLOYMENT_STATUSES = [
+  StaffEmploymentStatus.ACTIVE,
+  StaffEmploymentStatus.FROZEN,
+] as const;
 
 type PrismaTx = PrismaClient | Prisma.TransactionClient;
 
@@ -113,8 +117,9 @@ export class OfflineFeeService {
 
     const offlineUsers = await (db as any).user.findMany({
       where: {
-        userType: 'STAFF',
+        userType: UserType.STAFF,
         workMode: 'OFFLINE',
+        staffEmploymentStatus: { in: [...BILLABLE_STAFF_EMPLOYMENT_STATUSES] },
         OR: [{ offlineJoinedAt: null }, { offlineJoinedAt: { lte: end } }],
       },
       select: { id: true, offlineJoinedAt: true },
@@ -239,8 +244,9 @@ export class OfflineFeeService {
 
   async listOfflineStaffOptions(keyword?: string) {
     const where: any = {
-      userType: 'STAFF',
+      userType: UserType.STAFF,
       workMode: 'OFFLINE',
+      staffEmploymentStatus: { in: [...BILLABLE_STAFF_EMPLOYMENT_STATUSES] },
     };
 
     const q = String(keyword || '').trim();
@@ -293,12 +299,17 @@ export class OfflineFeeService {
           id: true,
           userType: true,
           workMode: true,
+          staffEmploymentStatus: true,
           offlineJoinedAt: true,
         },
       });
 
       if (!user) throw new NotFoundException('员工不存在');
-      if (user.userType !== 'STAFF' || user.workMode !== 'OFFLINE') {
+      if (
+        user.userType !== UserType.STAFF ||
+        user.workMode !== 'OFFLINE' ||
+        !BILLABLE_STAFF_EMPLOYMENT_STATUSES.includes(user.staffEmploymentStatus)
+      ) {
         throw new BadRequestException('仅支持为线下员工录入账单');
       }
 
@@ -511,6 +522,22 @@ export class OfflineFeeService {
 
   private async getLastMonthOutstandingBillTx(db: PrismaTx, userId: number, now = new Date()) {
     const billMonth = this.getPreviousMonth(now);
+    const user = await (db as any).user.findUnique({
+      where: { id: userId },
+      select: {
+        userType: true,
+        workMode: true,
+        staffEmploymentStatus: true,
+      },
+    });
+    const isBillableOfflineStaff =
+      user?.userType === UserType.STAFF &&
+      user?.workMode === 'OFFLINE' &&
+      BILLABLE_STAFF_EMPLOYMENT_STATUSES.includes(user?.staffEmploymentStatus);
+    if (!isBillableOfflineStaff) {
+      return null;
+    }
+
     // 仅在账单不存在时补生成，避免覆盖人工修订后的账单
     const existing = await (db as any).offlineFeeBill.findUnique({
       where: { userId_billMonth: { userId, billMonth } },
