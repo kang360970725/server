@@ -8,6 +8,7 @@ import { UpsertAppVersionDto } from './dto/upsert-app-version.dto';
 import { SetActiveBuildDto } from './dto/set-active-build.dto';
 
 const LEGACY_ADMIN_PAGE = 'system:role:page';
+const APP_VERSIONS_PAGE = 'system:app-versions:page';
 
 @Controller('app-version')
 export class AppVersionController {
@@ -21,14 +22,14 @@ export class AppVersionController {
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Post('list')
-  @Permissions(LEGACY_ADMIN_PAGE)
+  @Permissions(APP_VERSIONS_PAGE, LEGACY_ADMIN_PAGE)
   async list() {
     return this.service.listAll();
   }
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Post('upsert')
-  @Permissions(LEGACY_ADMIN_PAGE)
+  @Permissions(APP_VERSIONS_PAGE, LEGACY_ADMIN_PAGE)
   async upsert(@Body() dto: UpsertAppVersionDto, @Req() req: any) {
     const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
     return this.service.upsert(dto, operatorId || undefined);
@@ -36,9 +37,8 @@ export class AppVersionController {
 
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Post('activate')
-  @Permissions(LEGACY_ADMIN_PAGE)
+  @Permissions(APP_VERSIONS_PAGE, LEGACY_ADMIN_PAGE)
   async activate(@Body() dto: SetActiveBuildDto) {
     return this.service.activateBuild(dto.buildId);
   }
 }
-

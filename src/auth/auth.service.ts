@@ -12,16 +12,17 @@ import { LoginDto } from './dto/login.dto';
 import { PlayerWorkStatus, StaffEmploymentStatus, UserStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { isDispatchMonitoredStaff, isStaffUser } from '../common/utils/staff-role-scope.util';
+import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
 
 @Injectable()
 export class AuthService {
   static readonly DEFAULT_ACCESS_TOKEN_EXPIRES_IN = '2h';
   static readonly MINI_ACCESS_TOKEN_EXPIRES_IN = '30d';
-  private static readonly STAFF_AUTO_FROZEN_MESSAGE = '用户活跃度太低，已经超过7天，账号已自动冻结，请联系管理超哥进行处理。';
 
   constructor(
       private prisma: PrismaService,
       private jwtService: JwtService,
+      private readonly staffRuleEngineService: StaffRuleEngineService,
   ) {}
 
   private buildLoginFailure(code: string, message: string) {
@@ -87,8 +88,10 @@ export class AuthService {
       (createdAtDate && !Number.isNaN(createdAtDate.getTime()) ? createdAtDate : null);
     if (!resolvedBaseDate) return user;
 
+    const staffRuleConfig = await this.staffRuleEngineService.getConfig();
+    const dormantFreezeDays = this.staffRuleEngineService.getDormantFreezeDays(staffRuleConfig, user?.staffTags);
     const freezeAt = new Date(resolvedBaseDate);
-    freezeAt.setDate(freezeAt.getDate() + 7);
+    freezeAt.setDate(freezeAt.getDate() + dormantFreezeDays);
     if (freezeAt.getTime() > Date.now()) return user;
 
     await this.prisma.user.update({
@@ -213,7 +216,11 @@ export class AuthService {
     }
     user = await this.autoFreezeDormantStaffIfNeeded(user);
     if (!options?.mini && isDispatchMonitoredStaff(user) && String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {
-      return this.buildLoginFailure('ACCOUNT_FROZEN', AuthService.STAFF_AUTO_FROZEN_MESSAGE);
+      const staffRuleConfig = await this.staffRuleEngineService.getConfig();
+      return this.buildLoginFailure(
+        'ACCOUNT_FROZEN',
+        this.staffRuleEngineService.buildDormantFreezeMessage(this.staffRuleEngineService.getDormantFreezeDays(staffRuleConfig, user?.staffTags)),
+      );
     }
     // ✅ 登录成功
     const isStaff = isStaffUser(user);

@@ -6,6 +6,10 @@ import { SystemConfigService } from './system-config.service';
 import { UpsertSystemConfigDto } from './dto/upsert-system-config.dto';
 import { StaffRuleEngineService } from './staff-rule-engine.service';
 
+const LEGACY_SYSTEM_ADMIN_PAGE = 'system:role:page';
+const SYSTEM_CONFIGS_PAGE = 'system:configs:page';
+const MINIAPP_HOME_PAGE = 'miniapp:home:page';
+
 @Controller('system-configs')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 export class SystemConfigController {
@@ -15,50 +19,50 @@ export class SystemConfigController {
   ) {}
 
   @Post('list')
-  @Permissions('system:role:page')
+  @Permissions(SYSTEM_CONFIGS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async list() {
     await this.service.ensureDefaults();
     return this.service.listAll();
   }
 
   @Post('upsert')
-  @Permissions('system:role:page')
+  @Permissions(SYSTEM_CONFIGS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async upsert(@Body() dto: UpsertSystemConfigDto) {
     return this.service.upsert(dto);
   }
 
   @Post('miniapp/home-config/get')
-  @Permissions('system:role:page')
+  @Permissions(MINIAPP_HOME_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async getMiniappHomeConfig() {
     return this.service.getMiniappHomeConfig();
   }
 
   @Post('miniapp/home-config/published/get')
-  @Permissions('system:role:page')
+  @Permissions(MINIAPP_HOME_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async getMiniappHomePublishedConfig() {
     return this.service.getMiniappHomePublishedConfig();
   }
 
   @Post('miniapp/home-config/upsert')
-  @Permissions('system:role:page')
+  @Permissions(MINIAPP_HOME_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async upsertMiniappHomeConfig(@Body() body: { config: any }) {
     return this.service.upsertMiniappHomeConfig(body?.config || {});
   }
 
   @Post('miniapp/home-config/publish')
-  @Permissions('system:role:page')
+  @Permissions(MINIAPP_HOME_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async publishMiniappHomeConfig() {
     return this.service.publishMiniappHomeConfig();
   }
 
   @Post('miniapp/home-staff-candidates')
-  @Permissions('system:role:page')
+  @Permissions(MINIAPP_HOME_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async listHomeStaffCandidates(@Body() body: { keyword?: string }) {
     return this.service.listHomeStaffCandidates(body?.keyword);
   }
 
   @Post('miniapp/home-product-candidates')
-  @Permissions('system:role:page')
+  @Permissions(MINIAPP_HOME_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async listHomeProductCandidates(@Body() body: { keyword?: string }) {
     return this.service.listHomeProductCandidates(body?.keyword);
   }
@@ -88,14 +92,14 @@ export class SystemConfigController {
   }
 
   @Post('staff-rule-engine/get')
-  @Permissions('users:staff:page')
+  @Permissions('users:staff:page', SYSTEM_CONFIGS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async getStaffRuleEngine() {
     await this.service.ensureDefaults();
     return this.staffRuleEngineService.getConfig();
   }
 
   @Post('staff-rule-engine/upsert')
-  @Permissions('users:staff:page')
+  @Permissions('users:staff:page', SYSTEM_CONFIGS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async upsertStaffRuleEngine(@Body() body: { config?: any }) {
     return this.staffRuleEngineService.upsertConfig(body?.config || {});
   }

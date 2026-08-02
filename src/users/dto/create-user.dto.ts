@@ -4,7 +4,8 @@ import {
     IsEnum,
     IsOptional,
     IsNumber,
-    IsBoolean, Min,
+    IsBoolean,
+    Min,
     IsIn,
     IsDateString,
     IsArray,
@@ -84,4 +85,8 @@ export class CreateUserDto {
     @IsOptional()
     @IsEnum(StaffEmploymentStatus)
     staffEmploymentStatus?: StaffEmploymentStatus;
+
+    @IsBoolean()
+    @IsOptional()
+    forceRejoin?: boolean;
 }

@@ -27,6 +27,7 @@
 - 员工状态改动会影响登录 Guard、工作台访问、派单资格、提现、退店/清退、线下费用、罚单。
 - 会员充值/支付改动会影响 `member`、`mini/member`、`wechat-pay`、`wallet`、优惠券、成长值/积分。
 - 小程序内容配置改动会影响 `system-config`、`mini/home`、`game-project`、`miniapp-protocols`、`notifications`。
+- 新增后台页面或岗位权限时，必须同步 `prisma/seed.ts` 权限种子、`system-admin/src/access.ts`、`system-admin/config/config.ts` 路由 access，以及后端 controller 的 `@Permissions`。
 
 定位链路应按：controller -> service -> Prisma models -> 钱包/日志/通知副作用 -> 前端页面。
 
@@ -45,6 +46,7 @@
 | 优惠券 | `src/coupons`、`src/mini/mini-coupons.controller.ts` | `CouponTemplate`、`UserCoupon`、`OrderDiscount` | admin 优惠券，小程序领券/卡券/下单 |
 | 财务/业绩 | `src/finance`、`src/performance`、`src/dashboard` | `OrderFinanceRecord`、`PerformanceRecord`、订单/结算/钱包模型 | admin 财务看板/明细、业绩看板 |
 | 线下费用 | `src/offline-fee` | `OfflineFeeBill`、`OfflineFeeBillPayment` | admin 线下费用，提现前校验 |
+| 设备租赁费 | `src/equipment-rental-fee` | `EquipmentRentalContract`、`EquipmentRentalBill`、`WalletTransaction` | admin 设备租赁费、员工提现页待确认账单 |
 | 罚单 | `src/penalties` | `PenaltyRule`、`PenaltyTicket`、`PenaltyTicketDetail`、`PenaltyAppeal`、`PenaltyFundPool`、`PenaltyFundFlow` | admin 罚单，员工罚单 |
 | 通知/公告 | `src/notifications` | `SystemAnnouncement`、`SystemAnnouncementRead`、`UserNotification`、`CsDutySchedule`、`CsDutyLeave` | admin 公告/当班客服/测试推送，前端实时通知，小程序公告 |
 | 小程序协议 | `src/miniapp-protocols` | `MiniappProtocolCategory`、`MiniappProtocol` | admin 协议配置，小程序协议弹窗/内容 |
@@ -79,6 +81,14 @@
 - `mini/coupons`：领券中心、我的卡券、领取。
 - `mini/announcements`：公告详情。
 
+## 权限模型
+
+- 权限源在 `Permission.key`，角色通过 `Role.permissions` 绑定权限；登录态会把权限 key 下发给 `system-admin`。
+- 页面级权限使用 `*:page` 或 `*:view/list` key，并由 `system-admin/src/access.ts` 映射成 `canView*`。
+- 后端接口通过 `@Permissions(...)` 做同域保护；历史上部分页面复用 `system:role:page` 或 `finance:records:list`，新增岗位应优先使用细分权限，旧权限只作为兼容兜底。
+- `prisma/seed.ts` 是权限树基线；新增页面权限必须写入 seed，否则新岗位在角色管理里无法分配。
+- `user-logs` 属于敏感审计数据，必须使用 `system:user-logs:page` 或历史系统管理员权限访问。
+
 ## 核心业务流
 
 ### 订单与派单
@@ -99,6 +109,7 @@
 - 关键动作写 `UserLog`。
 - 发送后台通知和小程序订阅消息。
 - 支付后可能累计会员积分/成长值。
+- `listOrders` 支持客户游戏 ID 模糊查询和 `orderMonth=YYYY-MM` 月份筛选，并返回不受分页影响的 `summary.receivableAmount/paidAmount`，用于后台查询消费时展示应付合计和实付合计。
 
 结算计算相关：
 
@@ -144,22 +155,52 @@
 
 退店逻辑在 `src/users/users.service.ts`：释放冻结资金和可退保证金到可用余额。任何提现/保证金改动都必须验证 `EXITED` 员工行为和 admin 端提现预览。
 
+### 线下费用
+
+主文件：`src/offline-fee/offline-fee.service.ts`。
+
+- 线下费用账单不再由 Cron 或提现校验自动生成。
+- 只有管理员在 `system-admin` 财务线下费用页面选择月份并确认后，才调用 `offline-fees/bills/generate` 生成或更新该月账单。
+- 提现前校验只检查已存在的上月线下费用账单；如果账单不存在，不会自动补生成。
+- 账单生成对象只包含 `STAFF + OFFLINE + ACTIVE/FROZEN`，退店和黑名单员工不生成。
+- 账单支持废除为 `WAIVED`；只有已废除且没有任何缴费记录的账单才允许删除，删除接口为 `offline-fees/bills/delete`。
+
+### 设备租赁费
+
+主文件：`src/equipment-rental-fee/equipment-rental-fee.service.ts`。
+
+- 用于公司担保待租设备的线上陪玩租赁费用。
+- `EquipmentRentalContract` 配置哪些 `STAFF + ACTIVE/FROZEN` 员工需要按月收租，不限制在线/离线；退店和黑名单员工不可配置。字段包含月租金额、起租日、结束日、启停状态；历史 `startMonth/endMonth` 仅作兼容字段，新增/编辑以 `startDate/endDate` 为准。
+- `EquipmentRentalBill` 是每月账单；账单月份表示缴费月份，缴费日按起租日落到下一月，例如 8 月 15 日起租，第一张账单为 9 月账单，周期 8 月 15 日到 9 月 14 日，缴费日 9 月 15 日。
+- 系统每月 1 日自动生成当月账单，也支持财务页面手动生成指定月份。
+- 员工在自己的提现/钱包页面主动确认账单后扣费，财务后台也可对待确认账单手动缴费；扣费写 `WalletTransaction.bizType=EQUIPMENT_RENTAL_FEE`。
+- 扣费允许 `availableBalance` 变负，但扣费后 `availableBalance + frozenBalance` 不能小于 0。
+- 提现申请前会预留设备租赁费：已出未确认账单 + 下月即将产生账单。提现后总资产不足以覆盖时，不允许提交提现申请。
+- 财务页面需要展示未确认账单的余额不足风险，使用账单行的 `insufficient` 标识。
+
 ### 员工生命周期
 
 状态：`ACTIVE`、`FROZEN`、`EXITED`、`BLACKLISTED`。
 
-- 受监控员工 7 天未活跃会冻结，基准时间来自 `staffDormantFreezeBaseAt`、最后接单时间或创建时间。
+- 受监控员工超过自动冻结周期未活跃会冻结，基准时间来自 `staffDormantFreezeBaseAt`、最后接单时间或创建时间；周期由员工规则引擎 `dormantFreezeDays` 控制，未命中规则走默认规则，默认 7 天。
 - `FROZEN` 会限制普通功能，但 `UserStatusGuard` 允许钱包相关接口访问。
 - `EXITED` 不具备派单资格，但可提现退店释放后的可用余额。
+- `EXITED` 不能再次执行退店、清退或退店预览；后端接口需要拒绝重复生命周期动作。
 - `BLACKLISTED` 不应再入店或提现。
+- 后台新增员工时，只有身份类型为 `STAFF` 会触发重新入店限制；手机号、真实姓名、身份证号任一命中历史员工账号，都视为重复员工。
+- 重复员工如果不是 `EXITED`，拒绝重复入店；如果是 `BLACKLISTED`，永远拒绝重新入店。
+- `EXITED` 员工重新入店会复用原用户账号。未满 `staffCooldownUntil` 或员工规则引擎 `quitCoolingDays` 计算出的退店冷却期时，后端返回 `STAFF_REJOIN_COOLDOWN_CONFIRM_REQUIRED`，管理端必须二次确认风险后携带 `forceRejoin=true` 才能继续。
+- 已满退店冷却期的 `EXITED` 员工可直接重新入店；重新入店会清零钱包中的所有正数余额字段（可用、冻结、接单冻结、提现冻结、保证金），负数余额不处理。
 - 是否属于派单监控员工由 `src/common/utils/staff-role-scope.util.ts` 判断，不是只看 `userType`。
 
 员工规则引擎：
 
 - 后端：`src/system-config/staff-rule-engine.service.ts`
 - 配置 API：`system-configs/staff-rule-engine/get|upsert`
-- 影响：保证金金额、首次提现最低保留、首次提现需接单满 N 天、退店冷却期、保证金不退天数。
+- 影响：保证金金额、首次提现最低保留、首次提现需接单满 N 天、退店冷却期、保证金不退天数、自动冻结周期。
+- 配置结构：`defaultRule` 是未配置/未命中员工的兜底规则；`rules[]` 与 `tags[]` 一对一绑定，新保存配置时一条规则必须且只能关联一个标签。
 - `firstWithdrawMinAcceptedDays` 缺省值为 15，用于兼容旧配置；提现校验在 `src/wallet/wallet-withdrawals.service.ts`。
+- `dormantFreezeDays` 缺省值为 7；历史多标签规则读取兼容，但后台保存会要求拆成一对一标签规则。
 
 ### 会员与支付
 

@@ -71,12 +71,15 @@ describe('WalletWithdrawalsService.applyWithdrawal', () => {
       $transaction: jest.fn((callback) => callback(tx)),
     } as any;
     const staffRuleEngineService = {
-      getConfig: jest.fn().mockResolvedValue({ tags: [], rules: [] }),
+      getConfig: jest.fn().mockResolvedValue({ tags: [], rules: [], defaultRule: { dormantFreezeDays: 7 } }),
       resolveMatchedRule: jest.fn().mockReturnValue({
         firstWithdrawMinBalance: 100,
         firstWithdrawMinAcceptedDays: 3,
         depositAmount: 500,
+        dormantFreezeDays: 7,
       }),
+      getDormantFreezeDays: jest.fn().mockReturnValue(7),
+      buildDormantFreezeMessage: jest.fn((days: number) => `用户活跃度太低，已经超过${days}天，账号已自动冻结，请联系管理超哥进行处理。`),
     } as any;
     const { service } = createService(prisma, tx, staffRuleEngineService);
 
@@ -143,6 +146,8 @@ describe('WalletWithdrawalsService.applyWithdrawal', () => {
     const staffRuleEngineService = {
       getConfig: jest.fn(),
       resolveMatchedRule: jest.fn(),
+      getDormantFreezeDays: jest.fn().mockReturnValue(7),
+      buildDormantFreezeMessage: jest.fn((days: number) => `用户活跃度太低，已经超过${days}天，账号已自动冻结，请联系管理超哥进行处理。`),
     } as any;
     const { service, walletService } = createService(prisma, tx, staffRuleEngineService);
 

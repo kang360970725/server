@@ -29,7 +29,16 @@ async function main() {
         // ====== PAGE 权限（路线B：页面访问权限）======
         { key: 'system:role:page', name: '角色管理页', module: 'system', type: PermissionType.PAGE },
         { key: 'system:permission:page', name: '权限管理页', module: 'system', type: PermissionType.PAGE },
+        { key: 'system:configs:page', name: '基础配置页', module: 'system', type: PermissionType.PAGE },
+        { key: 'system:app-versions:page', name: '版本迭代页', module: 'system', type: PermissionType.PAGE },
+        { key: 'system:announcements:page', name: '系统公告页', module: 'system', type: PermissionType.PAGE },
+        { key: 'system:questionnaires:page', name: '匿名问卷管理页', module: 'system', type: PermissionType.PAGE },
+        { key: 'system:duty-cs:page', name: '当班客服配置页', module: 'system', type: PermissionType.PAGE },
+        { key: 'system:notification-test-push:page', name: '测试推送中心页', module: 'system', type: PermissionType.PAGE },
+        { key: 'system:user-logs:page', name: '操作日志页', module: 'system', type: PermissionType.PAGE },
         { key: 'system:game-project:page', name: '项目管理页', module: 'system', type: PermissionType.PAGE },
+        { key: 'miniapp:home:page', name: '小程序首页配置页', module: 'miniapp', type: PermissionType.PAGE },
+        { key: 'miniapp:protocols:page', name: '小程序协议维护页', module: 'miniapp', type: PermissionType.PAGE },
 
         { key: 'users:member:page', name: '会员管理页', module: 'users', type: PermissionType.PAGE },
         { key: 'users:staff:page', name: '打手管理页', module: 'users', type: PermissionType.PAGE },
@@ -37,16 +46,36 @@ async function main() {
         { key: 'staff-ratings:page', name: '评级管理页', module: 'staff-ratings', type: PermissionType.PAGE },
 
         { key: 'orders:list:page', name: '订单管理页', module: 'orders', type: PermissionType.PAGE },
+        { key: 'orders:detail:page', name: '订单详情页', module: 'orders', type: PermissionType.PAGE },
+        { key: 'orders:complaints:page', name: '客诉工单页', module: 'orders', type: PermissionType.PAGE },
+        { key: 'orders:workbench:page', name: '客服工作台页', module: 'orders', type: PermissionType.PAGE },
         { key: 'coupons:user-coupons:list', name: '用户券查询', module: 'coupons', type: PermissionType.PAGE },
+        { key: 'coupons:page', name: '优惠券管理页', module: 'coupons', type: PermissionType.PAGE },
         { key: 'penalties:page', name: '罚单管理页', module: 'penalties', type: PermissionType.PAGE },
         { key: 'penalties:ticket:create', name: '罚单开单权限', module: 'penalties', type: PermissionType.PAGE },
 
         { key: 'staff:my-orders:page', name: '陪玩-我的接单页', module: 'staff', type: PermissionType.PAGE },
         { key: 'staff:workbench:page', name: '陪玩-工作台页', module: 'staff', type: PermissionType.PAGE },
+        { key: 'staff:questionnaires:page', name: '陪玩-信息采集页', module: 'staff', type: PermissionType.PAGE },
 
         { key: 'settlements:experience:page', name: '结算-体验单页', module: 'settlements', type: PermissionType.PAGE },
         { key: 'settlements:monthly:page', name: '结算-月结页', module: 'settlements', type: PermissionType.PAGE },
         { key: 'ops:promotion:page', name: '推广运营页', module: 'ops', type: PermissionType.PAGE },
+        { key: 'chest:page', name: '宝盒活动页', module: 'ops', type: PermissionType.PAGE },
+
+        { key: 'dashboard:revenue:page', name: '营业额看板页', module: 'dashboard', type: PermissionType.PAGE },
+        { key: 'performance:dashboard:view', name: '业绩看板页', module: 'performance', type: PermissionType.PAGE },
+        { key: 'performance:staff:view', name: '员工业绩查看', module: 'performance', type: PermissionType.PAGE },
+        { key: 'finance:dashboard:view', name: '财务看板页', module: 'finance', type: PermissionType.PAGE },
+        { key: 'finance:records:list', name: '财务明细页', module: 'finance', type: PermissionType.PAGE },
+        { key: 'finance:offline-fees:page', name: '线下费用页', module: 'finance', type: PermissionType.PAGE },
+        { key: 'finance:equipment-rental-fees:page', name: '设备租赁费页', module: 'finance', type: PermissionType.PAGE },
+        { key: 'wallet:overview:page', name: '钱包账户概览页', module: 'wallet', type: PermissionType.PAGE },
+        { key: 'wallet:member-levels:page', name: '会员等级页', module: 'wallet', type: PermissionType.PAGE },
+        { key: 'wallet:recharge-plans:page', name: '充值方案页', module: 'wallet', type: PermissionType.PAGE },
+        { key: 'wallet:transactions:page', name: '钱包流水明细页', module: 'wallet', type: PermissionType.PAGE },
+        { key: 'wallet:replay-preview:page', name: '钱包预核算页', module: 'wallet', type: PermissionType.PAGE },
+        { key: 'wallet:withdrawals:page', name: '提现审批页', module: 'wallet', type: PermissionType.PAGE },
 
         // ====== 你原来的 BUTTON 权限（先保留，避免历史功能/按钮权限丢失）======
         // 项目管理

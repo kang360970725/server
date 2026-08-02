@@ -19,6 +19,11 @@ import { ListMyNotificationsDto } from './dto/list-my-notifications.dto';
 import { MarkNotificationReadDto } from './dto/mark-notification-read.dto';
 import { Observable } from 'rxjs';
 
+const LEGACY_SYSTEM_ADMIN_PAGE = 'system:role:page';
+const ANNOUNCEMENTS_PAGE = 'system:announcements:page';
+const DUTY_CS_PAGE = 'system:duty-cs:page';
+const NOTIFICATION_TEST_PUSH_PAGE = 'system:notification-test-push:page';
+
 @Controller('notifications')
 @UseGuards(JwtAuthGuard)
 export class NotificationsController {
@@ -26,21 +31,21 @@ export class NotificationsController {
 
   @Post('admin/announcements/list')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(ANNOUNCEMENTS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async adminListAnnouncements(@Body() dto: ListAnnouncementsDto) {
     return this.service.adminListAnnouncements(dto);
   }
 
   @Post('admin/announcements/miniapp-options')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(ANNOUNCEMENTS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async adminListMiniappAnnouncementOptions(@Body() body: { keyword?: string }) {
     return this.service.adminListMiniappAnnouncementOptions(body?.keyword);
   }
 
   @Post('admin/announcements/create')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(ANNOUNCEMENTS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async adminCreateAnnouncement(@Body() dto: CreateAnnouncementDto, @Req() req: any) {
     const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
     return this.service.adminCreateAnnouncement(dto, Number.isFinite(operatorId) ? operatorId : undefined);
@@ -48,42 +53,42 @@ export class NotificationsController {
 
   @Post('admin/announcements/update')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(ANNOUNCEMENTS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async adminUpdateAnnouncement(@Body() dto: UpdateAnnouncementDto) {
     return this.service.adminUpdateAnnouncement(dto);
   }
 
   @Post('admin/duty-cs/list')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(DUTY_CS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async listDutySchedules(@Body() dto: ListDutyCsScheduleDto) {
     return this.service.listDutySchedules(dto);
   }
 
   @Post('admin/duty-cs/upsert')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(DUTY_CS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async upsertDutySchedule(@Body() dto: UpsertDutyCsScheduleDto) {
     return this.service.upsertDutySchedule(dto);
   }
 
   @Post('admin/duty-cs/delete')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(DUTY_CS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async deleteDutySchedule(@Body() dto: DeleteDutyCsScheduleDto) {
     return this.service.deleteDutySchedule(Number(dto.id));
   }
 
   @Post('admin/duty-cs/leave/list')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(DUTY_CS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async listDutyLeaves(@Body() dto: ListDutyCsLeaveDto) {
     return this.service.listDutyLeaves(dto);
   }
 
   @Post('admin/duty-cs/leave/upsert')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(DUTY_CS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async upsertDutyLeave(@Body() dto: UpsertDutyCsLeaveDto, @Req() req: any) {
     const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
     return this.service.upsertDutyLeave(dto, Number.isFinite(operatorId) ? operatorId : undefined);
@@ -91,7 +96,7 @@ export class NotificationsController {
 
   @Post('admin/duty-cs/leave/delete')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(DUTY_CS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async deleteDutyLeave(@Body() dto: DeleteDutyCsLeaveDto) {
     return this.service.deleteDutyLeave(Number(dto.id));
   }
@@ -158,7 +163,7 @@ export class NotificationsController {
 
   @Post('admin/test-push/send')
   @UseGuards(PermissionsGuard)
-  @Permissions('system:role:page')
+  @Permissions(NOTIFICATION_TEST_PUSH_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async adminSendTestPush(@Body() dto: SendTestRealtimeNotificationDto) {
     return this.service.adminSendTestRealtimePush(dto);
   }

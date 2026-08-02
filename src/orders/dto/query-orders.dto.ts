@@ -1,4 +1,4 @@
-import { IsBoolean, IsInt, IsOptional, IsString } from 'class-validator';
+import { IsBoolean, IsInt, IsOptional, IsString, Matches } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 
 /**
@@ -43,6 +43,11 @@ export class QueryOrdersDto {
     @IsOptional()
     @IsString()
     customerGameId?: string;
+
+    @IsOptional()
+    @IsString()
+    @Matches(/^\d{4}-\d{2}$/)
+    orderMonth?: string;
 
     @IsOptional()
     @IsString()

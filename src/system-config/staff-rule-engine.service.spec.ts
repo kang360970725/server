@@ -27,5 +27,93 @@ describe('StaffRuleEngineService', () => {
     });
 
     expect(config.rules[0].firstWithdrawMinAcceptedDays).toBe(15);
+    expect(config.rules[0].dormantFreezeDays).toBe(7);
+    expect(config.defaultRule.dormantFreezeDays).toBe(7);
+  });
+
+  it('uses default rule when staff has no matching tag', () => {
+    const service = new StaffRuleEngineService({} as any);
+
+    const config = service.normalizeConfig({
+      defaultRule: {
+        depositAmount: 600,
+        firstWithdrawMinBalance: 1200,
+        firstWithdrawMinAcceptedDays: 10,
+        quitCoolingDays: 90,
+        depositForfeitDays: 45,
+        dormantFreezeDays: 12,
+      },
+      tags: [{ code: 'vip', name: 'VIP' }],
+      rules: [
+        {
+          id: 'vip_rule',
+          name: 'VIP规则',
+          tagCodes: ['vip'],
+          depositAmount: 800,
+          firstWithdrawMinBalance: 1600,
+          firstWithdrawMinAcceptedDays: 20,
+          quitCoolingDays: 180,
+          depositForfeitDays: 60,
+          dormantFreezeDays: 5,
+        },
+      ],
+    });
+
+    const matched = service.resolveMatchedRule(config, []);
+    expect(matched?.id).toBe('default_rule');
+    expect(matched?.depositAmount).toBe(600);
+    expect(service.getDormantFreezeDays(config, [])).toBe(12);
+  });
+
+  it('requires new saved rules to bind exactly one tag', () => {
+    const service = new StaffRuleEngineService({} as any);
+
+    expect(() =>
+      service.normalizeConfig({
+        tags: [
+          { code: 'a', name: 'A' },
+          { code: 'b', name: 'B' },
+        ],
+        rules: [
+          {
+            id: 'multi',
+            name: '多标签规则',
+            tagCodes: ['a', 'b'],
+            depositAmount: 500,
+            firstWithdrawMinBalance: 1000,
+            quitCoolingDays: 180,
+            depositForfeitDays: 30,
+          },
+        ],
+      }),
+    ).toThrow('必须且只能关联一个标签');
+  });
+
+  it('can normalize legacy multi-tag rules for read compatibility', () => {
+    const service = new StaffRuleEngineService({} as any);
+
+    const config = service.normalizeConfig(
+      {
+        tags: [
+          { code: 'a', name: 'A' },
+          { code: 'b', name: 'B' },
+        ],
+        rules: [
+          {
+            id: 'multi',
+            name: '旧多标签规则',
+            tagCodes: ['a', 'b'],
+            depositAmount: 500,
+            firstWithdrawMinBalance: 1000,
+            quitCoolingDays: 180,
+            depositForfeitDays: 30,
+          },
+        ],
+      },
+      { allowLegacyMultipleTags: true },
+    );
+
+    expect(config.rules[0].tagCodes).toEqual(['a', 'b']);
+    expect(service.resolveMatchedRule(config, ['b'])?.id).toBe('multi');
   });
 });

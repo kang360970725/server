@@ -7,6 +7,7 @@ import { PlayerWorkStatus, StaffEmploymentStatus } from '@prisma/client';
 import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
 import { isDispatchMonitoredStaff } from '../common/utils/staff-role-scope.util';
 import { WalletService } from './wallet.service';
+import { EquipmentRentalFeeService } from '../equipment-rental-fee/equipment-rental-fee.service';
 
 /** ✅ 截断到 2 位小数（不四舍五入） */
 const round2 = (v: any): number => {
@@ -32,6 +33,7 @@ export class WalletWithdrawalsService {
         private readonly walletDepositService: WalletDepositService,
         private readonly offlineFeeService: OfflineFeeService,
         private readonly staffRuleEngineService: StaffRuleEngineService,
+        private readonly equipmentRentalFeeService?: EquipmentRentalFeeService,
     ) {}
 
     private async autoFreezeDormantStaffIfNeeded(userId: number, tx: any) {
@@ -43,6 +45,7 @@ export class WalletWithdrawalsService {
                 createdAt: true,
                 staffEmploymentStatus: true,
                 staffDormantFreezeBaseAt: true,
+                staffTags: true,
                 Role: {
                     select: {
                         name: true,
@@ -89,8 +92,10 @@ export class WalletWithdrawalsService {
             (createdAtDate && !Number.isNaN(createdAtDate.getTime()) ? createdAtDate : null);
         if (!baseDate) return user;
 
+        const staffRuleConfig = await this.staffRuleEngineService.getConfig();
+        const dormantFreezeDays = this.staffRuleEngineService.getDormantFreezeDays(staffRuleConfig, user?.staffTags);
         const freezeAt = new Date(baseDate);
-        freezeAt.setDate(freezeAt.getDate() + 7);
+        freezeAt.setDate(freezeAt.getDate() + dormantFreezeDays);
         if (freezeAt.getTime() > Date.now()) return user;
 
         await tx.user.update({
@@ -195,7 +200,10 @@ export class WalletWithdrawalsService {
             throw new BadRequestException('用户不存在');
         }
         if (isDispatchMonitoredStaff(user) && String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {
-            throw new ForbiddenException('用户活跃度太低，已经超过7天，账号已自动冻结，请联系管理超哥进行处理。');
+            const config = await this.staffRuleEngineService.getConfig();
+            throw new ForbiddenException(
+                this.staffRuleEngineService.buildDormantFreezeMessage(this.staffRuleEngineService.getDormantFreezeDays(config, user.staffTags)),
+            );
         }
 
         const matchedRule = isDispatchMonitoredStaff(user)
@@ -248,7 +256,10 @@ export class WalletWithdrawalsService {
         return this.prisma.$transaction(async (tx) => {
             const freezeCheckedUser = await this.autoFreezeDormantStaffIfNeeded(userId, tx);
             if (isDispatchMonitoredStaff(freezeCheckedUser) && String(freezeCheckedUser?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {
-                throw new ForbiddenException('用户活跃度太低，已经超过7天，账号已自动冻结，请联系管理超哥进行处理。');
+                const config = await this.staffRuleEngineService.getConfig();
+                throw new ForbiddenException(
+                    this.staffRuleEngineService.buildDormantFreezeMessage(this.staffRuleEngineService.getDormantFreezeDays(config, freezeCheckedUser?.staffTags)),
+                );
             }
 
             // =========================
@@ -398,6 +409,16 @@ export class WalletWithdrawalsService {
 
             if (available < 0) {
                 throw new BadRequestException('账户存在欠款，请先补齐');
+            }
+
+            if (isActiveStaff && this.equipmentRentalFeeService) {
+                const rentalObligation = await this.equipmentRentalFeeService.getWithdrawalObligationTx(tx as any, userId);
+                const totalAfterWithdraw = round2(available + Number(refreshedAccount?.frozenBalance || 0) - amount);
+                if (totalAfterWithdraw < Number(rentalObligation.totalObligation || 0)) {
+                    throw new BadRequestException(
+                        `提现后总资产不足以覆盖设备租赁费：已出账 ${rentalObligation.outstanding}，即将出账 ${rentalObligation.upcoming}`,
+                    );
+                }
             }
 
             let offlineFeePayment: {

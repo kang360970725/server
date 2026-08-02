@@ -8,6 +8,7 @@ import {WalletWithdrawalsService} from "./wallet-withdrawals.service";
 import { WalletDepositService } from './wallet.deposit.service';
 import { OfflineFeeModule } from '../offline-fee/offline-fee.module';
 import { SystemConfigModule } from '../system-config/system-config.module';
+import { EquipmentRentalFeeModule } from '../equipment-rental-fee/equipment-rental-fee.module';
 
 /**
  * WalletModule（V0.1）
@@ -18,7 +19,7 @@ import { SystemConfigModule } from '../system-config/system-config.module';
  * 这里沿用现有习惯，避免大范围重构。
  */
 @Module({
-    imports: [OfflineFeeModule, SystemConfigModule],
+    imports: [OfflineFeeModule, SystemConfigModule, EquipmentRentalFeeModule],
     controllers: [
         WalletController,
         WalletWithdrawalsController, // ✅ 新增

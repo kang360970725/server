@@ -17,7 +17,6 @@ export class UsersService {
   // 临时屏蔽自动离线，仅保留手动离线/登录上线。
   private readonly autoOfflineDisabled = true;
   private readonly staffExitCooldownDays = 180;
-  private readonly staffDormantFreezeDays = 7;
   private readonly logger = new Logger(UsersService.name);
 
   static readonly PLAYER_ONLINE_LEASE_MS = 2 * 60 * 60 * 1000;
@@ -32,12 +31,16 @@ export class UsersService {
     return new Date(base.getTime() + UsersService.PLAYER_ONLINE_LEASE_MS);
   }
 
-  private getStaffDormantFreezeAt(baseDate?: Date | string | null) {
+  private getStaffDormantFreezeAt(baseDate?: Date | string | null, dormantFreezeDays = 7) {
     if (!baseDate) return null;
     const freezeAt = new Date(baseDate);
     if (Number.isNaN(freezeAt.getTime())) return null;
-    freezeAt.setDate(freezeAt.getDate() + this.staffDormantFreezeDays);
+    freezeAt.setDate(freezeAt.getDate() + dormantFreezeDays);
     return freezeAt;
+  }
+
+  private getStaffDormantFreezeMessage(days = 7) {
+    return this.staffRuleEngineService.buildDormantFreezeMessage(days);
   }
 
   private getStaffDormantFreezeBaseDate(input: {
@@ -72,6 +75,7 @@ export class UsersService {
         userType: true,
         staffEmploymentStatus: true,
         staffDormantFreezeBaseAt: true,
+        staffTags: true,
         Role: {
           select: {
             name: true,
@@ -108,6 +112,7 @@ export class UsersService {
         String(item?.staffEmploymentStatus || '') === StaffEmploymentStatus.ACTIVE,
     );
     if (!monitoredUsers.length) return new Set<number>();
+    const staffRuleConfig = await this.staffRuleEngineService.getConfig();
 
     const lastAcceptedRows = await this.prisma.orderParticipant.groupBy({
       by: ['userId'],
@@ -132,7 +137,8 @@ export class UsersService {
           lastAcceptedAt: lastAcceptedMap.get(Number(item.id)) || null,
           createdAt: item?.createdAt ? new Date(item.createdAt) : null,
         });
-        const freezeAt = this.getStaffDormantFreezeAt(baseDate);
+        const dormantFreezeDays = this.staffRuleEngineService.getDormantFreezeDays(staffRuleConfig, (item as any)?.staffTags);
+        const freezeAt = this.getStaffDormantFreezeAt(baseDate, dormantFreezeDays);
         return freezeAt ? freezeAt.getTime() <= Date.now() : false;
       })
       .map((item) => Number(item.id))
@@ -284,22 +290,257 @@ export class UsersService {
     };
   }
 
+  private normalizeIdentityText(value: any) {
+    return String(value || '').trim();
+  }
+
+  private getStaffRejoinCooldownUntil(user: any, config: any) {
+    if (user?.staffCooldownUntil) {
+      const stored = new Date(user.staffCooldownUntil);
+      if (!Number.isNaN(stored.getTime())) return stored;
+    }
+
+    const exitedAt = user?.staffExitedAt ? new Date(user.staffExitedAt) : null;
+    if (!exitedAt || Number.isNaN(exitedAt.getTime())) return null;
+    const ruleSummary = this.buildStaffRuleSummary(user, config);
+    return this.buildStaffCooldownUntil(exitedAt, Number(ruleSummary.matchedQuitCoolingDays || this.staffExitCooldownDays));
+  }
+
+  private getStaffRejoinRiskMessage(cooldownUntil: Date | null, coolingDays: number) {
+    const deadline = cooldownUntil ? cooldownUntil.toISOString().slice(0, 10) : '未知日期';
+    return `该员工退店未满${Number(coolingDays || this.staffExitCooldownDays)}天或配置的退店冷却期，冷却截止 ${deadline}。如需重新入店，请二次确认操作风险：重新入店会清零账户中的所有正数余额，负数余额保留不变。`;
+  }
+
+  private buildPositiveWalletClearData(account: any) {
+    const available = Number(account?.availableBalance ?? 0);
+    const frozen = Number(account?.frozenBalance ?? 0);
+    const earningFrozen = Number(account?.earningFrozenBalance ?? 0);
+    const withdrawFrozen = Number(account?.withdrawFrozenBalance ?? 0);
+    const deposit = Number(account?.depositBalance ?? 0);
+    const data: any = {};
+    if (available > 0) data.availableBalance = 0;
+    if (frozen > 0) data.frozenBalance = 0;
+    if (earningFrozen > 0) data.earningFrozenBalance = 0;
+    if (withdrawFrozen > 0) data.withdrawFrozenBalance = 0;
+    if (deposit > 0) data.depositBalance = 0;
+    return {
+      data,
+      clearAvailable: Math.max(0, available),
+      clearFrozen: Math.max(0, frozen),
+      clearEarningFrozen: Math.max(0, earningFrozen),
+      clearWithdrawFrozen: Math.max(0, withdrawFrozen),
+      clearDeposit: Math.max(0, deposit),
+      clearWalletAmount: Math.max(0, available) + Math.max(0, frozen),
+      clearTotalAmount: Math.max(0, available) + Math.max(0, frozen) + Math.max(0, deposit),
+    };
+  }
+
+  private async findStaffDuplicateForCreate(input: { phone: string; realName?: string; name?: string; idCard?: string }) {
+    const phone = this.normalizeIdentityText(input.phone);
+    const realName = this.normalizeIdentityText(input.realName || input.name);
+    const idCard = this.normalizeIdentityText(input.idCard);
+    const staffOr: any[] = [];
+    if (phone) staffOr.push({ phone });
+    if (realName) staffOr.push({ realName });
+    if (idCard) staffOr.push({ idCard });
+    if (!staffOr.length) return [];
+
+    return this.prisma.user.findMany({
+      where: {
+        userType: UserType.STAFF,
+        OR: staffOr,
+      },
+      include: {
+        ...this.getUserIncludeFields(),
+        walletAccount: {
+          select: {
+            availableBalance: true,
+            frozenBalance: true,
+            earningFrozenBalance: true,
+            withdrawFrozenBalance: true,
+            depositBalance: true,
+          },
+        },
+      },
+      take: 10,
+    });
+  }
+
   async create(
     createUserDto: CreateUserDto,
     operatorId?: number,
     actor?: { userType?: UserType; permissions?: string[] },
   ) {
-    const { phone, password, userType = UserType.REGISTERED_USER, ...rest } = createUserDto;
+    const { phone, password, userType = UserType.REGISTERED_USER, forceRejoin, ...rest } = createUserDto;
     const normalizedStaffTags = this.normalizeStaffTags(createUserDto.staffTags);
     this.assertActorCanAccessUser(actor, userType);
+    const normalizedPhone = this.normalizeIdentityText(phone);
+    const normalizedRealName = this.normalizeIdentityText(createUserDto.realName || createUserDto.name);
+    const normalizedIdCard = this.normalizeIdentityText(createUserDto.idCard);
     const workModePayload = this.normalizeWorkModePayload({
       workMode: createUserDto.workMode,
       offlineJoinedAt: createUserDto.offlineJoinedAt,
     });
 
+    if (userType === UserType.STAFF) {
+      if (!normalizedPhone) throw new BadRequestException('员工手机号不能为空');
+      if (!normalizedRealName) throw new BadRequestException('员工姓名不能为空');
+      if (!normalizedIdCard) throw new BadRequestException('员工身份证号不能为空');
+
+      const phoneOwner = await this.prisma.user.findUnique({ where: { phone: normalizedPhone } });
+      if (phoneOwner && phoneOwner.userType !== UserType.STAFF) {
+        throw new BadRequestException('手机号已被非员工账号使用，无法作为员工入店账号');
+      }
+
+      const duplicatedStaff = await this.findStaffDuplicateForCreate({
+        phone: normalizedPhone,
+        realName: normalizedRealName,
+        idCard: normalizedIdCard,
+      });
+
+      if (duplicatedStaff.length > 1) {
+        throw new BadRequestException('员工入店信息命中多个历史账号，请先人工核查手机号、姓名和身份证号');
+      }
+
+      const existingStaff = duplicatedStaff[0];
+      if (existingStaff) {
+        if (existingStaff.staffEmploymentStatus === StaffEmploymentStatus.BLACKLISTED) {
+          throw new BadRequestException('该员工已加入黑名单，不允许重新入店');
+        }
+        if (existingStaff.staffEmploymentStatus !== StaffEmploymentStatus.EXITED) {
+          throw new BadRequestException('手机号、姓名或身份证号已存在员工账号，无法重复入店');
+        }
+
+        const config = await this.staffRuleEngineService.getConfig();
+        const ruleSummary = this.buildStaffRuleSummary(existingStaff, config);
+        const cooldownUntil = this.getStaffRejoinCooldownUntil(existingStaff, config);
+        const now = new Date();
+        if (cooldownUntil && cooldownUntil.getTime() > now.getTime() && forceRejoin !== true) {
+          throw new BadRequestException({
+            code: 'STAFF_REJOIN_COOLDOWN_CONFIRM_REQUIRED',
+            message: this.getStaffRejoinRiskMessage(cooldownUntil, Number(ruleSummary.matchedQuitCoolingDays || this.staffExitCooldownDays)),
+            staffId: existingStaff.id,
+            cooldownUntil: cooldownUntil.toISOString(),
+            coolingDays: Number(ruleSummary.matchedQuitCoolingDays || this.staffExitCooldownDays),
+          });
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const rejoinedUser = await this.prisma.$transaction(async (tx) => {
+          await this.wallet.ensureWalletAccount(existingStaff.id, tx as any);
+          const account = await tx.walletAccount.findUnique({
+            where: { userId: existingStaff.id },
+            select: {
+              availableBalance: true,
+              frozenBalance: true,
+              earningFrozenBalance: true,
+              withdrawFrozenBalance: true,
+              depositBalance: true,
+            },
+          });
+          const clear = this.buildPositiveWalletClearData(account);
+
+          const log = await tx.userLog.create({
+            data: {
+              userId: operatorId || 0,
+              action: 'STAFF_REJOIN_SHOP',
+              targetType: 'USER',
+              targetId: existingStaff.id,
+              oldData: {
+                staffEmploymentStatus: existingStaff.staffEmploymentStatus,
+                staffCooldownUntil: existingStaff.staffCooldownUntil,
+                staffExitedAt: existingStaff.staffExitedAt,
+                walletAccount: account,
+              },
+              newData: {
+                phone: normalizedPhone,
+                realName: normalizedRealName,
+                idCard: normalizedIdCard,
+                forceRejoin: forceRejoin === true,
+                clearedPositiveAmount: Number(clear.clearTotalAmount.toFixed(2)),
+              },
+              remark: '退店员工重新入店',
+            },
+          });
+
+          if (Object.keys(clear.data).length > 0) {
+            await tx.walletAccount.update({
+              where: { userId: existingStaff.id },
+              data: clear.data,
+            });
+          }
+
+          if (clear.clearFrozen > 0 || clear.clearEarningFrozen > 0 || clear.clearWithdrawFrozen > 0) {
+            await tx.walletTransaction.updateMany({
+              where: { userId: existingStaff.id, status: WalletTxStatus.FROZEN },
+              data: { status: WalletTxStatus.REVERSED as any },
+            });
+            await tx.walletHold.updateMany({
+              where: { userId: existingStaff.id, status: WalletHoldStatus.FROZEN },
+              data: { status: WalletHoldStatus.CANCELLED, releasedAt: now },
+            });
+          }
+
+          if (clear.clearWalletAmount > 0) {
+            await tx.walletTransaction.create({
+              data: {
+                userId: existingStaff.id,
+                direction: 'OUT',
+                bizType: 'STAFF_EXIT_CLEAR' as any,
+                amount: Number(clear.clearWalletAmount.toFixed(2)),
+                status: 'AVAILABLE',
+                sourceType: 'STAFF_REJOIN_CLEAR',
+                sourceId: log.id,
+                availableAfter: clear.data.availableBalance === 0 ? 0 : Number(account?.availableBalance ?? 0),
+                frozenAfter: clear.data.frozenBalance === 0 ? 0 : Number(account?.frozenBalance ?? 0),
+                remark: '员工重新入店，正数钱包余额清零',
+              } as any,
+            });
+          }
+
+          if (clear.clearDeposit > 0) {
+            await tx.walletDepositTransaction.create({
+              data: {
+                userId: existingStaff.id,
+                amount: -Number(clear.clearDeposit.toFixed(2)),
+                bizType: 'STAFF_EXIT_CLEAR' as any,
+                remark: '员工重新入店，正数保证金余额清零',
+                operatorId: operatorId ?? null,
+              },
+            });
+          }
+
+          return tx.user.update({
+            where: { id: existingStaff.id },
+            data: {
+              ...rest,
+              phone: normalizedPhone,
+              password: hashedPassword,
+              name: createUserDto.name,
+              realName: normalizedRealName,
+              idCard: normalizedIdCard,
+              userType,
+              needResetPwd: true,
+              staffTags: normalizedStaffTags,
+              staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
+              staffCooldownUntil: null,
+              staffExitedAt: null,
+              staffDormantFreezeBaseAt: now,
+              canWithdraw: true,
+              workStatus: PlayerWorkStatus.IDLE,
+              ...workModePayload,
+            },
+            include: this.getUserIncludeFields(),
+          });
+        });
+
+        return this.decorateUserWithStaffRule(rejoinedUser, config);
+      }
+    }
+
     // 检查用户是否已存在
     const existingUser = await this.prisma.user.findUnique({
-      where: { phone },
+      where: { phone: normalizedPhone },
     });
 
     if (existingUser) {
@@ -323,7 +564,7 @@ export class UsersService {
     const user = await this.prisma.$transaction(async (tx) => {
       const created = await tx.user.create({
         data: {
-          phone,
+          phone: normalizedPhone,
           password: hashedPassword,
           userType,
           needResetPwd: userType !== UserType.REGISTERED_USER,// 员工首次登录需要重置密码
@@ -350,7 +591,7 @@ export class UsersService {
           null,
           null,
           user,
-          `创建用户: ${phone}`
+          `创建用户: ${normalizedPhone}`
       );
     }
 
@@ -746,6 +987,12 @@ export class UsersService {
     if (user.userType !== UserType.STAFF) {
       throw new BadRequestException('仅员工支持退店操作');
     }
+    if (user.staffEmploymentStatus === StaffEmploymentStatus.EXITED) {
+      throw new BadRequestException('该员工已退店，不支持重复退店或清退');
+    }
+    if (user.staffEmploymentStatus === StaffEmploymentStatus.BLACKLISTED) {
+      throw new BadRequestException('该员工已在黑名单中，不支持退店操作');
+    }
 
     return this.buildStaffExitPreviewFromUser(user, await this.staffRuleEngineService.getConfig());
   }
@@ -784,6 +1031,10 @@ export class UsersService {
 
     if (oldUser.userType !== UserType.STAFF) {
       throw new BadRequestException('仅员工支持退店操作');
+    }
+
+    if (oldUser.staffEmploymentStatus === StaffEmploymentStatus.EXITED) {
+      throw new BadRequestException('该员工已退店，不支持重复退店或清退');
     }
 
     if (oldUser.staffEmploymentStatus === StaffEmploymentStatus.BLACKLISTED) {
@@ -939,6 +1190,12 @@ export class UsersService {
     this.assertActorCanAccessUser(actor, oldUser.userType);
     if (oldUser.userType !== UserType.STAFF) {
       throw new BadRequestException('仅员工支持清退操作');
+    }
+    if (oldUser.staffEmploymentStatus === StaffEmploymentStatus.EXITED) {
+      throw new BadRequestException('该员工已退店，不支持重复退店或清退');
+    }
+    if (oldUser.staffEmploymentStatus === StaffEmploymentStatus.BLACKLISTED) {
+      throw new BadRequestException('该员工已在黑名单中，不支持重复清退');
     }
 
     const addToBlacklist = Boolean(dto?.addToBlacklist);
@@ -1688,14 +1945,15 @@ export class UsersService {
 
     const current = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { userType: true, staffEmploymentStatus: true },
+      select: { userType: true, staffEmploymentStatus: true, staffTags: true },
     });
     if (!current || current.userType !== UserType.STAFF) {
       throw new BadRequestException('当前账号不是员工');
     }
     if (current.staffEmploymentStatus !== StaffEmploymentStatus.ACTIVE) {
       if (current.staffEmploymentStatus === StaffEmploymentStatus.FROZEN) {
-        throw new BadRequestException('用户活跃度太低，已经超过7天，账号已自动冻结，请联系管理超哥进行处理。');
+        const config = await this.staffRuleEngineService.getConfig();
+        throw new BadRequestException(this.getStaffDormantFreezeMessage(this.staffRuleEngineService.getDormantFreezeDays(config, (current as any)?.staffTags)));
       }
       throw new BadRequestException('当前员工已退店或已加入黑名单，无法修改接单状态');
     }
@@ -1734,14 +1992,15 @@ export class UsersService {
 
     const current = await this.prisma.user.findUnique({
       where: { id },
-      select: { userType: true, staffEmploymentStatus: true },
+      select: { userType: true, staffEmploymentStatus: true, staffTags: true },
     });
     if (!current || current.userType !== UserType.STAFF) {
       throw new BadRequestException('当前账号不是员工');
     }
     if (current.staffEmploymentStatus !== StaffEmploymentStatus.ACTIVE) {
       if (current.staffEmploymentStatus === StaffEmploymentStatus.FROZEN) {
-        throw new BadRequestException('用户活跃度太低，已经超过7天，账号已自动冻结，请联系管理超哥进行处理。');
+        const config = await this.staffRuleEngineService.getConfig();
+        throw new BadRequestException(this.getStaffDormantFreezeMessage(this.staffRuleEngineService.getDormantFreezeDays(config, (current as any)?.staffTags)));
       }
       throw new BadRequestException('当前员工已退店或已加入黑名单，无法切换工作模式');
     }
@@ -1772,8 +2031,9 @@ export class UsersService {
     page?: number;
     paginate?: boolean;
     onlyOnline?: boolean;
+    includeFrozen?: boolean;
   }) {
-    const { keyword, onlyIdle = true, limit, page, paginate, onlyOnline = false } = params || {};
+    const { keyword, onlyIdle = true, limit, page, paginate, onlyOnline = false, includeFrozen = false } = params || {};
     const leaseNow = new Date();
     await this.autoFreezeDormantStaffUsers();
     if (!this.autoOfflineDisabled) {
@@ -1795,7 +2055,9 @@ export class UsersService {
 
     const where: any = {
       userType: UserType.STAFF,
-      staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
+      staffEmploymentStatus: includeFrozen
+        ? { in: [StaffEmploymentStatus.ACTIVE, StaffEmploymentStatus.FROZEN] }
+        : StaffEmploymentStatus.ACTIVE,
     };
     if (onlyIdle) where.workStatus = PlayerWorkStatus.IDLE;
     if (onlyOnline) {
@@ -1804,7 +2066,7 @@ export class UsersService {
     }
 
     if (keyword) {
-      where.OR = [{ name: { contains: keyword } }, { phone: { contains: keyword } }];
+      where.OR = [{ name: { contains: keyword } }, { realName: { contains: keyword } }, { phone: { contains: keyword } }];
     }
 
     const take = Number(limit ?? 100);

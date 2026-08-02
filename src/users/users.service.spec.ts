@@ -1,0 +1,266 @@
+import { StaffEmploymentStatus, UserType } from '@prisma/client';
+import { UsersService } from './users.service';
+
+describe('UsersService.create staff rejoin', () => {
+  const actor = { userType: UserType.ADMIN, permissions: ['users:staff:page'] };
+
+  const createService = (prisma: any, wallet: any = {}, staffRuleEngineService: any = {}) => {
+    return new UsersService(
+      prisma,
+      {
+        ensureWalletAccount: jest.fn().mockResolvedValue(undefined),
+        ...wallet,
+      } as any,
+      {
+        getConfig: jest.fn().mockResolvedValue({ tags: [], rules: [], defaultRule: { quitCoolingDays: 180 } }),
+        resolveMatchedRule: jest.fn().mockReturnValue({
+          quitCoolingDays: 180,
+          depositForfeitDays: 0,
+          depositAmount: 500,
+          firstWithdrawMinBalance: 1000,
+          firstWithdrawMinAcceptedDays: 15,
+        }),
+        normalizeUserTags: jest.fn((input: any) => (Array.isArray(input) ? input : [])),
+        ...staffRuleEngineService,
+      } as any,
+    );
+  };
+
+  it('requires confirmation when exited staff is still in cooling period', async () => {
+    const cooldownUntil = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const prisma: any = {
+      user: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 9,
+            userType: UserType.STAFF,
+            phone: '13800138001',
+            realName: '张三',
+            idCard: '510000199001010000',
+            staffTags: [],
+            staffEmploymentStatus: StaffEmploymentStatus.EXITED,
+            staffCooldownUntil: cooldownUntil,
+            staffExitedAt: new Date(),
+            walletAccount: {
+              availableBalance: 0,
+              frozenBalance: 0,
+              earningFrozenBalance: 0,
+              withdrawFrozenBalance: 0,
+              depositBalance: 0,
+            },
+          },
+        ]),
+      },
+    };
+    const service = createService(prisma);
+
+    await expect(
+      service.create(
+        {
+          phone: '13800138001',
+          password: '123456',
+          userType: UserType.STAFF,
+          realName: '张三',
+          idCard: '510000199001010000',
+        } as any,
+        1,
+        actor,
+      ),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'STAFF_REJOIN_COOLDOWN_CONFIRM_REQUIRED',
+      }),
+    });
+  });
+
+  it('rejects blacklisted staff rejoin', async () => {
+    const prisma: any = {
+      user: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: 10,
+            userType: UserType.STAFF,
+            phone: '13800138002',
+            realName: '李四',
+            idCard: '510000199001010001',
+            staffEmploymentStatus: StaffEmploymentStatus.BLACKLISTED,
+          },
+        ]),
+      },
+    };
+    const service = createService(prisma);
+
+    await expect(
+      service.create(
+        {
+          phone: '13800138002',
+          password: '123456',
+          userType: UserType.STAFF,
+          realName: '李四',
+          idCard: '510000199001010001',
+        } as any,
+        1,
+        actor,
+      ),
+    ).rejects.toThrow('该员工已加入黑名单，不允许重新入店');
+  });
+
+  it('rejoins exited staff and clears positive wallet balances only', async () => {
+    const oldStaff = {
+      id: 11,
+      userType: UserType.STAFF,
+      phone: '13800138003',
+      realName: '王五',
+      idCard: '510000199001010002',
+      staffTags: [],
+      staffEmploymentStatus: StaffEmploymentStatus.EXITED,
+      staffCooldownUntil: new Date(Date.now() - 24 * 60 * 60 * 1000),
+      staffExitedAt: new Date(Date.now() - 181 * 24 * 60 * 60 * 1000),
+      walletAccount: {
+        availableBalance: 120,
+        frozenBalance: -30,
+        earningFrozenBalance: 40,
+        withdrawFrozenBalance: 0,
+        depositBalance: 50,
+      },
+    };
+    const tx: any = {
+      walletAccount: {
+        findUnique: jest.fn().mockResolvedValue(oldStaff.walletAccount),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      userLog: {
+        create: jest.fn().mockResolvedValue({ id: 99 }),
+      },
+      walletTransaction: {
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        create: jest.fn().mockResolvedValue({ id: 199 }),
+      },
+      walletHold: {
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      walletDepositTransaction: {
+        create: jest.fn().mockResolvedValue({ id: 299 }),
+      },
+      user: {
+        update: jest.fn().mockResolvedValue({
+          ...oldStaff,
+          staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
+        }),
+      },
+    };
+    const prisma: any = {
+      user: {
+        findUnique: jest.fn().mockResolvedValue(oldStaff),
+        findMany: jest.fn().mockResolvedValue([oldStaff]),
+      },
+      $transaction: jest.fn((callback) => callback(tx)),
+    };
+    const service = createService(prisma);
+
+    await service.create(
+      {
+        phone: '13800138003',
+        password: '123456',
+        userType: UserType.STAFF,
+        realName: '王五',
+        idCard: '510000199001010002',
+      } as any,
+      1,
+      actor,
+    );
+
+    expect(tx.walletAccount.update).toHaveBeenCalledWith({
+      where: { userId: 11 },
+      data: {
+        availableBalance: 0,
+        earningFrozenBalance: 0,
+        depositBalance: 0,
+      },
+    });
+    expect(tx.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 11 },
+        data: expect.objectContaining({
+          staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
+          staffCooldownUntil: null,
+          staffExitedAt: null,
+          canWithdraw: true,
+        }),
+      }),
+    );
+  });
+});
+
+describe('UsersService staff exit actions', () => {
+  const actor = { userType: UserType.ADMIN, permissions: ['users:staff:page'] };
+
+  const createService = (prisma: any) => {
+    return new UsersService(
+      prisma,
+      {
+        ensureWalletAccount: jest.fn().mockResolvedValue(undefined),
+      } as any,
+      {
+        getConfig: jest.fn().mockResolvedValue({ tags: [], rules: [], defaultRule: { quitCoolingDays: 180 } }),
+        resolveMatchedRule: jest.fn().mockReturnValue({
+          quitCoolingDays: 180,
+          depositForfeitDays: 0,
+          depositAmount: 500,
+          firstWithdrawMinBalance: 1000,
+          firstWithdrawMinAcceptedDays: 15,
+        }),
+        normalizeUserTags: jest.fn((input: any) => (Array.isArray(input) ? input : [])),
+      } as any,
+    );
+  };
+
+  const exitedStaff = {
+    id: 21,
+    userType: UserType.STAFF,
+    staffEmploymentStatus: StaffEmploymentStatus.EXITED,
+    walletAccount: {
+      availableBalance: 0,
+      frozenBalance: 0,
+      depositBalance: 0,
+    },
+  };
+
+  it('rejects exit preview for exited staff', async () => {
+    const service = createService({
+      user: {
+        findUnique: jest.fn().mockResolvedValue(exitedStaff),
+      },
+    });
+
+    await expect(service.getStaffExitPreview(21, actor)).rejects.toThrow('该员工已退店，不支持重复退店或清退');
+  });
+
+  it('rejects repeated exit for exited staff', async () => {
+    const service = createService({
+      user: {
+        findUnique: jest.fn().mockResolvedValue(exitedStaff),
+      },
+      $transaction: jest.fn(),
+    });
+
+    await expect(service.exitStaffShop(21, { mode: 'RELEASE_TO_AVAILABLE' } as any, 1, actor)).rejects.toThrow(
+      '该员工已退店，不支持重复退店或清退',
+    );
+  });
+
+  it('rejects clear for exited staff', async () => {
+    const service = createService({
+      user: {
+        findUnique: jest.fn().mockResolvedValue(exitedStaff),
+      },
+      $transaction: jest.fn(),
+    });
+
+    await expect(service.clearStaffAssets(21, { remark: '重复清退' } as any, 1, actor)).rejects.toThrow(
+      '该员工已退店，不支持重复退店或清退',
+    );
+  });
+});

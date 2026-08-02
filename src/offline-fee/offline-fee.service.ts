@@ -1,5 +1,4 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { Cron } from '@nestjs/schedule';
 import { Prisma, PrismaClient, StaffEmploymentStatus, UserType } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { SystemConfigService } from '../system-config/system-config.service';
@@ -7,7 +6,6 @@ import { QueryOfflineFeeBillsDto } from './dto/query-offline-fee-bills.dto';
 import { ManualCreateOfflineFeeBillDto } from './dto/manual-create-offline-fee-bill.dto';
 import { UpdateOfflineFeeBillDto } from './dto/update-offline-fee-bill.dto';
 
-const BEIJING_TZ = 'Asia/Shanghai';
 const WITHDRAWAL_PARTIAL_MIN_PAY = 100;
 const BILLABLE_STAFF_EMPLOYMENT_STATUSES = [
   StaffEmploymentStatus.ACTIVE,
@@ -203,15 +201,6 @@ export class OfflineFeeService {
     }
 
     return { month, affected };
-  }
-
-  @Cron('0 5 1 * * *', { timeZone: BEIJING_TZ })
-  async cronGenerateLastMonthBills() {
-    const now = new Date();
-    if (now.getDate() !== 5) return;
-
-    const month = this.getPreviousMonth(now);
-    await this.generateBillsForMonth(month);
   }
 
   async listBills(query: QueryOfflineFeeBillsDto) {
@@ -454,6 +443,34 @@ export class OfflineFeeService {
     });
   }
 
+  async deleteWaivedBill(params: { billId: number; operatorId?: number }) {
+    const billId = Number(params.billId);
+    if (!Number.isFinite(billId) || billId <= 0) {
+      throw new BadRequestException('无效的线下费用账单 ID');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const bill = await (tx as any).offlineFeeBill.findUnique({
+        where: { id: billId },
+        include: {
+          payments: {
+            select: { id: true },
+          },
+        },
+      });
+      if (!bill) throw new NotFoundException('线下费用账单不存在');
+      if (String(bill.status || '') !== 'WAIVED') {
+        throw new BadRequestException('仅已废除的线下费用账单可以删除');
+      }
+      if (Array.isArray(bill.payments) && bill.payments.length > 0) {
+        throw new BadRequestException('账单存在缴费记录，不允许删除');
+      }
+
+      await (tx as any).offlineFeeBill.delete({ where: { id: billId } });
+      return { success: true, billId };
+    });
+  }
+
   async refundBillPayments(params: { billId: number; operatorId?: number; remark?: string }) {
     const billId = Number(params.billId);
     const remark = String(params.remark || '').trim() || '线下费用误扣回退';
@@ -538,15 +555,7 @@ export class OfflineFeeService {
       return null;
     }
 
-    // 仅在账单不存在时补生成，避免覆盖人工修订后的账单
-    const existing = await (db as any).offlineFeeBill.findUnique({
-      where: { userId_billMonth: { userId, billMonth } },
-    });
-
-    if (!existing) {
-      await this.generateBillsForMonthTx(db, billMonth);
-    }
-
+    // 线下费用账单改为管理员手动生成；提现前只检查已存在账单，不再自动补生成。
     return (db as any).offlineFeeBill.findUnique({
       where: { userId_billMonth: { userId, billMonth } },
     });

@@ -4,13 +4,17 @@ import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/c
 import { PrismaService } from '../prisma.service';
 import { PlayerWorkStatus, StaffEmploymentStatus } from '@prisma/client';
 import { isDispatchMonitoredStaff, isStaffUser } from '../common/utils/staff-role-scope.util';
+import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
   // 临时策略：仅保留手动离线/登录上线，不再因租约过期自动离线。
   private readonly autoOfflineDisabled = true;
 
-  constructor(private prisma: PrismaService) {
+  constructor(
+    private prisma: PrismaService,
+    private readonly staffRuleEngineService: StaffRuleEngineService,
+  ) {
     super({
       // 支持 SSE 场景：EventSource 无法自定义 Authorization header，允许 query.token 透传
       jwtFromRequest: ExtractJwt.fromExtractors([
@@ -62,8 +66,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       (createdAtDate && !Number.isNaN(createdAtDate.getTime()) ? createdAtDate : null);
     if (!baseDate) return user;
 
+    const staffRuleConfig = await this.staffRuleEngineService.getConfig();
+    const dormantFreezeDays = this.staffRuleEngineService.getDormantFreezeDays(staffRuleConfig, user?.staffTags);
     const freezeAt = new Date(baseDate);
-    freezeAt.setDate(freezeAt.getDate() + 7);
+    freezeAt.setDate(freezeAt.getDate() + dormantFreezeDays);
     if (freezeAt.getTime() > Date.now()) return user;
 
     await this.prisma.user.update({
@@ -101,6 +107,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         createdAt: true,
         staffEmploymentStatus: true,
         staffDormantFreezeBaseAt: true,
+        staffTags: true,
         name: true,
         workStatus: true,
         offlineJoinedAt: true,
@@ -118,7 +125,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     if (!user) throw new UnauthorizedException('用户不存在');
     user = await this.autoFreezeDormantStaffIfNeeded(user);
     if (!payload?.mini && isDispatchMonitoredStaff(user) && String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {
-      throw new ForbiddenException('用户活跃度太低，已经超过7天，账号已自动冻结，请联系管理超哥进行处理。');
+      const staffRuleConfig = await this.staffRuleEngineService.getConfig();
+      throw new ForbiddenException(
+        this.staffRuleEngineService.buildDormantFreezeMessage(this.staffRuleEngineService.getDormantFreezeDays(staffRuleConfig, user?.staffTags)),
+      );
     }
 
     const permissions = user.Role?.permissions?.map((p) => p.key) || [];

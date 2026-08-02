@@ -1635,6 +1635,17 @@ export class OrdersService {
         if (query.status) where.status = query.status as any;
         if (query.dispatcherId) where.dispatcherId = query.dispatcherId;
         if (query.customerGameId) where.customerGameId = { contains: query.customerGameId };
+        if (query.orderMonth) {
+            const monthText = String(query.orderMonth || '').trim();
+            const match = monthText.match(/^(\d{4})-(\d{2})$/);
+            if (match) {
+                const year = Number(match[1]);
+                const month = Number(match[2]);
+                const start = new Date(Date.UTC(year, month - 1, 1) - 8 * 60 * 60 * 1000);
+                const end = new Date(Date.UTC(year, month, 1) - 8 * 60 * 60 * 1000);
+                where.createdAt = { gte: start, lt: end };
+            }
+        }
         if (query.orderSource) where.orderSource = String(query.orderSource).trim();
         if (query.playerId) {
             where.dispatches = {
@@ -1668,7 +1679,7 @@ export class OrdersService {
             ];
         }
 
-        const [rows, total] = await Promise.all([
+        const [rows, total, amountSummary] = await Promise.all([
             this.prisma.order.findMany({
                 where,
                 skip,
@@ -1681,6 +1692,7 @@ export class OrdersService {
                     orderSource: true,
                     isPaid: true,
                     isGifted: true,
+                    receivableAmount: true,
                     paidAmount: true,
                     customerGameId: true,
                     createdAt: true,
@@ -1704,6 +1716,13 @@ export class OrdersService {
                 },
             } as any),
             this.prisma.order.count({ where }),
+            this.prisma.order.aggregate({
+                where,
+                _sum: {
+                    receivableAmount: true,
+                    paidAmount: true,
+                },
+            } as any),
         ]);
 
         const optionList = await this.getOrderSourceOptions();
@@ -1715,7 +1734,17 @@ export class OrdersService {
                 sourceLabelMap.get(String(row?.orderSource || '').trim() || 'CUSTOMER_SERVICE_MANUAL') || '客服手动派单',
         }));
 
-        return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+        return {
+            data,
+            total,
+            page,
+            limit,
+            totalPages: Math.ceil(total / limit),
+            summary: {
+                receivableAmount: this.toAmount2(Number((amountSummary as any)?._sum?.receivableAmount ?? 0)),
+                paidAmount: this.toAmount2(Number((amountSummary as any)?._sum?.paidAmount ?? 0)),
+            },
+        };
     }
 
 
