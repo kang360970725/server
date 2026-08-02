@@ -25,72 +25,89 @@ async function main() {
         name: string;
         module: string;
         type: PermissionType;
+        parentKey?: string;
     }> = [
-        // ====== PAGE 权限（路线B：页面访问权限）======
-        { key: 'system:role:page', name: '角色管理页', module: 'system', type: PermissionType.PAGE },
-        { key: 'system:permission:page', name: '权限管理页', module: 'system', type: PermissionType.PAGE },
-        { key: 'system:configs:page', name: '基础配置页', module: 'system', type: PermissionType.PAGE },
-        { key: 'system:app-versions:page', name: '版本迭代页', module: 'system', type: PermissionType.PAGE },
-        { key: 'system:announcements:page', name: '系统公告页', module: 'system', type: PermissionType.PAGE },
-        { key: 'system:questionnaires:page', name: '匿名问卷管理页', module: 'system', type: PermissionType.PAGE },
-        { key: 'system:duty-cs:page', name: '当班客服配置页', module: 'system', type: PermissionType.PAGE },
-        { key: 'system:notification-test-push:page', name: '测试推送中心页', module: 'system', type: PermissionType.PAGE },
-        { key: 'system:user-logs:page', name: '操作日志页', module: 'system', type: PermissionType.PAGE },
-        { key: 'system:game-project:page', name: '项目管理页', module: 'system', type: PermissionType.PAGE },
-        { key: 'miniapp:home:page', name: '小程序首页配置页', module: 'miniapp', type: PermissionType.PAGE },
-        { key: 'miniapp:protocols:page', name: '小程序协议维护页', module: 'miniapp', type: PermissionType.PAGE },
+        // ====== 权限树目录节点（只用于权限管理/角色配置定位，不直接参与业务判断）======
+        { key: 'menu:system', name: '系统管理', module: 'menu', type: PermissionType.PAGE },
+        { key: 'menu:goods', name: '商品管理', module: 'menu', type: PermissionType.PAGE },
+        { key: 'menu:miniapp-config', name: '小程序功能配置', module: 'menu', type: PermissionType.PAGE },
+        { key: 'menu:ops', name: '推广运营', module: 'menu', type: PermissionType.PAGE },
+        { key: 'menu:user-logs', name: '操作日志', module: 'menu', type: PermissionType.PAGE },
+        { key: 'menu:finance', name: '财务管理', module: 'menu', type: PermissionType.PAGE },
+        { key: 'menu:staff', name: '陪玩中心', module: 'menu', type: PermissionType.PAGE },
+        { key: 'menu:workbench', name: '客服工作台', module: 'menu', type: PermissionType.PAGE },
+        { key: 'menu:orders', name: '订单管理', module: 'menu', type: PermissionType.PAGE },
+        { key: 'menu:wallet', name: '钱包', module: 'menu', type: PermissionType.PAGE },
+        { key: 'menu:users', name: '用户管理', module: 'menu', type: PermissionType.PAGE },
+        { key: 'menu:staff-ratings', name: '评级管理', module: 'menu', type: PermissionType.PAGE },
+        { key: 'menu:performance', name: '业绩看板', module: 'menu', type: PermissionType.PAGE },
+        { key: 'menu:penalties', name: '罚单管理', module: 'menu', type: PermissionType.PAGE },
+        { key: 'menu:hidden', name: '隐藏入口/接口保护', module: 'menu', type: PermissionType.PAGE },
+        { key: 'menu:legacy-buttons', name: '历史按钮权限', module: 'menu', type: PermissionType.PAGE },
 
-        { key: 'users:member:page', name: '会员管理页', module: 'users', type: PermissionType.PAGE },
-        { key: 'users:staff:page', name: '打手管理页', module: 'users', type: PermissionType.PAGE },
-        { key: 'users:internal:page', name: '后台人员管理页', module: 'users', type: PermissionType.PAGE },
-        { key: 'staff-ratings:page', name: '评级管理页', module: 'staff-ratings', type: PermissionType.PAGE },
-
-        { key: 'orders:list:page', name: '订单管理页', module: 'orders', type: PermissionType.PAGE },
-        { key: 'orders:detail:page', name: '订单详情页', module: 'orders', type: PermissionType.PAGE },
-        { key: 'orders:complaints:page', name: '客诉工单页', module: 'orders', type: PermissionType.PAGE },
-        { key: 'orders:workbench:page', name: '客服工作台页', module: 'orders', type: PermissionType.PAGE },
-        { key: 'coupons:user-coupons:list', name: '用户券查询', module: 'coupons', type: PermissionType.PAGE },
-        { key: 'coupons:page', name: '优惠券管理页', module: 'coupons', type: PermissionType.PAGE },
-        { key: 'penalties:page', name: '罚单管理页', module: 'penalties', type: PermissionType.PAGE },
-        { key: 'penalties:ticket:create', name: '罚单开单权限', module: 'penalties', type: PermissionType.PAGE },
-
-        { key: 'staff:my-orders:page', name: '陪玩-我的接单页', module: 'staff', type: PermissionType.PAGE },
-        { key: 'staff:workbench:page', name: '陪玩-工作台页', module: 'staff', type: PermissionType.PAGE },
-        { key: 'staff:questionnaires:page', name: '陪玩-信息采集页', module: 'staff', type: PermissionType.PAGE },
-
-        { key: 'settlements:experience:page', name: '结算-体验单页', module: 'settlements', type: PermissionType.PAGE },
-        { key: 'settlements:monthly:page', name: '结算-月结页', module: 'settlements', type: PermissionType.PAGE },
-        { key: 'ops:promotion:page', name: '推广运营页', module: 'ops', type: PermissionType.PAGE },
-        { key: 'chest:page', name: '宝盒活动页', module: 'ops', type: PermissionType.PAGE },
-
-        { key: 'dashboard:revenue:page', name: '营业额看板页', module: 'dashboard', type: PermissionType.PAGE },
-        { key: 'performance:dashboard:view', name: '业绩看板页', module: 'performance', type: PermissionType.PAGE },
-        { key: 'performance:staff:view', name: '员工业绩查看', module: 'performance', type: PermissionType.PAGE },
-        { key: 'finance:dashboard:view', name: '财务看板页', module: 'finance', type: PermissionType.PAGE },
-        { key: 'finance:records:list', name: '财务明细页', module: 'finance', type: PermissionType.PAGE },
-        { key: 'finance:offline-fees:page', name: '线下费用页', module: 'finance', type: PermissionType.PAGE },
-        { key: 'finance:equipment-rental-fees:page', name: '设备租赁费页', module: 'finance', type: PermissionType.PAGE },
-        { key: 'wallet:overview:page', name: '钱包账户概览页', module: 'wallet', type: PermissionType.PAGE },
-        { key: 'wallet:member-levels:page', name: '会员等级页', module: 'wallet', type: PermissionType.PAGE },
-        { key: 'wallet:recharge-plans:page', name: '充值方案页', module: 'wallet', type: PermissionType.PAGE },
-        { key: 'wallet:transactions:page', name: '钱包流水明细页', module: 'wallet', type: PermissionType.PAGE },
-        { key: 'wallet:replay-preview:page', name: '钱包预核算页', module: 'wallet', type: PermissionType.PAGE },
-        { key: 'wallet:withdrawals:page', name: '提现审批页', module: 'wallet', type: PermissionType.PAGE },
+        // ====== PAGE 权限：与 system-admin 当前真实路由和后端保护接口对齐 ======
+        { key: 'system:role:page', name: '角色管理', module: 'system', type: PermissionType.PAGE, parentKey: 'menu:system' },
+        { key: 'system:permission:page', name: '权限管理', module: 'system', type: PermissionType.PAGE, parentKey: 'menu:system' },
+        { key: 'system:configs:page', name: '基础配置', module: 'system', type: PermissionType.PAGE, parentKey: 'menu:system' },
+        { key: 'system:app-versions:page', name: '版本迭代', module: 'system', type: PermissionType.PAGE, parentKey: 'menu:system' },
+        { key: 'system:announcements:page', name: '系统公告', module: 'system', type: PermissionType.PAGE, parentKey: 'menu:system' },
+        { key: 'system:questionnaires:page', name: '匿名问卷', module: 'system', type: PermissionType.PAGE, parentKey: 'menu:system' },
+        { key: 'system:duty-cs:page', name: '当班客服配置', module: 'system', type: PermissionType.PAGE, parentKey: 'menu:system' },
+        { key: 'system:notification-test-push:page', name: '测试推送中心', module: 'system', type: PermissionType.PAGE, parentKey: 'menu:system' },
+        { key: 'system:game-project:page', name: '商品列表/商品配置', module: 'goods', type: PermissionType.PAGE, parentKey: 'menu:goods' },
+        { key: 'miniapp:home:page', name: '首页配置', module: 'miniapp', type: PermissionType.PAGE, parentKey: 'menu:miniapp-config' },
+        { key: 'miniapp:protocols:page', name: '协议维护', module: 'miniapp', type: PermissionType.PAGE, parentKey: 'menu:miniapp-config' },
+        { key: 'ops:promotion:page', name: '宝盒活动/推广运营', module: 'ops', type: PermissionType.PAGE, parentKey: 'menu:ops' },
+        { key: 'chest:page', name: '宝盒活动兼容权限', module: 'ops', type: PermissionType.PAGE, parentKey: 'menu:ops' },
+        { key: 'coupons:page', name: '优惠券管理', module: 'coupons', type: PermissionType.PAGE, parentKey: 'menu:ops' },
+        { key: 'system:user-logs:page', name: '操作日志', module: 'system', type: PermissionType.PAGE, parentKey: 'menu:user-logs' },
+        { key: 'finance:dashboard:view', name: '财务看板', module: 'finance', type: PermissionType.PAGE, parentKey: 'menu:finance' },
+        { key: 'finance:records:list', name: '财务明细', module: 'finance', type: PermissionType.PAGE, parentKey: 'menu:finance' },
+        { key: 'finance:offline-fees:page', name: '线下费用', module: 'finance', type: PermissionType.PAGE, parentKey: 'menu:finance' },
+        { key: 'finance:equipment-rental-fees:page', name: '设备租赁费', module: 'finance', type: PermissionType.PAGE, parentKey: 'menu:finance' },
+        { key: 'staff:my-orders:page', name: '我的接单记录', module: 'staff', type: PermissionType.PAGE, parentKey: 'menu:staff' },
+        { key: 'staff:workbench:page', name: '打手工作台', module: 'staff', type: PermissionType.PAGE, parentKey: 'menu:staff' },
+        { key: 'staff:questionnaires:page', name: '信息采集', module: 'staff', type: PermissionType.PAGE, parentKey: 'menu:staff' },
+        { key: 'orders:workbench:page', name: '客服工作台', module: 'orders', type: PermissionType.PAGE, parentKey: 'menu:workbench' },
+        { key: 'orders:list:page', name: '订单列表', module: 'orders', type: PermissionType.PAGE, parentKey: 'menu:orders' },
+        { key: 'orders:complaints:page', name: '客诉工单', module: 'orders', type: PermissionType.PAGE, parentKey: 'menu:orders' },
+        { key: 'orders:detail:page', name: '订单详情', module: 'orders', type: PermissionType.PAGE, parentKey: 'menu:orders' },
+        { key: 'wallet:overview:page', name: '账户概览', module: 'wallet', type: PermissionType.PAGE, parentKey: 'menu:wallet' },
+        { key: 'wallet:member-levels:page', name: '会员等级', module: 'wallet', type: PermissionType.PAGE, parentKey: 'menu:wallet' },
+        { key: 'wallet:recharge-plans:page', name: '充值方案', module: 'wallet', type: PermissionType.PAGE, parentKey: 'menu:wallet' },
+        { key: 'wallet:transactions:page', name: '流水明细', module: 'wallet', type: PermissionType.PAGE, parentKey: 'menu:wallet' },
+        { key: 'wallet:replay-preview:page', name: '单用户预核算', module: 'wallet', type: PermissionType.PAGE, parentKey: 'menu:wallet' },
+        { key: 'wallet:withdrawals:page', name: '提现审批/提现记录', module: 'wallet', type: PermissionType.PAGE, parentKey: 'menu:wallet' },
+        { key: 'users:member:page', name: '会员管理', module: 'users', type: PermissionType.PAGE, parentKey: 'menu:users' },
+        { key: 'users:staff:page', name: '打手管理', module: 'users', type: PermissionType.PAGE, parentKey: 'menu:users' },
+        { key: 'users:internal:page', name: '后台人员', module: 'users', type: PermissionType.PAGE, parentKey: 'menu:users' },
+        { key: 'staff-ratings:page', name: '评级管理', module: 'staff-ratings', type: PermissionType.PAGE, parentKey: 'menu:staff-ratings' },
+        { key: 'performance:dashboard:view', name: '业绩看板', module: 'performance', type: PermissionType.PAGE, parentKey: 'menu:performance' },
+        { key: 'penalties:page', name: '罚单管理', module: 'penalties', type: PermissionType.PAGE, parentKey: 'menu:penalties' },
+        { key: 'penalties:ticket:create', name: '罚单开单', module: 'penalties', type: PermissionType.PAGE, parentKey: 'menu:penalties' },
+        { key: 'settlements:experience:page', name: '结算体验单接口', module: 'settlements', type: PermissionType.PAGE, parentKey: 'menu:hidden' },
+        { key: 'settlements:monthly:page', name: '结算月结接口', module: 'settlements', type: PermissionType.PAGE, parentKey: 'menu:hidden' },
+        { key: 'coupons:user-coupons:list', name: '用户券查询接口', module: 'coupons', type: PermissionType.PAGE, parentKey: 'menu:hidden' },
 
         // ====== 你原来的 BUTTON 权限（先保留，避免历史功能/按钮权限丢失）======
         // 项目管理
-        { key: 'project:read', name: '查看项目', module: 'project', type: PermissionType.BUTTON },
-        { key: 'project:write', name: '管理项目', module: 'project', type: PermissionType.BUTTON },
+        { key: 'project:read', name: '查看项目', module: 'project', type: PermissionType.BUTTON, parentKey: 'menu:legacy-buttons' },
+        { key: 'project:write', name: '管理项目', module: 'project', type: PermissionType.BUTTON, parentKey: 'menu:legacy-buttons' },
 
         // 用户管理
-        { key: 'user:read', name: '查看用户', module: 'user', type: PermissionType.BUTTON },
-        { key: 'user:write', name: '管理用户', module: 'user', type: PermissionType.BUTTON },
+        { key: 'user:read', name: '查看用户', module: 'user', type: PermissionType.BUTTON, parentKey: 'menu:legacy-buttons' },
+        { key: 'user:write', name: '管理用户', module: 'user', type: PermissionType.BUTTON, parentKey: 'menu:legacy-buttons' },
 
         // 订单（占位/旧按钮权限）
-        { key: 'order:read', name: '查看订单', module: 'order', type: PermissionType.BUTTON },
-        { key: 'order:write', name: '管理订单', module: 'order', type: PermissionType.BUTTON },
-        { key: 'order:settlement', name: '订单结算', module: 'order', type: PermissionType.BUTTON },
-        { key: 'order:payment', name: '订单打款', module: 'order', type: PermissionType.BUTTON },
+        { key: 'order:read', name: '查看订单', module: 'order', type: PermissionType.BUTTON, parentKey: 'menu:legacy-buttons' },
+        { key: 'order:write', name: '管理订单', module: 'order', type: PermissionType.BUTTON, parentKey: 'menu:legacy-buttons' },
+        { key: 'order:settlement', name: '订单结算', module: 'order', type: PermissionType.BUTTON, parentKey: 'menu:legacy-buttons' },
+        { key: 'order:payment', name: '订单打款', module: 'order', type: PermissionType.BUTTON, parentKey: 'menu:legacy-buttons' },
+    ];
+    const obsoletePagePermissionKeys = [
+        'users:page',
+        'dashboard:revenue:page',
+        'performance:staff:view',
     ];
 
     // upsert permissions
@@ -102,18 +119,39 @@ async function main() {
                 name: p.name,
                 module: p.module,
                 type: p.type,
+                parentId: null,
             },
             create: {
                 key: p.key,
                 name: p.name,
                 module: p.module,
                 type: p.type,
+                parentId: null,
             },
         });
         permissionRecords.push(rec);
     }
 
-    const permissionIds = permissionRecords.map((p) => p.id);
+    const permissionByKey = new Map(permissionRecords.map((p) => [p.key, p]));
+    for (const p of permissions) {
+        const rec = permissionByKey.get(p.key);
+        const parent = p.parentKey ? permissionByKey.get(p.parentKey) : null;
+        if (!rec) continue;
+        await prisma.permission.update({
+            where: { id: rec.id },
+            data: { parentId: parent?.id ?? null },
+        });
+    }
+
+    await prisma.permission.deleteMany({
+        where: {
+            key: { in: obsoletePagePermissionKeys },
+        },
+    });
+
+    const permissionIds = permissionRecords
+        .filter((p) => !p.key.startsWith('menu:'))
+        .map((p) => p.id);
 
     /**
      * 2) 角色（种子）

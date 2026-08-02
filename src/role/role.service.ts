@@ -5,6 +5,21 @@ import { PrismaService } from '../prisma/prisma.service';
 export class RoleService {
     constructor(private prisma: PrismaService) {}
 
+    private async normalizePermissionIds(permissionIds?: number[]) {
+        const ids = Array.from(
+            new Set((permissionIds || []).map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0)),
+        );
+        if (!ids.length) return [];
+        const permissions = await this.prisma.permission.findMany({
+            where: {
+                id: { in: ids },
+                NOT: { key: { startsWith: 'menu:' } },
+            },
+            select: { id: true },
+        });
+        return permissions.map((p) => p.id);
+    }
+
     async getRoles() {
         return this.prisma.role.findMany({
             include: {
@@ -21,12 +36,13 @@ export class RoleService {
         description?: string;
         permissionIds: number[];
     }) {
+        const permissionIds = await this.normalizePermissionIds(data.permissionIds);
         return this.prisma.role.create({
             data: {
                 name: data.name,
                 description: data.description,
                 permissions: {
-                    connect: data.permissionIds.map(id => ({ id }))
+                    connect: permissionIds.map(id => ({ id }))
                 }
             },
             include: { permissions: true }
@@ -43,13 +59,14 @@ export class RoleService {
 
         // 移除 permissionIds，只保留需要更新的字段
         const { permissionIds, ...updateData } = data;
+        const normalizedPermissionIds = permissionIds ? await this.normalizePermissionIds(permissionIds) : undefined;
 
         return this.prisma.role.update({
             where: { id },
             data: {
                 ...updateData,
-                permissions: permissionIds ? {
-                    set: permissionIds.map(id => ({ id }))
+                permissions: normalizedPermissionIds ? {
+                    set: normalizedPermissionIds.map(id => ({ id }))
                 } : undefined
             },
             include: { permissions: true }

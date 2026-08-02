@@ -86,7 +86,9 @@
 - 权限源在 `Permission.key`，角色通过 `Role.permissions` 绑定权限；登录态会把权限 key 下发给 `system-admin`。
 - 页面级权限使用 `*:page` 或 `*:view/list` key，并由 `system-admin/src/access.ts` 映射成 `canView*`。
 - 后端接口通过 `@Permissions(...)` 做同域保护；历史上部分页面复用 `system:role:page` 或 `finance:records:list`，新增岗位应优先使用细分权限，旧权限只作为兼容兜底。
-- `prisma/seed.ts` 是权限树基线；新增页面权限必须写入 seed，否则新岗位在角色管理里无法分配。
+- `prisma/seed.ts` 是权限树基线；`menu:*` 为目录节点，真实授权节点挂在对应菜单父级下。新增页面权限必须写入 seed 并设置 `parentKey`，否则新岗位在角色管理里无法分配，权限管理也看不出页面位置。
+- 生产权限树同步已通过 Prisma migration 执行：`20260803013000_sync_permission_tree`。发布环境需要设置 `PRISMA_MIGRATE_DEPLOY=1`，由 `docker-entrypoint.sh` 在启动时执行 `npx prisma migrate deploy`。
+- 当前已清理的旧页面权限：`users:page`、`dashboard:revenue:page`、`performance:staff:view`。`settlements:*`、`coupons:user-coupons:list` 虽无独立菜单，但后端仍使用，挂在“隐藏入口/接口保护”下保留。
 - `user-logs` 属于敏感审计数据，必须使用 `system:user-logs:page` 或历史系统管理员权限访问。
 - 钱包域需要区分“本人钱包”和“后台管理钱包”：有效员工可访问自己的钱包概览/流水/提现申请；查询他人钱包流水、提现审批、人工保证金充值和保证金流水必须要求钱包/财务管理权限，避免普通登录用户通过 `userId` 参数越权。
 
