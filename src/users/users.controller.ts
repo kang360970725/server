@@ -10,6 +10,7 @@ import {
   ParseIntPipe,
   UseGuards,
   Request,
+  ForbiddenException,
 } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { MemberService } from '../member/member.service';
@@ -40,6 +41,12 @@ export class UsersController {
     'users:staff:page',
     'users:internal:page',
   ] as const;
+
+  private assertSuperAdmin(req: any) {
+    if (req?.user?.userType !== UserType.SUPER_ADMIN) {
+      throw new ForbiddenException('当前操作仅超级管理员可执行');
+    }
+  }
 
   @Post()
   @UseGuards(PermissionsGuard)
@@ -105,7 +112,8 @@ export class UsersController {
   @Post(':id/member-game-cards')
   @UseGuards(PermissionsGuard)
   @Permissions(...UsersController.userManagePermissions)
-  createMemberGameCard(@Param('id', ParseIntPipe) id: number, @Body() body: any) {
+  createMemberGameCard(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Request() req: any) {
+    this.assertSuperAdmin(req);
     return this.memberService.createAdminGameCard(id, body || {});
   }
 
@@ -115,7 +123,9 @@ export class UsersController {
   setMemberGameCardPrimary(
       @Param('id', ParseIntPipe) id: number,
       @Param('cardId', ParseIntPipe) cardId: number,
+      @Request() req: any,
   ) {
+    this.assertSuperAdmin(req);
     return this.memberService.setAdminGameCardPrimary(id, cardId);
   }
 
@@ -125,7 +135,9 @@ export class UsersController {
   deleteMemberGameCard(
       @Param('id', ParseIntPipe) id: number,
       @Param('cardId', ParseIntPipe) cardId: number,
+      @Request() req: any,
   ) {
+    this.assertSuperAdmin(req);
     return this.memberService.deleteAdminGameCard(id, cardId);
   }
 

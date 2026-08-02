@@ -233,6 +233,18 @@ export class UsersService {
   }
 
   private getActorAllowedUserTypes(actor?: { userType?: UserType; permissions?: string[] }): UserType[] | null {
+    if (actor?.userType === UserType.SUPER_ADMIN) {
+      return [
+        UserType.REGISTERED_USER,
+        UserType.STAFF,
+        UserType.SUPER_ADMIN,
+        UserType.ADMIN,
+        UserType.CUSTOMER_SERVICE,
+        UserType.OPERATION,
+        UserType.FINANCE,
+      ];
+    }
+
     const permissions = Array.isArray(actor?.permissions) ? actor!.permissions! : [];
     const allowed = new Set<UserType>();
 
@@ -271,6 +283,33 @@ export class UsersService {
     const allowed = this.getActorAllowedUserTypes(actor);
     if (!targetUserType || !allowed.includes(targetUserType)) {
       throw new ForbiddenException('无权访问该用户');
+    }
+  }
+
+  private isSuperAdmin(actor?: { userType?: UserType }) {
+    return actor?.userType === UserType.SUPER_ADMIN;
+  }
+
+  private hasActorPermission(actor: { permissions?: string[] } | undefined, key: string) {
+    return Array.isArray(actor?.permissions) && actor!.permissions!.includes(key);
+  }
+
+  private assertCanManageStaffUser(
+    actor: { userType?: UserType; permissions?: string[] } | undefined,
+    targetUserType?: UserType,
+  ) {
+    if (this.isSuperAdmin(actor)) return;
+
+    if (targetUserType === UserType.STAFF && this.hasActorPermission(actor, 'users:staff:page')) {
+      return;
+    }
+
+    throw new ForbiddenException('当前角色无权操作打手员工');
+  }
+
+  private assertSuperAdmin(actor?: { userType?: UserType }) {
+    if (!this.isSuperAdmin(actor)) {
+      throw new ForbiddenException('当前操作仅超级管理员可执行');
     }
   }
 
@@ -374,6 +413,7 @@ export class UsersService {
     const { phone, password, userType = UserType.REGISTERED_USER, forceRejoin, ...rest } = createUserDto;
     const normalizedStaffTags = this.normalizeStaffTags(createUserDto.staffTags);
     this.assertActorCanAccessUser(actor, userType);
+    this.assertSuperAdmin(actor);
     const normalizedPhone = this.normalizeIdentityText(phone);
     const normalizedRealName = this.normalizeIdentityText(createUserDto.realName || createUserDto.name);
     const normalizedIdCard = this.normalizeIdentityText(createUserDto.idCard);
@@ -1028,6 +1068,7 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     this.assertActorCanAccessUser(actor, oldUser.userType);
+    this.assertCanManageStaffUser(actor, oldUser.userType);
 
     if (oldUser.userType !== UserType.STAFF) {
       throw new BadRequestException('仅员工支持退店操作');
@@ -1188,6 +1229,7 @@ export class UsersService {
 
     if (!oldUser) throw new NotFoundException('用户不存在');
     this.assertActorCanAccessUser(actor, oldUser.userType);
+    this.assertCanManageStaffUser(actor, oldUser.userType);
     if (oldUser.userType !== UserType.STAFF) {
       throw new BadRequestException('仅员工支持清退操作');
     }
@@ -1389,7 +1431,12 @@ export class UsersService {
     return this.decorateUserWithStaffRule(user, await this.staffRuleEngineService.getConfig());
   }
 
-  async update(id: number, updateUserDto: UpdateUserDto, operatorId?: number, actor?: { userType?: UserType }) {
+  async update(
+    id: number,
+    updateUserDto: UpdateUserDto,
+    operatorId?: number,
+    actor?: { userType?: UserType; permissions?: string[] },
+  ) {
 
     const oldUser = await this.prisma.user.findUnique({
       where: { id },
@@ -1400,6 +1447,16 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     this.assertActorCanAccessUser(actor, oldUser.userType);
+    if (!this.isSuperAdmin(actor)) {
+      this.assertCanManageStaffUser(actor, oldUser.userType);
+      const blockedFields = ['roleId', 'userType', 'password', 'needResetPwd'];
+      const touchedBlockedFields = blockedFields.filter((field) =>
+        Object.prototype.hasOwnProperty.call(updateUserDto as any, field),
+      );
+      if (touchedBlockedFields.length) {
+        throw new ForbiddenException('当前角色无权修改用户身份、角色或密码');
+      }
+    }
 
     if (updateUserDto.password) {
       updateUserDto.password = await bcrypt.hash(updateUserDto.password, 10);
@@ -1694,7 +1751,12 @@ export class UsersService {
     return changes.length > 0 ? `修改了: ${changes.join('; ')}` : '未修改任何字段';
   }
 
-  async changeLevel(id: number, changeLevelDto: ChangeLevelDto, operatorId: number, actor?: { userType?: UserType }) {
+  async changeLevel(
+    id: number,
+    changeLevelDto: ChangeLevelDto,
+    operatorId: number,
+    actor?: { userType?: UserType; permissions?: string[] },
+  ) {
     const user = await this.prisma.user.findUnique({
       where: { id },
       include: this.getUserIncludeFields(), // 改为使用 include
@@ -1704,6 +1766,7 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     this.assertActorCanAccessUser(actor, user.userType);
+    this.assertCanManageStaffUser(actor, user.userType);
 
     // 只有员工才能调整等级
     if (user.userType !== 'STAFF') {
@@ -1749,6 +1812,7 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     this.assertActorCanAccessUser(actor, user.userType);
+    this.assertSuperAdmin(actor);
 
     // 生成随机密码
     const tempPassword = Math.random().toString(36).slice(-8);
@@ -1796,6 +1860,7 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     this.assertActorCanAccessUser(actor, user.userType);
+    this.assertSuperAdmin(actor);
 
     if (!user.withdrawQrCodeKey) {
       throw new BadRequestException('该用户当前没有已上传的收款码');
@@ -1842,6 +1907,7 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     this.assertActorCanAccessUser(actor, user.userType);
+    this.assertSuperAdmin(actor);
 
     await this.prisma.user.delete({
       where: { id },

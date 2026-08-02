@@ -1,9 +1,15 @@
-import { Body, Controller, Get, Param, ParseIntPipe, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Param, ParseIntPipe, Patch, Post, Query, Req } from '@nestjs/common';
 import { MemberService } from './member.service';
 
 @Controller('member')
 export class MemberController {
   constructor(private readonly memberService: MemberService) {}
+
+  private assertSuperAdmin(req: any) {
+    if (req?.user?.userType !== 'SUPER_ADMIN') {
+      throw new ForbiddenException('当前操作仅超级管理员可执行');
+    }
+  }
 
   @Get('recharge-plans')
   listRechargePlans() {
@@ -50,7 +56,8 @@ export class MemberController {
   }
 
   @Post('growth/adjust')
-  adjustGrowth(@Body() body: any) {
+  adjustGrowth(@Req() req: any, @Body() body: any) {
+    this.assertSuperAdmin(req);
     return this.memberService.adjustGrowth({
       userId: Number(body?.userId || 0),
       growthValue: Number(body?.growthValue || 0),
@@ -60,6 +67,7 @@ export class MemberController {
 
   @Post('recharge/manual')
   manualRecharge(@Req() req: any, @Body() body: any) {
+    this.assertSuperAdmin(req);
     return this.memberService.manualRecharge({
       userId: Number(body?.userId || 0),
       planId: body?.planId != null && body?.planId !== '' ? Number(body.planId) : undefined,
