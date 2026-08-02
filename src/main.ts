@@ -23,8 +23,7 @@ async function bootstrap() {
 
   // ✅ 线上默认域名白名单（可用 CORS_ORIGINS 追加/覆盖）
   const defaultProdWhitelist = [
-    'http://pc.welax-tech.com',
-    'https://pc.welax-tech.com',
+    'https://admin.lmsdclub.cn',
     'https://lmsdclub.cn',
     'https://www.lmsdclub.cn',
     'https://pc.lmsdclub.cn',

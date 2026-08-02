@@ -92,9 +92,10 @@
 ## 环境与域名
 
 - 生产后端 API 域名：`https://api.lmsdclub.cn`。
+- 管理后台访问域名：`https://admin.lmsdclub.cn`。
 - 管理后台生产请求域名在 `system-admin/config/config.ts` 注入，同时 `system-admin/src/app.tsx` 和 `system-admin/src/services/api.ts` 会读取 `process.env.API_BASE`。
 - 小程序线上 API 基础地址在 `client-miniapp/src/services/config.ts` 的 `ONLINE_BASE_URL`。
-- 服务端 CORS 默认白名单在 `src/main.ts`；线上也可通过 `CORS_ORIGINS` 精确覆盖。
+- 服务端 CORS 默认白名单在 `src/main.ts`，包含 `https://admin.lmsdclub.cn`、`https://lmsdclub.cn`、`https://www.lmsdclub.cn`、`https://pc.lmsdclub.cn`；线上也可通过 `CORS_ORIGINS` 精确覆盖。
 
 ## 核心业务流
 
