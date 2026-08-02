@@ -1,4 +1,4 @@
-import { Controller,Body, Req, Get, Query,Post, Request, UseGuards, UseInterceptors, UploadedFile } from '@nestjs/common';
+import { Controller, Body, Req, Get, Query, Post, Request, UseGuards, UseInterceptors, UploadedFile, ForbiddenException } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { WalletService } from './wallet.service';
 import { QueryWalletTransactionsDto } from './dto/query-wallet-transactions.dto';
@@ -9,6 +9,15 @@ import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 
 const WITHDRAWALS_PAGE = 'wallet:withdrawals:page';
+const WALLET_TRANSACTIONS_PAGE = 'wallet:transactions:page';
+const FINANCE_RECORDS_PAGE = 'finance:records:list';
+
+function hasAnyPermission(user: any, permissions: string[]) {
+    const roleName = String(user?.roleName || '').trim().toUpperCase();
+    if (roleName === 'FINANCE_ADMIN') return true;
+    const userPermissions = Array.isArray(user?.permissions) ? user.permissions : [];
+    return permissions.some((p) => userPermissions.includes(p));
+}
 
 /**
  * Wallet Controller（V0.2）
@@ -42,6 +51,9 @@ export class WalletController {
 
         // 如果传了 userId 就查指定用户
         const userId = query.userId ? Number(query.userId) : loginUserId;
+        if (userId !== loginUserId && !hasAnyPermission(req?.user, [WALLET_TRANSACTIONS_PAGE, WITHDRAWALS_PAGE, FINANCE_RECORDS_PAGE])) {
+            throw new ForbiddenException('无权查询其他用户钱包流水');
+        }
 
         return this.walletService.listMyTransactions(userId, query);
     }
@@ -129,6 +141,8 @@ export class WalletController {
     }
 
     @Post('deposit/manual')
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE, FINANCE_RECORDS_PAGE)
     async manualDeposit(@Body() body: any, @Req() req: any) {
 
         const operatorId = req.user?.userId;
@@ -145,6 +159,8 @@ export class WalletController {
 
 
     @Get('deposit-transactions')
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE, FINANCE_RECORDS_PAGE)
     async depositTransactions(@Query() query: any) {
 
         const page = Math.max(1, Number(query.page ?? 1));
