@@ -90,6 +90,7 @@
 - 生产权限树同步已通过 Prisma migration 执行：`20260803013000_sync_permission_tree`。发布环境需要设置 `PRISMA_MIGRATE_DEPLOY=1`，由 `docker-entrypoint.sh` 在启动时执行 `npx prisma migrate deploy`。
 - 当前已清理的旧页面权限：`users:page`、`dashboard:revenue:page`、`performance:staff:view`。`settlements:*`、`coupons:user-coupons:list` 虽无独立菜单，但后端仍使用，挂在“隐藏入口/接口保护”下保留。
 - 用户管理页入口按 `users:member:page`、`users:staff:page`、`users:internal:page` 精确展示；普通 `ADMIN` 不再自动旁路看到全部用户域。“全部用户”入口默认隐藏。按钮权限未细分前，`SUPER_ADMIN` 可执行全部用户/会员变更；拥有 `users:staff:page` 的角色（如店长）可在打手管理中编辑 STAFF 基础资料、升降级、退店/清退，但不可分配角色、重置密码、删除用户、创建用户或操作会员资产。后端 `UsersService` 必须同步校验目标用户类型为 STAFF。
+- 打手管理顶部员工资金统计属于敏感汇总，admin 端只允许 `SUPER_ADMIN` 展示和加载，店长等普通打手管理角色不可见。
 - 待修复：当前存在 `User.userType = SUPER_ADMIN` 与 `Role.name = FINANCE_ADMIN` 语义混用。`FINANCE_ADMIN` 在 seed 中被描述为“超级管理员”，且 `PermissionsGuard` 对该角色全局放行，但部分高危接口只认 `userType === SUPER_ADMIN`，会造成“页面能进、接口 403”或“身份超管但缺菜单”的不一致。下次权限开发优先修复：新增/明确 `SUPER_ADMIN` 角色，`FINANCE_ADMIN` 回归财务管理员，移除 `FINANCE_ADMIN` 全局旁路，并用新 Prisma migration 随发布修正角色数据。
 - `user-logs` 属于敏感审计数据，必须使用 `system:user-logs:page` 或历史系统管理员权限访问。
 - 钱包域需要区分“本人钱包”和“后台管理钱包”：有效员工可访问自己的钱包概览/流水/提现申请；查询他人钱包流水、提现审批、人工保证金充值和保证金流水必须要求钱包/财务管理权限，避免普通登录用户通过 `userId` 参数越权。
