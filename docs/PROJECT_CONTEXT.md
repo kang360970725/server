@@ -89,6 +89,13 @@
 - `prisma/seed.ts` 是权限树基线；新增页面权限必须写入 seed，否则新岗位在角色管理里无法分配。
 - `user-logs` 属于敏感审计数据，必须使用 `system:user-logs:page` 或历史系统管理员权限访问。
 
+## 环境与域名
+
+- 生产后端 API 域名：`https://api.lmsdclub.cn`。
+- 管理后台生产请求域名在 `system-admin/config/config.ts` 注入，同时 `system-admin/src/app.tsx` 和 `system-admin/src/services/api.ts` 会读取 `process.env.API_BASE`。
+- 小程序线上 API 基础地址在 `client-miniapp/src/services/config.ts` 的 `ONLINE_BASE_URL`。
+- 服务端 CORS 默认白名单在 `src/main.ts`；线上也可通过 `CORS_ORIGINS` 精确覆盖。
+
 ## 核心业务流
 
 ### 订单与派单

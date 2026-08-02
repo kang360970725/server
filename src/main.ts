@@ -25,6 +25,9 @@ async function bootstrap() {
   const defaultProdWhitelist = [
     'http://pc.welax-tech.com',
     'https://pc.welax-tech.com',
+    'https://lmsdclub.cn',
+    'https://www.lmsdclub.cn',
+    'https://pc.lmsdclub.cn',
   ];
 
   // ✅ 开发默认允许的前端来源（再额外放开 localhost 任意端口）
