@@ -13,7 +13,8 @@ export function isDispatchMonitoredStaff(user: any): boolean {
   if (!roleName) return true;
 
   const exemptRoleNames = [
-    'FINANCE_ADMIN',
+    'SUPER_ADMIN',
+    'FINANCE_MANAGER',
     'CS_MANAGER',
   ];
   if (exemptRoleNames.includes(roleName)) return false;

@@ -23,9 +23,9 @@ export class PermissionsGuard implements CanActivate {
 
         const userType = String(user?.userType || '').trim().toUpperCase();
         const roleName = String(user?.roleName || '').trim().toUpperCase();
-        const isFinanceAdmin = roleName === 'FINANCE_ADMIN';
+        const isSuperAdmin = userType === 'SUPER_ADMIN' || roleName === 'SUPER_ADMIN';
 
-        if (isFinanceAdmin) return true;
+        if (isSuperAdmin) return true;
 
         const userPermissions = user?.permissions || [];
         const ok = requiredPermissions.some((p) => userPermissions.includes(p));

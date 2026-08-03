@@ -9,7 +9,9 @@ export class MemberController {
   private assertButtonPermission(req: any, key: string, message = '当前角色无权执行该操作') {
     const user = req?.user || {};
     const permissions = Array.isArray(user?.permissions) ? user.permissions : [];
-    if (user?.userType === 'SUPER_ADMIN' || permissions.includes(key)) {
+    const userType = String(user?.userType || '').trim().toUpperCase();
+    const roleName = String(user?.roleName || '').trim().toUpperCase();
+    if (userType === 'SUPER_ADMIN' || roleName === 'SUPER_ADMIN' || permissions.includes(key)) {
       return;
     }
     throw new ForbiddenException(message);

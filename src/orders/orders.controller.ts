@@ -36,11 +36,12 @@ export class OrdersController {
     ) {}
 
     private assertCustomerServiceOrFinanceAdmin(user: any) {
-      const userType = String(user?.userType || '').trim();
+      const userType = String(user?.userType || '').trim().toUpperCase();
       const roleName = String(user?.roleName || '').trim().toUpperCase();
-      const isFinanceAdminRole = roleName === 'FINANCE_ADMIN';
+      const isSuperAdmin = userType === 'SUPER_ADMIN' || roleName === 'SUPER_ADMIN';
+      const isFinanceRole = userType === 'FINANCE' || roleName === 'FINANCE_MANAGER' || roleName.includes('财务');
       const isCustomerServiceRole = roleName.includes('客服');
-      if (userType !== 'CUSTOMER_SERVICE' && !isFinanceAdminRole && !isCustomerServiceRole) {
+      if (!isSuperAdmin && userType !== 'CUSTOMER_SERVICE' && !isFinanceRole && !isCustomerServiceRole) {
         throw new ForbiddenException('仅客服或财务管理员可操作');
       }
     }
@@ -51,8 +52,9 @@ export class OrdersController {
 
     private assertButtonPermission(user: any, key: string, message = '当前角色无权执行该操作') {
       const userType = String(user?.userType || '').trim().toUpperCase();
+      const roleName = String(user?.roleName || '').trim().toUpperCase();
       const permissions = Array.isArray(user?.permissions) ? user.permissions : [];
-      if (userType === 'SUPER_ADMIN' || permissions.includes(key)) return;
+      if (userType === 'SUPER_ADMIN' || roleName === 'SUPER_ADMIN' || permissions.includes(key)) return;
       throw new ForbiddenException(message);
     }
 

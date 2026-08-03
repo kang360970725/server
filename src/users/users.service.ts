@@ -15,6 +15,8 @@ import { isDispatchMonitoredStaff } from '../common/utils/staff-role-scope.util'
 @Injectable()
 export class UsersService {
   // 临时屏蔽自动离线，仅保留手动离线/登录上线。
+  private static readonly defaultStaffRoleId = 3;
+  private static readonly defaultStaffRoleName = '陪玩';
   private readonly autoOfflineDisabled = true;
   private readonly staffExitCooldownDays = 180;
   private readonly logger = new Logger(UsersService.name);
@@ -232,8 +234,8 @@ export class UsersService {
     return result;
   }
 
-  private getActorAllowedUserTypes(actor?: { userType?: UserType; permissions?: string[] }): UserType[] | null {
-    if (actor?.userType === UserType.SUPER_ADMIN) {
+  private getActorAllowedUserTypes(actor?: { userType?: UserType; roleName?: string; permissions?: string[] }): UserType[] | null {
+    if (this.isSuperAdmin(actor)) {
       return [
         UserType.REGISTERED_USER,
         UserType.STAFF,
@@ -277,7 +279,7 @@ export class UsersService {
   }
 
   private assertActorCanAccessUser(
-    actor: { userType?: UserType; permissions?: string[] } | undefined,
+    actor: { userType?: UserType; roleName?: string; permissions?: string[] } | undefined,
     targetUserType?: UserType,
   ) {
     const allowed = this.getActorAllowedUserTypes(actor);
@@ -286,8 +288,9 @@ export class UsersService {
     }
   }
 
-  private isSuperAdmin(actor?: { userType?: UserType }) {
-    return actor?.userType === UserType.SUPER_ADMIN;
+  private isSuperAdmin(actor?: { userType?: UserType; roleName?: string }) {
+    return actor?.userType === UserType.SUPER_ADMIN
+      || String(actor?.roleName || '').trim().toUpperCase() === 'SUPER_ADMIN';
   }
 
   private hasActorPermission(actor: { permissions?: string[] } | undefined, key: string) {
@@ -295,7 +298,7 @@ export class UsersService {
   }
 
   private assertActorPermission(
-    actor: { userType?: UserType; permissions?: string[] } | undefined,
+    actor: { userType?: UserType; roleName?: string; permissions?: string[] } | undefined,
     key: string,
     message = '当前角色无权执行该操作',
   ) {
@@ -378,6 +381,44 @@ export class UsersService {
     return String(value || '').trim();
   }
 
+  private assertStaffTagsRequired(tags: string[]) {
+    if (!tags.length) {
+      throw new BadRequestException('新增或重新入店员工必须选择员工标签');
+    }
+  }
+
+  private async resolveDefaultStaffRoleId(tx?: any) {
+    const client = tx || this.prisma;
+    const roleById = await client.role.findUnique({
+      where: { id: UsersService.defaultStaffRoleId },
+      select: { id: true, name: true },
+    });
+    if (roleById?.name === UsersService.defaultStaffRoleName) return roleById.id;
+
+    const roleByName = await client.role.findUnique({
+      where: { name: UsersService.defaultStaffRoleName },
+      select: { id: true },
+    });
+    if (roleByName) return roleByName.id;
+
+    throw new BadRequestException('默认陪玩角色不存在，请先配置角色：陪玩');
+  }
+
+  private assertNonSuperStaffUpdatePayload(updateUserDto: UpdateUserDto) {
+    const allowedFields = new Set(['staffEmploymentStatus']);
+    const blockedFields = Object.keys(updateUserDto as any).filter((field) => !allowedFields.has(field));
+    if (blockedFields.length) {
+      throw new ForbiddenException('当前角色仅允许修改员工在职状态');
+    }
+    const nextStatus = (updateUserDto as any)?.staffEmploymentStatus;
+    if (
+      nextStatus &&
+      ![StaffEmploymentStatus.ACTIVE, StaffEmploymentStatus.FROZEN].includes(nextStatus)
+    ) {
+      throw new ForbiddenException('退店和清退必须通过对应操作执行');
+    }
+  }
+
   private getStaffRejoinCooldownUntil(user: any, config: any) {
     if (user?.staffCooldownUntil) {
       const stored = new Date(user.staffCooldownUntil);
@@ -453,7 +494,7 @@ export class UsersService {
   async create(
     createUserDto: CreateUserDto,
     operatorId?: number,
-    actor?: { userType?: UserType; permissions?: string[] },
+    actor?: { userType?: UserType; roleName?: string; permissions?: string[] },
   ) {
     const { phone, password, userType = UserType.REGISTERED_USER, forceRejoin, ...rest } = createUserDto;
     const normalizedStaffTags = this.normalizeStaffTags(createUserDto.staffTags);
@@ -466,11 +507,36 @@ export class UsersService {
       workMode: createUserDto.workMode,
       offlineJoinedAt: createUserDto.offlineJoinedAt,
     });
+    const isTargetStaff = userType === UserType.STAFF;
+    const defaultStaffRoleId = isTargetStaff ? await this.resolveDefaultStaffRoleId() : undefined;
+    const requestedRoleId = Number((createUserDto as any)?.roleId || 0);
+    const staffRoleId = isTargetStaff
+      ? this.isSuperAdmin(actor) && requestedRoleId > 0
+        ? requestedRoleId
+        : defaultStaffRoleId
+      : requestedRoleId > 0
+        ? requestedRoleId
+        : undefined;
+    const restData: any = { ...rest };
+    delete restData.roleId;
+    delete restData.balance;
+    delete restData.depositLimit;
+    delete restData.canWithdraw;
+    delete restData.staffTags;
+    delete restData.workMode;
+    delete restData.offlineJoinedAt;
+    if (isTargetStaff && !this.isSuperAdmin(actor)) {
+      delete restData.level;
+      delete restData.status;
+      delete restData.needResetPwd;
+      delete restData.staffEmploymentStatus;
+    }
 
     if (userType === UserType.STAFF) {
       if (!normalizedPhone) throw new BadRequestException('员工手机号不能为空');
       if (!normalizedRealName) throw new BadRequestException('员工姓名不能为空');
       if (!normalizedIdCard) throw new BadRequestException('员工身份证号不能为空');
+      this.assertStaffTagsRequired(normalizedStaffTags);
 
       const phoneOwner = await this.prisma.user.findUnique({ where: { phone: normalizedPhone } });
       if (phoneOwner && phoneOwner.userType !== UserType.STAFF) {
@@ -598,13 +664,14 @@ export class UsersService {
           return tx.user.update({
             where: { id: existingStaff.id },
             data: {
-              ...rest,
+              ...restData,
               phone: normalizedPhone,
               password: hashedPassword,
               name: createUserDto.name,
               realName: normalizedRealName,
               idCard: normalizedIdCard,
               userType,
+              roleId: staffRoleId,
               needResetPwd: true,
               staffTags: normalizedStaffTags,
               staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
@@ -652,8 +719,10 @@ export class UsersService {
           phone: normalizedPhone,
           password: hashedPassword,
           userType,
+          ...(staffRoleId ? { roleId: staffRoleId } : {}),
           needResetPwd: userType !== UserType.REGISTERED_USER,// 员工首次登录需要重置密码
-          ...rest,
+          ...restData,
+          ...(isTargetStaff ? { status: UserStatus.ACTIVE, staffEmploymentStatus: StaffEmploymentStatus.ACTIVE } : {}),
           staffTags: normalizedStaffTags,
           ...workModePayload,
         },
@@ -1480,7 +1549,7 @@ export class UsersService {
     id: number,
     updateUserDto: UpdateUserDto,
     operatorId?: number,
-    actor?: { userType?: UserType; permissions?: string[] },
+    actor?: { userType?: UserType; roleName?: string; permissions?: string[] },
   ) {
 
     const oldUser = await this.prisma.user.findUnique({
@@ -1493,6 +1562,10 @@ export class UsersService {
     }
     this.assertActorCanAccessUser(actor, oldUser.userType);
     if (!this.isSuperAdmin(actor)) {
+      if (oldUser.userType === UserType.STAFF) {
+        this.assertNonSuperStaffUpdatePayload(updateUserDto);
+        this.assertUserButtonPermission(actor, oldUser.userType, 'edit', '当前角色无权编辑该类型用户资料');
+      } else {
       const hasRolePatch = Object.prototype.hasOwnProperty.call(updateUserDto as any, 'roleId');
       const blockedFields = ['userType', 'password', 'needResetPwd'];
       const touchedBlockedFields = blockedFields.filter((field) =>
@@ -1507,6 +1580,7 @@ export class UsersService {
       const hasProfilePatch = Object.keys(updateUserDto as any).some((field) => field !== 'roleId');
       if (hasProfilePatch) {
         this.assertUserButtonPermission(actor, oldUser.userType, 'edit', '当前角色无权编辑该类型用户资料');
+      }
       }
     }
 

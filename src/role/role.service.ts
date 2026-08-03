@@ -15,9 +15,30 @@ export class RoleService {
                 id: { in: ids },
                 NOT: { key: { startsWith: 'menu:' } },
             },
-            select: { id: true },
+            select: { id: true, parentId: true },
         });
-        return permissions.map((p) => p.id);
+        const result = new Set(permissions.map((p) => p.id));
+        const pendingParentIds = Array.from(
+            new Set(permissions.map((p) => p.parentId).filter((id): id is number => Number.isFinite(Number(id)))),
+        );
+
+        while (pendingParentIds.length) {
+            const parents = await this.prisma.permission.findMany({
+                where: { id: { in: pendingParentIds.splice(0) } },
+                select: { id: true, key: true, parentId: true },
+            });
+
+            for (const parent of parents) {
+                if (!parent.key.startsWith('menu:')) {
+                    result.add(parent.id);
+                }
+                if (parent.parentId && !result.has(parent.parentId)) {
+                    pendingParentIds.push(parent.parentId);
+                }
+            }
+        }
+
+        return Array.from(result);
     }
 
     async getRoles() {

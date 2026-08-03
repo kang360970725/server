@@ -305,10 +305,31 @@
 
 ---
 
+## 2026-08-03 ｜打手新增编辑安全边界与按钮父级权限修复
+
+### 本次动作
+- 角色保存时后端自动补齐按钮权限的父级页面权限，并通过 migration `20260803034500_staff_user_security_and_permission_parent` 修复已有角色数据，避免只分配按钮后页面入口丢失。
+- 确保默认陪玩角色 `id=3/name=陪玩/description=俱乐部陪玩` 存在；非超管创建员工时后端固定绑定该角色，防止通过新增打手分配后台角色越权。
+- 新增员工和退店重新入店都强制要求员工标签，保证押金、提现、冷却期、自动冻结等规则有匹配依据。
+- `system-admin` 打手管理新增弹窗默认并锁定员工身份，员工标签必选，余额不可编辑；打手列表不再展示“分配角色”按钮。
+- 打手编辑增加安全锁：余额不可编辑；非超管只能修改员工在职状态，且仅限正常/冻结，退店和黑名单仍必须走独立退店/清退流程。
+
+---
+
+## 2026-08-03 ｜SUPER_ADMIN 与 FINANCE_ADMIN 冲突修复
+
+### 本次动作
+- 新增 Prisma migration `20260803033000_fix_super_admin_finance_role`，随发布创建/补齐 `SUPER_ADMIN` 角色，将非超管历史 `FINANCE_ADMIN` 角色用户迁移到 `FINANCE_MANAGER`，并删除旧 `FINANCE_ADMIN` 角色。
+- `SUPER_ADMIN` 是唯一超级管理员角色；`FINANCE_MANAGER` 回归财务管理员，预置财务、钱包和必要订单权限，不再享受全局权限旁路。
+- 后端 `PermissionsGuard`、钱包、订单、用户、会员等按钮/服务权限判断统一支持 `userType=SUPER_ADMIN` 或 `roleName=SUPER_ADMIN`，避免账号身份与角色不通用。
+- `system-admin` 全局 access、订单、客服工作台和奖池页同步改为只把 `SUPER_ADMIN` 识别为超管，不再兼容 `FINANCE_ADMIN`。
+
+---
+
 ## 2026-08-03 ｜评级管理时间展示与权限待修复记录
 
 ### 本次动作
-- 记录 `SUPER_ADMIN` 身份与 `FINANCE_ADMIN` 角色语义混用问题，标记为下次权限开发优先修复项。
+- 已在后续变更中修复 `SUPER_ADMIN` 身份与 `FINANCE_ADMIN` 角色语义混用问题。
 - `system-admin` 评级管理列表新增创建时间、修改时间列。
 - 评级管理时间统一按北京时间 `Asia/Shanghai` 格式化为 `YYYY-MM-DD HH:mm:ss`，不直接展示数据库原始值。
 - 顺手修正评级管理新增、编辑、删除按钮权限条件，避免无权限时反向展示。

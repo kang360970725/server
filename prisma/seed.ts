@@ -196,10 +196,22 @@ async function main() {
     /**
      * 2) 角色（种子）
      */
-    const financeRole = await prisma.role.upsert({
-        where: { name: 'FINANCE_ADMIN' },
+    const superRole = await prisma.role.upsert({
+        where: { name: 'SUPER_ADMIN' },
         update: { description: '超级管理员' },
-        create: { name: 'FINANCE_ADMIN', description: '超级管理员（种子数据）' },
+        create: { name: 'SUPER_ADMIN', description: '超级管理员（种子数据）' },
+    });
+
+    const financeRole = await prisma.role.upsert({
+        where: { name: 'FINANCE_MANAGER' },
+        update: { description: '财务管理员（种子数据）' },
+        create: { name: 'FINANCE_MANAGER', description: '财务管理员（种子数据）' },
+    });
+
+    await prisma.role.upsert({
+        where: { name: '陪玩' },
+        update: { description: '俱乐部陪玩' },
+        create: { name: '陪玩', description: '俱乐部陪玩' },
     });
 
     const csManagerRole = await prisma.role.upsert({
@@ -210,13 +222,43 @@ async function main() {
 
     /**
      * 3) 给角色挂权限
-     * 目前沿用你原来的策略：两个种子角色都给全权限，确保能进后台
+     * SUPER_ADMIN 拥有全权限；FINANCE_MANAGER 只预置财务、钱包和必要订单权限。
      */
+    await prisma.role.update({
+        where: { id: superRole.id },
+        data: {
+            permissions: {
+                set: permissionIds.map((id) => ({ id })),
+            },
+        },
+    });
+
+    const financePermissionKeys = [
+        'finance:dashboard:view',
+        'finance:records:list',
+        'finance:offline-fees:page',
+        'finance:equipment-rental-fees:page',
+        'wallet:overview:page',
+        'wallet:member-levels:page',
+        'wallet:recharge-plans:page',
+        'wallet:transactions:page',
+        'wallet:replay-preview:page',
+        'wallet:withdrawals:page',
+        'orders:list:page',
+        'orders:detail:page',
+        'orders:detail:receipt:button',
+        'orders:detail:mark-paid:button',
+        'orders:detail:update-paid:button',
+    ];
+    const financePermissionIds = permissionRecords
+        .filter((p) => financePermissionKeys.includes(p.key))
+        .map((p) => p.id);
+
     await prisma.role.update({
         where: { id: financeRole.id },
         data: {
             permissions: {
-                set: permissionIds.map((id) => ({ id })),
+                set: financePermissionIds.map((id) => ({ id })),
             },
         },
     });
@@ -231,7 +273,7 @@ async function main() {
     });
 
     /**
-     * 4) 超级管理员用户（绑定财务管理员 role，确保能进后台）
+     * 4) 超级管理员用户（绑定 SUPER_ADMIN role，确保身份与角色语义一致）
      */
     await prisma.user.upsert({
         where: { phone: DEFAULT_ADMIN.phone },
@@ -240,7 +282,7 @@ async function main() {
             password: hashed,
             userType: UserType.SUPER_ADMIN,
             status: UserStatus.ACTIVE,
-            roleId: financeRole.id,
+            roleId: superRole.id,
             needResetPwd: false,
         },
         create: {
@@ -249,7 +291,7 @@ async function main() {
             password: hashed,
             userType: UserType.SUPER_ADMIN,
             status: UserStatus.ACTIVE,
-            roleId: financeRole.id,
+            roleId: superRole.id,
             needResetPwd: false,
         },
     });

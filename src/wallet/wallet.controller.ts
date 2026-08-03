@@ -13,8 +13,9 @@ const WALLET_TRANSACTIONS_PAGE = 'wallet:transactions:page';
 const FINANCE_RECORDS_PAGE = 'finance:records:list';
 
 function hasAnyPermission(user: any, permissions: string[]) {
+    const userType = String(user?.userType || '').trim().toUpperCase();
     const roleName = String(user?.roleName || '').trim().toUpperCase();
-    if (roleName === 'FINANCE_ADMIN') return true;
+    if (userType === 'SUPER_ADMIN' || roleName === 'SUPER_ADMIN') return true;
     const userPermissions = Array.isArray(user?.permissions) ? user.permissions : [];
     return permissions.some((p) => userPermissions.includes(p));
 }
