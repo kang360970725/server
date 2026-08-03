@@ -1,14 +1,18 @@
 import { Body, Controller, ForbiddenException, Get, Param, ParseIntPipe, Patch, Post, Query, Req } from '@nestjs/common';
 import { MemberService } from './member.service';
+import { Permissions } from '../auth/decorators/permissions.decorator';
 
 @Controller('member')
 export class MemberController {
   constructor(private readonly memberService: MemberService) {}
 
-  private assertSuperAdmin(req: any) {
-    if (req?.user?.userType !== 'SUPER_ADMIN') {
-      throw new ForbiddenException('当前操作仅超级管理员可执行');
+  private assertButtonPermission(req: any, key: string, message = '当前角色无权执行该操作') {
+    const user = req?.user || {};
+    const permissions = Array.isArray(user?.permissions) ? user.permissions : [];
+    if (user?.userType === 'SUPER_ADMIN' || permissions.includes(key)) {
+      return;
     }
+    throw new ForbiddenException(message);
   }
 
   @Get('recharge-plans')
@@ -56,8 +60,9 @@ export class MemberController {
   }
 
   @Post('growth/adjust')
+  @Permissions('users:member:growth-adjust:button')
   adjustGrowth(@Req() req: any, @Body() body: any) {
-    this.assertSuperAdmin(req);
+    this.assertButtonPermission(req, 'users:member:growth-adjust:button', '当前角色无权调整会员成长值');
     return this.memberService.adjustGrowth({
       userId: Number(body?.userId || 0),
       growthValue: Number(body?.growthValue || 0),
@@ -66,8 +71,9 @@ export class MemberController {
   }
 
   @Post('recharge/manual')
+  @Permissions('users:member:recharge:button')
   manualRecharge(@Req() req: any, @Body() body: any) {
-    this.assertSuperAdmin(req);
+    this.assertButtonPermission(req, 'users:member:recharge:button', '当前角色无权进行会员手动充值');
     return this.memberService.manualRecharge({
       userId: Number(body?.userId || 0),
       planId: body?.planId != null && body?.planId !== '' ? Number(body.planId) : undefined,

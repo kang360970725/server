@@ -313,3 +313,37 @@
 - 评级管理时间统一按北京时间 `Asia/Shanghai` 格式化为 `YYYY-MM-DD HH:mm:ss`，不直接展示数据库原始值。
 - 顺手修正评级管理新增、编辑、删除按钮权限条件，避免无权限时反向展示。
 - 打手管理顶部员工资金统计改为仅 `SUPER_ADMIN` 展示和加载，店长等普通打手管理角色不可见。
+
+---
+
+## 2026-08-03 ｜用户管理按钮级权限落地
+
+### 本次动作
+- 新增 Prisma migration `20260803024500_add_user_button_permissions`，随发布写入用户管理按钮权限树。
+- `prisma/seed.ts` 同步补齐用户管理按钮权限，权限管理和角色配置可直接勾选。
+- `system-admin/src/access.ts` 将用户管理现有按钮从硬编码超管判断改为读取按钮权限 key。
+- 用户管理页的新增、编辑、分配角色、升降级、重置密码、删除、退店、清退、资金统计、会员手动充值、成长值调整、游戏名片维护均改为按钮权限控制。
+- 后端 `UsersController`、`UsersService`、`MemberController` 同步校验按钮权限，避免仅靠前端隐藏按钮。
+
+### 权限 key
+- 会员管理：`users:member:create:button`、`users:member:edit:button`、`users:member:delete:button`、`users:member:recharge:button`、`users:member:growth-adjust:button`、`users:member:game-card:button`
+- 打手管理：`users:staff:create:button`、`users:staff:edit:button`、`users:staff:assign-role:button`、`users:staff:change-level:button`、`users:staff:reset-password:button`、`users:staff:delete:button`、`users:staff:exit:button`、`users:staff:clear:button`、`users:staff:wallet-stats:button`、`users:staff:withdraw-qr-reset:button`
+- 后台人员：`users:internal:create:button`、`users:internal:edit:button`、`users:internal:assign-role:button`、`users:internal:reset-password:button`、`users:internal:delete:button`
+
+---
+
+## 2026-08-03 ｜订单模块按钮级权限落地
+
+### 本次动作
+- 新增 Prisma migration `20260803031500_add_order_button_permissions`，随发布写入订单按钮权限树。
+- 客服工作台创建订单按钮挂在 `orders:workbench:page` 下。
+- 订单列表创建/删除按钮挂在 `orders:list:page` 下。
+- 订单详情业务按钮挂在 `orders:detail:page` 下，并同步前端展示和后端接口校验。
+
+### 权限 key
+- `orders:workbench:create:button`
+- `orders:list:create:button`、`orders:list:delete:button`
+- `orders:detail:receipt:button`、`orders:detail:mark-paid:button`、`orders:detail:refund:button`、`orders:detail:edit:button`、`orders:detail:dispatch:button`、`orders:detail:update-paid:button`
+- `orders:detail:confirm-complete:button`、`orders:detail:admin-accept:button`、`orders:detail:archive:button`、`orders:detail:complete:button`
+- `orders:detail:rollback-accepted:button`、`orders:detail:rollback-archived:button`
+- `orders:detail:update-participants:button`、`orders:detail:settlement-adjust:button`、`orders:detail:archived-progress-fix:button`、`orders:detail:recalculate-settlements:button`

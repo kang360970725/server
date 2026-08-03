@@ -42,15 +42,18 @@ export class UsersController {
     'users:internal:page',
   ] as const;
 
-  private assertSuperAdmin(req: any) {
-    if (req?.user?.userType !== UserType.SUPER_ADMIN) {
-      throw new ForbiddenException('当前操作仅超级管理员可执行');
+  private assertButtonPermission(req: any, key: string, message = '当前角色无权执行该操作') {
+    const user = req?.user || {};
+    const permissions = Array.isArray(user?.permissions) ? user.permissions : [];
+    if (user?.userType === UserType.SUPER_ADMIN || permissions.includes(key)) {
+      return;
     }
+    throw new ForbiddenException(message);
   }
 
   @Post()
   @UseGuards(PermissionsGuard)
-  @Permissions(...UsersController.userManagePermissions)
+  @Permissions('users:member:create:button', 'users:staff:create:button', 'users:internal:create:button')
   create(@Body() createUserDto: CreateUserDto, @Request() req) {
     return this.usersService.create(createUserDto, req.user.userId, req.user);
   }
@@ -90,8 +93,9 @@ export class UsersController {
 
   @Get('staff/wallet-statistics')
   @UseGuards(PermissionsGuard)
-  @Permissions(...UsersController.userManagePermissions)
-  getStaffWalletStatistics() {
+  @Permissions('users:staff:wallet-stats:button')
+  getStaffWalletStatistics(@Request() req) {
+    this.assertButtonPermission(req, 'users:staff:wallet-stats:button', '当前角色无权查看员工资金统计');
     return this.usersService.getStaffWalletStatistics();
   }
 
@@ -111,39 +115,45 @@ export class UsersController {
 
   @Post(':id/member-game-cards')
   @UseGuards(PermissionsGuard)
-  @Permissions(...UsersController.userManagePermissions)
+  @Permissions('users:member:game-card:button')
   createMemberGameCard(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Request() req: any) {
-    this.assertSuperAdmin(req);
+    this.assertButtonPermission(req, 'users:member:game-card:button', '当前角色无权维护会员游戏名片');
     return this.memberService.createAdminGameCard(id, body || {});
   }
 
   @Post(':id/member-game-cards/:cardId/set-primary')
   @UseGuards(PermissionsGuard)
-  @Permissions(...UsersController.userManagePermissions)
+  @Permissions('users:member:game-card:button')
   setMemberGameCardPrimary(
       @Param('id', ParseIntPipe) id: number,
       @Param('cardId', ParseIntPipe) cardId: number,
       @Request() req: any,
   ) {
-    this.assertSuperAdmin(req);
+    this.assertButtonPermission(req, 'users:member:game-card:button', '当前角色无权维护会员游戏名片');
     return this.memberService.setAdminGameCardPrimary(id, cardId);
   }
 
   @Delete(':id/member-game-cards/:cardId')
   @UseGuards(PermissionsGuard)
-  @Permissions(...UsersController.userManagePermissions)
+  @Permissions('users:member:game-card:button')
   deleteMemberGameCard(
       @Param('id', ParseIntPipe) id: number,
       @Param('cardId', ParseIntPipe) cardId: number,
       @Request() req: any,
   ) {
-    this.assertSuperAdmin(req);
+    this.assertButtonPermission(req, 'users:member:game-card:button', '当前角色无权维护会员游戏名片');
     return this.memberService.deleteAdminGameCard(id, cardId);
   }
 
   @Patch(':id')
   @UseGuards(PermissionsGuard)
-  @Permissions(...UsersController.userManagePermissions)
+  @Permissions(
+      'users:member:edit:button',
+      'users:staff:edit:button',
+      'users:internal:edit:button',
+      'users:staff:assign-role:button',
+      'users:internal:assign-role:button',
+  )
   update(
       @Param('id', ParseIntPipe) id: number,
       @Body() updateUserDto: UpdateUserDto,
@@ -154,7 +164,7 @@ export class UsersController {
 
   @Post(':id/withdraw-qr-code/reset')
   @UseGuards(PermissionsGuard)
-  @Permissions(...UsersController.userManagePermissions)
+  @Permissions('users:staff:withdraw-qr-reset:button')
   resetWithdrawQrCode(
       @Param('id', ParseIntPipe) id: number,
       @Body() body: { remark?: string },
@@ -165,7 +175,7 @@ export class UsersController {
 
   @Post(':id/staff-exit')
   @UseGuards(PermissionsGuard)
-  @Permissions(...UsersController.userManagePermissions)
+  @Permissions('users:staff:exit:button')
   staffExit(
       @Param('id', ParseIntPipe) id: number,
       @Body() dto: StaffExitDto,
@@ -186,7 +196,7 @@ export class UsersController {
 
   @Post(':id/staff-clear')
   @UseGuards(PermissionsGuard)
-  @Permissions(...UsersController.userManagePermissions)
+  @Permissions('users:staff:clear:button')
   staffClear(
       @Param('id', ParseIntPipe) id: number,
       @Body() dto: StaffClearDto,
@@ -205,7 +215,7 @@ export class UsersController {
 
   @Patch(':id/level')
   @UseGuards(PermissionsGuard)
-  @Permissions(...UsersController.userManagePermissions)
+  @Permissions('users:staff:change-level:button')
   changeLevel(
       @Param('id', ParseIntPipe) id: number,
       @Body() changeLevelDto: ChangeLevelDto,
@@ -216,7 +226,7 @@ export class UsersController {
 
   @Post(':id/reset-password')
   @UseGuards(PermissionsGuard)
-  @Permissions(...UsersController.userManagePermissions)
+  @Permissions('users:staff:reset-password:button', 'users:internal:reset-password:button')
   resetPassword(
       @Param('id', ParseIntPipe) id: number,
       @Body() resetPasswordDto: ResetPasswordDto,
@@ -227,7 +237,7 @@ export class UsersController {
 
   @Delete(':id')
   @UseGuards(PermissionsGuard)
-  @Permissions(...UsersController.userManagePermissions)
+  @Permissions('users:member:delete:button', 'users:staff:delete:button', 'users:internal:delete:button')
   remove(@Param('id', ParseIntPipe) id: number, @Request() req) {
     return this.usersService.remove(id, req.user.userId, req.user);
   }

@@ -294,6 +294,51 @@ export class UsersService {
     return Array.isArray(actor?.permissions) && actor!.permissions!.includes(key);
   }
 
+  private assertActorPermission(
+    actor: { userType?: UserType; permissions?: string[] } | undefined,
+    key: string,
+    message = '当前角色无权执行该操作',
+  ) {
+    if (this.isSuperAdmin(actor) || this.hasActorPermission(actor, key)) {
+      return;
+    }
+    throw new ForbiddenException(message);
+  }
+
+  private getUserPermissionScope(userType?: UserType) {
+    if (userType === UserType.REGISTERED_USER) return 'member';
+    if (userType === UserType.STAFF) return 'staff';
+    if (
+      userType === UserType.SUPER_ADMIN ||
+      userType === UserType.ADMIN ||
+      userType === UserType.CUSTOMER_SERVICE ||
+      userType === UserType.OPERATION ||
+      userType === UserType.FINANCE
+    ) {
+      return 'internal';
+    }
+    return null;
+  }
+
+  private getUserButtonPermissionKey(userType: UserType | undefined, action: string) {
+    const scope = this.getUserPermissionScope(userType);
+    if (!scope) return null;
+    return `users:${scope}:${action}:button`;
+  }
+
+  private assertUserButtonPermission(
+    actor: { userType?: UserType; permissions?: string[] } | undefined,
+    targetUserType: UserType | undefined,
+    action: string,
+    message: string,
+  ) {
+    const key = this.getUserButtonPermissionKey(targetUserType, action);
+    if (!key) {
+      throw new ForbiddenException(message);
+    }
+    this.assertActorPermission(actor, key, message);
+  }
+
   private assertCanManageStaffUser(
     actor: { userType?: UserType; permissions?: string[] } | undefined,
     targetUserType?: UserType,
@@ -413,7 +458,7 @@ export class UsersService {
     const { phone, password, userType = UserType.REGISTERED_USER, forceRejoin, ...rest } = createUserDto;
     const normalizedStaffTags = this.normalizeStaffTags(createUserDto.staffTags);
     this.assertActorCanAccessUser(actor, userType);
-    this.assertSuperAdmin(actor);
+    this.assertUserButtonPermission(actor, userType, 'create', '当前角色无权新增该类型用户');
     const normalizedPhone = this.normalizeIdentityText(phone);
     const normalizedRealName = this.normalizeIdentityText(createUserDto.realName || createUserDto.name);
     const normalizedIdCard = this.normalizeIdentityText(createUserDto.idCard);
@@ -1068,7 +1113,7 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     this.assertActorCanAccessUser(actor, oldUser.userType);
-    this.assertCanManageStaffUser(actor, oldUser.userType);
+    this.assertUserButtonPermission(actor, oldUser.userType, 'exit', '当前角色无权操作员工退店');
 
     if (oldUser.userType !== UserType.STAFF) {
       throw new BadRequestException('仅员工支持退店操作');
@@ -1229,7 +1274,7 @@ export class UsersService {
 
     if (!oldUser) throw new NotFoundException('用户不存在');
     this.assertActorCanAccessUser(actor, oldUser.userType);
-    this.assertCanManageStaffUser(actor, oldUser.userType);
+    this.assertUserButtonPermission(actor, oldUser.userType, 'clear', '当前角色无权操作员工清退');
     if (oldUser.userType !== UserType.STAFF) {
       throw new BadRequestException('仅员工支持清退操作');
     }
@@ -1448,13 +1493,20 @@ export class UsersService {
     }
     this.assertActorCanAccessUser(actor, oldUser.userType);
     if (!this.isSuperAdmin(actor)) {
-      this.assertCanManageStaffUser(actor, oldUser.userType);
-      const blockedFields = ['roleId', 'userType', 'password', 'needResetPwd'];
+      const hasRolePatch = Object.prototype.hasOwnProperty.call(updateUserDto as any, 'roleId');
+      const blockedFields = ['userType', 'password', 'needResetPwd'];
       const touchedBlockedFields = blockedFields.filter((field) =>
         Object.prototype.hasOwnProperty.call(updateUserDto as any, field),
       );
       if (touchedBlockedFields.length) {
-        throw new ForbiddenException('当前角色无权修改用户身份、角色或密码');
+        throw new ForbiddenException('当前角色无权修改用户身份或密码');
+      }
+      if (hasRolePatch) {
+        this.assertUserButtonPermission(actor, oldUser.userType, 'assign-role', '当前角色无权分配该类型用户角色');
+      }
+      const hasProfilePatch = Object.keys(updateUserDto as any).some((field) => field !== 'roleId');
+      if (hasProfilePatch) {
+        this.assertUserButtonPermission(actor, oldUser.userType, 'edit', '当前角色无权编辑该类型用户资料');
       }
     }
 
@@ -1766,7 +1818,7 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     this.assertActorCanAccessUser(actor, user.userType);
-    this.assertCanManageStaffUser(actor, user.userType);
+    this.assertUserButtonPermission(actor, user.userType, 'change-level', '当前角色无权调整员工评级');
 
     // 只有员工才能调整等级
     if (user.userType !== 'STAFF') {
@@ -1802,7 +1854,12 @@ export class UsersService {
     return updatedUser;
   }
 
-  async resetPassword(id: number, resetPasswordDto: ResetPasswordDto, operatorId: number, actor?: { userType?: UserType }) {
+  async resetPassword(
+    id: number,
+    resetPasswordDto: ResetPasswordDto,
+    operatorId: number,
+    actor?: { userType?: UserType; permissions?: string[] },
+  ) {
     const user = await this.prisma.user.findUnique({
       where: { id },
       include: this.getUserIncludeFields(), // 改为使用 include
@@ -1812,7 +1869,7 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     this.assertActorCanAccessUser(actor, user.userType);
-    this.assertSuperAdmin(actor);
+    this.assertUserButtonPermission(actor, user.userType, 'reset-password', '当前角色无权重置该类型用户密码');
 
     // 生成随机密码
     const tempPassword = Math.random().toString(36).slice(-8);
@@ -1860,7 +1917,7 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     this.assertActorCanAccessUser(actor, user.userType);
-    this.assertSuperAdmin(actor);
+    this.assertUserButtonPermission(actor, user.userType, 'withdraw-qr-reset', '当前角色无权重置收款码');
 
     if (!user.withdrawQrCodeKey) {
       throw new BadRequestException('该用户当前没有已上传的收款码');
@@ -1897,7 +1954,7 @@ export class UsersService {
     return this.decorateUserWithStaffRule(updatedUser, await this.staffRuleEngineService.getConfig());
   }
 
-  async remove(id: number, operatorId?: number, actor?: { userType?: UserType }) {
+  async remove(id: number, operatorId?: number, actor?: { userType?: UserType; permissions?: string[] }) {
     const user = await this.prisma.user.findUnique({
       where: { id },
       include: this.getUserIncludeFields(), // 改为使用 include
@@ -1907,7 +1964,7 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     this.assertActorCanAccessUser(actor, user.userType);
-    this.assertSuperAdmin(actor);
+    this.assertUserButtonPermission(actor, user.userType, 'delete', '当前角色无权删除该类型用户');
 
     await this.prisma.user.delete({
       where: { id },

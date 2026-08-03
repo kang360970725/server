@@ -49,6 +49,13 @@ export class OrdersController {
         return String(user?.userType || '').trim().toUpperCase() === 'STAFF';
     }
 
+    private assertButtonPermission(user: any, key: string, message = '当前角色无权执行该操作') {
+      const userType = String(user?.userType || '').trim().toUpperCase();
+      const permissions = Array.isArray(user?.permissions) ? user.permissions : [];
+      if (userType === 'SUPER_ADMIN' || permissions.includes(key)) return;
+      throw new ForbiddenException(message);
+    }
+
     /** 订单列表（管理端） */
     @Post('list')
     @UseGuards(PermissionsGuard)
@@ -115,9 +122,15 @@ export class OrdersController {
     /** 新建订单（管理端） */
     @Post('create')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:list:page')
+    @Permissions('orders:list:create:button', 'orders:workbench:create:button')
     async create(@Body() body: any, @Request() req: any) {
         const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+        const source = String(body?.source || body?.from || '').trim().toUpperCase();
+        this.assertButtonPermission(
+            req?.user,
+            source === 'WORKBENCH' ? 'orders:workbench:create:button' : 'orders:list:create:button',
+            '当前角色无权创建订单',
+        );
         this.assertCustomerServiceOrFinanceAdmin(req?.user);
         return this.ordersService.createOrder(body, operatorId);
     }
@@ -135,8 +148,9 @@ export class OrdersController {
     /** 删除订单（管理端） */
     @Post('delete')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:list:page')
+    @Permissions('orders:list:delete:button')
     async remove(@Body() body: any, @Request() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:list:delete:button', '当前角色无权删除订单');
         const id = Number(body.id);
         if (!id || Number.isNaN(id)) throw new BadRequestException('id 必须为数字');
         return this.ordersService.deleteOrder(id, req.user?.userId, body.remark);
@@ -145,8 +159,9 @@ export class OrdersController {
     /** 派单/重新派单（管理端） */
     @Post('dispatch')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:list:page')
+    @Permissions('orders:detail:dispatch:button')
     async dispatch(@Body() body: any, @Request() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:detail:dispatch:button', '当前角色无权派单或改派');
         const orderId = Number(body.orderId);
         if (!orderId || Number.isNaN(orderId)) throw new BadRequestException('orderId 必须为数字');
 
@@ -175,6 +190,7 @@ export class OrdersController {
         if (this.isStaffDispatchOperator(req.user)) {
             return this.ordersService.archiveDispatch(DispatchStatus.ARCHIVED, dispatchId, req.user, body);
         }
+        this.assertButtonPermission(req?.user, 'orders:detail:archive:button', '当前角色无权客服存单');
         return this.ordersService.adminArchiveDispatch(DispatchStatus.ARCHIVED,dispatchId, req.user, body);
     }
 
@@ -189,14 +205,16 @@ export class OrdersController {
         if (this.isStaffDispatchOperator(req.user)) {
             return this.ordersService.archiveDispatch(DispatchStatus.COMPLETED, dispatchId, req.user, body);
         }
+        this.assertButtonPermission(req?.user, 'orders:detail:complete:button', '当前角色无权客服结单');
         return this.ordersService.adminArchiveDispatch(DispatchStatus.COMPLETED,dispatchId, req.user, body);
         // return this.ordersService.completeDispatch('',dispatchId, req.user?.userId, body);
     }
 
     @Post('dispatch/admin-accept')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:detail:page')
+    @Permissions('orders:detail:admin-accept:button')
     async adminAccept(@Body() body: any, @Request() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:detail:admin-accept:button', '当前角色无权客服代接单');
         const dispatchId = Number(body.dispatchId);
         if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
         return this.ordersService.adminAcceptDispatch(dispatchId, req.user, body.remark);
@@ -204,8 +222,9 @@ export class OrdersController {
 
     @Post('dispatch/rollback-to-accepted')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:detail:page')
+    @Permissions('orders:detail:rollback-accepted:button')
     async rollbackToAccepted(@Body() body: any, @Request() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:detail:rollback-accepted:button', '当前角色无权回退到接单中');
         const dispatchId = Number(body.dispatchId);
         if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
         return this.ordersService.rollbackDispatchToAccepted(dispatchId, req.user, body.remark);
@@ -213,8 +232,9 @@ export class OrdersController {
 
     @Post('dispatch/rollback-to-archived')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:detail:page')
+    @Permissions('orders:detail:rollback-archived:button')
     async rollbackToArchived(@Body() body: any, @Request() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:detail:rollback-archived:button', '当前角色无权回退到存单');
         const dispatchId = Number(body.dispatchId);
         if (!dispatchId || Number.isNaN(dispatchId)) throw new BadRequestException('dispatchId 必须为数字');
         return this.ordersService.rollbackCompletedDispatchToArchived(dispatchId, req.user, body.remark);
@@ -223,8 +243,9 @@ export class OrdersController {
     /** 修改实付金额（管理端） */
     @Post('update-paid-amount')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:list:page')
+    @Permissions('orders:detail:update-paid:button')
     updatePaidAmount(@Body() body: any, @Request() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:detail:update-paid:button', '当前角色无权修改实付');
         return this.ordersService.updatePaidAmount(
             Number(body.id),
             Number(body.paidAmount),
@@ -238,8 +259,9 @@ export class OrdersController {
     /** 更新参与者（管理端） */
     @Post('dispatch/update-participants')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:list:page')
+    @Permissions('orders:detail:update-participants:button')
     updateParticipants(@Body() body: any, @Request() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:detail:update-participants:button', '当前角色无权更新参与者');
         const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
         const ids = Array.isArray(body.playerIds) ? body.playerIds : body.userIds;
         return this.ordersService.updateDispatchParticipants(
@@ -257,8 +279,9 @@ export class OrdersController {
     /** 结算调整（管理端/财务） */
     @Post('settlements/adjust')
     @UseGuards(PermissionsGuard)
-    @Permissions('settlements:monthly:page')
+    @Permissions('orders:detail:settlement-adjust:button')
     adjustSettlement(@Body() dto: AdjustSettlementDto, @Req() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:detail:settlement-adjust:button', '当前角色无权调整结算收益');
         const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
         if (!operatorId) throw new BadRequestException('未登录或登录已失效');
         return this.ordersService.adjustSettlementFinalEarnings(dto, operatorId);
@@ -267,8 +290,9 @@ export class OrdersController {
     /** 确认结算 */
     @Post('confirm-complete')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:detail:page')
+    @Permissions('orders:detail:confirm-complete:button')
     async confirmComplete(@Body() body: any, @Req() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:detail:confirm-complete:button', '当前角色无权确认结单');
         const orderId = Number(body?.id);
         if (!orderId) throw new BadRequestException('id 必填');
         this.assertCustomerServiceOrFinanceAdmin(req?.user);
@@ -293,7 +317,7 @@ export class OrdersController {
     /** 退款（管理端） */
     @Post('refund')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:list:page')
+    @Permissions('orders:detail:refund:button')
     refund(
         @Body()
         body: {
@@ -307,6 +331,7 @@ export class OrdersController {
         },
         @Req() req: any,
     ) {
+        this.assertButtonPermission(req?.user, 'orders:detail:refund:button', '当前角色无权退款');
         const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
         return this.ordersService.refundOrder(Number(body.id), operatorId, body.remark, {
             staffLiable: Boolean(body?.staffLiable),
@@ -351,8 +376,9 @@ export class OrdersController {
     /** 订单编辑（管理端） */
     @Post('update')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:list:page')
+    @Permissions('orders:detail:edit:button')
     update(@Body() dto: any, @Req() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:detail:edit:button', '当前角色无权编辑订单');
         const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
         return this.ordersService.updateOrderEditable(dto, operatorId);
     }
@@ -360,16 +386,18 @@ export class OrdersController {
     /** 确认收款（管理端/财务） */
     @Post('mark-paid')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:list:page')
+    @Permissions('orders:detail:mark-paid:button')
     markPaid(@Body() dto: MarkPaidDto, @Req() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:detail:mark-paid:button', '当前角色无权确认收款');
         const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
         return this.ordersService.markOrderPaid(dto, operatorId);
     }
 
     /** 新（存单）轮修复订单贡献(保底进度/小时单)；不重算结算、不动钱包 */
     @Post('update-archived-progress-total')
-    @Permissions('orders:list:page')
+    @Permissions('orders:detail:archived-progress-fix:button')
     async updateArchivedProgressTotal(@Body() body: any, @Req() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:detail:archived-progress-fix:button', '当前角色无权修复存单进度');
         const dispatchId = Number(body?.dispatchId);
         const totalProgressBaseWan = body?.totalProgressBaseWan;
         const remark = body?.remark;
@@ -447,6 +475,8 @@ export class OrdersController {
      * - scope 默认 COMPLETED_AND_ARCHIVED
      */
     @Post('repair-wallet-by-settlementsV1')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:detail:recalculate-settlements:button')
     async repairWalletBySettlementsV1(
         @Body() body: {
             id: number;
@@ -462,6 +492,7 @@ export class OrdersController {
         },
         @Req() req: any,
     ) {
+        this.assertButtonPermission(req?.user, 'orders:detail:recalculate-settlements:button', '当前角色无权重算订单结算');
         const orderId = Number(body?.id);
         if (!Number.isFinite(orderId) || orderId <= 0) {
             throw new BadRequestException('id 必填且必须为正整数');
@@ -488,11 +519,12 @@ export class OrdersController {
      */
     @Post(':id/rollback-wrong-settlement-reversals')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:list:page')
+    @Permissions('orders:detail:recalculate-settlements:button')
     async rollbackWrongSettlementReversals(
         @Param('id') id: string,
         @Req() req: any,
     ) {
+        this.assertButtonPermission(req?.user, 'orders:detail:recalculate-settlements:button', '当前角色无权重算订单结算');
         const orderId = Number(id);
         return this.ordersService.rollbackWrongSettlementReversals(orderId);
     }
