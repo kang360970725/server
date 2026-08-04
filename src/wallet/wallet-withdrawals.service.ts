@@ -164,6 +164,42 @@ export class WalletWithdrawalsService {
         };
     }
 
+    private buildReviewedAtSingleDayRange(reviewDate?: string) {
+        const formatLocalDate = (date: Date) => [
+            date.getFullYear(),
+            String(date.getMonth() + 1).padStart(2, '0'),
+            String(date.getDate()).padStart(2, '0'),
+        ].join('-');
+
+        if (!reviewDate) {
+            const range = this.buildTodayReviewedAtRange();
+            return { ...range, reviewDate: formatLocalDate(range.fromDate) };
+        }
+
+        const text = String(reviewDate).trim();
+        const matched = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        if (!matched) {
+            const range = this.buildTodayReviewedAtRange();
+            return { ...range, reviewDate: formatLocalDate(range.fromDate) };
+        }
+
+        const year = Number(matched[1]);
+        const month = Number(matched[2]);
+        const day = Number(matched[3]);
+        const fromDate = new Date(year, month - 1, day, 0, 0, 0, 0);
+        const toDate = new Date(year, month - 1, day, 23, 59, 59, 999);
+
+        return {
+            reviewedAt: {
+                gte: fromDate,
+                lte: toDate,
+            },
+            fromDate,
+            toDate,
+            reviewDate: text,
+        };
+    }
+
     /**
      * ✅ 获取提现相关信息
      * 用于前端提现弹窗计算押金
@@ -769,9 +805,9 @@ export class WalletWithdrawalsService {
     }
 
     /** 管理端：待审核列表（带用户昵称 + 钱包余额 + 收款码临时URL） */
-    async listPending() {
+    async listPending(reviewDate?: string) {
         const where = { status: 'PENDING_REVIEW' as any };
-        const { reviewedAt, fromDate, toDate } = this.buildTodayReviewedAtRange();
+        const { reviewedAt, fromDate, toDate, reviewDate: summaryDate } = this.buildReviewedAtSingleDayRange(reviewDate);
 
         const [count, aggregate, list, todayApprovedAgg, todayPaidAgg] = await this.prisma.$transaction([
             this.prisma.walletWithdrawalRequest.count({ where }),
@@ -849,6 +885,7 @@ export class WalletWithdrawalsService {
             count,
             totalAmount: aggregate._sum.amount || 0,
             todayReviewSummary: {
+                reviewDate: summaryDate,
                 reviewedAtFrom: fromDate.toISOString(),
                 reviewedAtTo: toDate.toISOString(),
                 approvedAmount: Number(todayApprovedAgg?._sum?.amount || 0),

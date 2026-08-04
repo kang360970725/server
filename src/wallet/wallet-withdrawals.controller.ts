@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { WalletWithdrawalsService } from './wallet-withdrawals.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 
@@ -53,8 +53,8 @@ export class WalletWithdrawalsController {
     @UseGuards(PermissionsGuard)
     @Permissions(WITHDRAWALS_PAGE)
     @Get('pending')
-    async pending() {
-        return this.service.listPending();
+    async pending(@Query('reviewDate') reviewDate?: string) {
+        return this.service.listPending(reviewDate);
     }
 
     // ✅ 管理端：全量记录（登录 + 权限）
