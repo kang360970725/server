@@ -1,9 +1,14 @@
 import {BadRequestException, Injectable} from '@nestjs/common';
 import {PrismaService} from '../prisma.service';
+import { StaffEmploymentStatus, UserType } from '@prisma/client';
+import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
 
 @Injectable()
 export class WalletDepositService {
-    constructor(private readonly prisma: PrismaService) {}
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly staffRuleEngineService: StaffRuleEngineService,
+    ) {}
 
     private async tableExists(tableName: string) {
         const rows = await this.prisma.$queryRawUnsafe<Array<{ table_name?: string }>>(
@@ -21,6 +26,42 @@ export class WalletDepositService {
 
     private round2(v: any) {
         return Math.round((Number(v) || 0) * 100) / 100;
+    }
+
+    private normalizeDepositState(value?: string) {
+        const v = String(value || 'ALL').trim().toUpperCase();
+        return ['ALL', 'EFFECTIVE', 'INVALID', 'EXITED_OR_BLACKLISTED', 'ZERO'].includes(v) ? v : 'ALL';
+    }
+
+    private normalizeEmploymentStatus(value?: string) {
+        const v = String(value || '').trim().toUpperCase();
+        return Object.values(StaffEmploymentStatus).includes(v as StaffEmploymentStatus)
+            ? (v as StaffEmploymentStatus)
+            : undefined;
+    }
+
+    private async attachOperators<T extends { operatorId?: number | null }>(rows: T[]) {
+        const operatorIds = Array.from(
+            new Set(rows.map((row) => Number(row.operatorId || 0)).filter((id) => id > 0)),
+        );
+        if (!operatorIds.length) {
+            return rows.map((row) => ({ ...row, operatorName: '', operatorPhone: '' }));
+        }
+
+        const operators = await this.prisma.user.findMany({
+            where: { id: { in: operatorIds } },
+            select: { id: true, name: true, realName: true, phone: true },
+        });
+        const operatorMap = new Map(operators.map((operator) => [operator.id, operator]));
+
+        return rows.map((row) => {
+            const operator = operatorMap.get(Number(row.operatorId || 0));
+            return {
+                ...row,
+                operatorName: operator?.realName || operator?.name || '',
+                operatorPhone: operator?.phone || '',
+            };
+        });
     }
 
     /**
@@ -298,7 +339,7 @@ export class WalletDepositService {
             );
 
             return {
-                data: Array.isArray(data) ? data : [],
+                data: await this.attachOperators(Array.isArray(data) ? data : []),
                 total: Number(totalRows?.[0]?.total || 0),
             };
         }
@@ -319,8 +360,218 @@ export class WalletDepositService {
         ]);
 
         return {
-            data,
+            data: await this.attachOperators(data as any[]),
             total,
+        };
+    }
+
+    async listDepositReconciliation(params: {
+        page: number;
+        limit: number;
+        search?: string;
+        employmentStatus?: string;
+        depositState?: string;
+        manualOnly?: boolean;
+    }) {
+        const page = Math.max(1, Number(params.page || 1));
+        const limit = Math.min(100, Math.max(1, Number(params.limit || 20)));
+        const search = String(params.search || '').trim();
+        const employmentStatus = this.normalizeEmploymentStatus(params.employmentStatus);
+        const depositState = this.normalizeDepositState(params.depositState);
+
+        const where: any = {
+            OR: [
+                { userType: UserType.STAFF },
+                { walletAccount: { is: { depositBalance: { not: 0 } } } },
+                { depositTransactions: { some: {} } },
+            ],
+        };
+        if (employmentStatus) where.staffEmploymentStatus = employmentStatus;
+        if (search) {
+            const searchNumber = Number(search);
+            const searchOr = [
+                Number.isFinite(searchNumber) ? { id: searchNumber } : undefined,
+                { phone: { contains: search } },
+                { name: { contains: search } },
+                { realName: { contains: search } },
+                { idCard: { contains: search } },
+            ].filter(Boolean);
+            where.AND = [{ OR: searchOr }];
+        }
+
+        const users = await this.prisma.user.findMany({
+            where,
+            select: {
+                id: true,
+                phone: true,
+                name: true,
+                realName: true,
+                userType: true,
+                staffEmploymentStatus: true,
+                staffTags: true,
+                depositLimit: true,
+                createdAt: true,
+                staffExitedAt: true,
+                walletAccount: {
+                    select: {
+                        depositBalance: true,
+                        availableBalance: true,
+                        frozenBalance: true,
+                    },
+                },
+                staffRating: {
+                    select: {
+                        name: true,
+                    },
+                },
+                Role: {
+                    select: {
+                        name: true,
+                    },
+                },
+            },
+            orderBy: { id: 'desc' },
+        });
+
+        const userIds = users.map((u) => u.id);
+        const [manualGroups, totalGroups, latestRows, latestManualRows, config] = await Promise.all([
+            userIds.length
+                ? this.prisma.walletDepositTransaction.groupBy({
+                    by: ['userId'],
+                    where: { userId: { in: userIds }, bizType: 'MANUAL_DEPOSIT' as any },
+                    _sum: { amount: true },
+                    _count: { _all: true },
+                })
+                : [],
+            userIds.length
+                ? this.prisma.walletDepositTransaction.groupBy({
+                    by: ['userId'],
+                    where: { userId: { in: userIds } },
+                    _sum: { amount: true },
+                    _count: { _all: true },
+                })
+                : [],
+            userIds.length
+                ? this.prisma.walletDepositTransaction.findMany({
+                    where: { userId: { in: userIds } },
+                    select: { userId: true, createdAt: true },
+                    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+                })
+                : [],
+            userIds.length
+                ? this.prisma.walletDepositTransaction.findMany({
+                    where: { userId: { in: userIds }, bizType: 'MANUAL_DEPOSIT' as any },
+                    select: { userId: true, operatorId: true, createdAt: true },
+                    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+                })
+                : [],
+            this.staffRuleEngineService.getConfig(),
+        ]);
+
+        const manualMap = new Map<number, any>((manualGroups as any[]).map((row: any) => [Number(row.userId), row] as [number, any]));
+        const totalMap = new Map<number, any>((totalGroups as any[]).map((row: any) => [Number(row.userId), row] as [number, any]));
+        const latestMap = new Map<number, Date>();
+        for (const row of latestRows as any[]) {
+            if (!latestMap.has(row.userId)) latestMap.set(row.userId, row.createdAt);
+        }
+        const latestManualMap = new Map<number, any>();
+        for (const row of latestManualRows as any[]) {
+            if (!latestManualMap.has(row.userId)) latestManualMap.set(row.userId, row);
+        }
+        const operatorIds = Array.from(
+            new Set((latestManualRows as any[]).map((row) => Number(row.operatorId || 0)).filter((id) => id > 0)),
+        );
+        const operators = operatorIds.length
+            ? await this.prisma.user.findMany({
+                where: { id: { in: operatorIds } },
+                select: { id: true, name: true, realName: true, phone: true },
+            })
+            : [];
+        const operatorMap = new Map(operators.map((operator) => [operator.id, operator]));
+
+        const rows = users.map((user: any) => {
+            const depositBalance = this.round2(user.walletAccount?.depositBalance ?? 0);
+            const manual = manualMap.get(user.id) as any;
+            const total = totalMap.get(user.id) as any;
+            const manualDepositAmount = this.round2(manual?._sum?.amount ?? 0);
+            const latestManual = latestManualMap.get(user.id);
+            const latestManualOperator = operatorMap.get(Number(latestManual?.operatorId || 0));
+            const depositNetAmount = this.round2(total?._sum?.amount ?? 0);
+            const deductionAmount = this.round2(Math.abs(Math.min(0, depositNetAmount - manualDepositAmount)));
+            const matchedRule = user.userType === UserType.STAFF
+                ? this.staffRuleEngineService.resolveMatchedRule(config, user.staffTags)
+                : null;
+            const requiredDeposit = user.userType === UserType.STAFF
+                ? this.round2(matchedRule?.depositAmount ?? user.depositLimit ?? 500)
+                : null;
+            const activeLike = [StaffEmploymentStatus.ACTIVE, StaffEmploymentStatus.FROZEN].includes(user.staffEmploymentStatus);
+            const exitedOrBlacklisted = [StaffEmploymentStatus.EXITED, StaffEmploymentStatus.BLACKLISTED].includes(user.staffEmploymentStatus);
+            const state = activeLike && depositBalance > 0
+                ? 'EFFECTIVE'
+                : exitedOrBlacklisted
+                    ? 'EXITED_OR_BLACKLISTED'
+                    : 'ZERO';
+            const statusLabel = state === 'EFFECTIVE'
+                ? '有效'
+                : state === 'EXITED_OR_BLACKLISTED'
+                    ? '退店/黑名单'
+                    : '无保证金';
+            const gapToRule = activeLike && requiredDeposit !== null ? this.round2(depositBalance - requiredDeposit) : null;
+
+            return {
+                userId: user.id,
+                phone: user.phone,
+                name: user.name,
+                realName: user.realName,
+                userType: user.userType,
+                roleName: user.Role?.name || '',
+                ratingName: user.staffRating?.name || '',
+                staffEmploymentStatus: user.staffEmploymentStatus,
+                staffTags: Array.isArray(user.staffTags) ? user.staffTags : [],
+                depositBalance,
+                requiredDeposit,
+                gapToRule,
+                manualDepositAmount,
+                latestManualDepositAt: latestManual?.createdAt || null,
+                latestManualOperatorId: latestManual?.operatorId || null,
+                latestManualOperatorName: latestManualOperator?.realName || latestManualOperator?.name || '',
+                latestManualOperatorPhone: latestManualOperator?.phone || '',
+                depositNetAmount,
+                deductionAmount,
+                transactionCount: Number(total?._count?._all || 0),
+                manualTransactionCount: Number(manual?._count?._all || 0),
+                latestDepositAt: latestMap.get(user.id) || null,
+                staffExitedAt: user.staffExitedAt,
+                createdAt: user.createdAt,
+                depositState: state,
+                depositStateLabel: statusLabel,
+            };
+        }).filter((row) => {
+            if (params.manualOnly && row.manualTransactionCount <= 0) return false;
+            if (depositState === 'ALL') return true;
+            if (depositState === 'INVALID') return row.depositState !== 'EFFECTIVE';
+            return row.depositState === depositState;
+        });
+
+        const totalDepositBalance = this.round2(rows.reduce((sum, row) => sum + row.depositBalance, 0));
+        const totalManualDepositAmount = this.round2(rows.reduce((sum, row) => sum + row.manualDepositAmount, 0));
+        const effectiveDepositBalance = this.round2(rows.filter((row) => row.depositState === 'EFFECTIVE').reduce((sum, row) => sum + row.depositBalance, 0));
+        const invalidDepositBalance = this.round2(rows.filter((row) => row.depositState !== 'EFFECTIVE').reduce((sum, row) => sum + row.depositBalance, 0));
+        const start = (page - 1) * limit;
+
+        return {
+            data: rows.slice(start, start + limit),
+            total: rows.length,
+            summary: {
+                staffCount: rows.length,
+                totalDepositBalance,
+                totalManualDepositAmount,
+                effectiveDepositBalance,
+                invalidDepositBalance,
+                effectiveCount: rows.filter((row) => row.depositState === 'EFFECTIVE').length,
+                invalidCount: rows.filter((row) => row.depositState !== 'EFFECTIVE').length,
+                exitedOrBlacklistedCount: rows.filter((row) => row.depositState === 'EXITED_OR_BLACKLISTED').length,
+            },
         };
     }
 }

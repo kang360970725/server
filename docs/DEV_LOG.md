@@ -305,6 +305,17 @@
 
 ---
 
+## 2026-08-04 ｜保证金对账查询
+
+### 本次动作
+- 新增后端接口 `GET /wallet/deposit-reconciliation`，用于全局查询员工保证金对账数据。
+- 新增页面权限 `wallet:deposit-reconciliation:page`，并通过 migration `20260804001000_add_wallet_deposit_reconciliation_permission` 写入权限树，同时授权给 `SUPER_ADMIN` 与 `FINANCE_MANAGER`。
+- `system-admin` 新增“钱包/保证金对账”页面，支持按员工状态、保证金状态、是否线下手动录入、关键词筛选。
+- 页面展示当前保证金、规则应交、差额、线下手动录入金额、保证金净变动、流水数、最近流水，方便核对有效/无效保证金及退店/黑名单员工。
+- 对账口径：正常/冻结员工且当前保证金 > 0 视为有效；退店/黑名单或无保证金归为无效/需处理；`MANUAL_DEPOSIT` 视为线下收款手动录入。
+
+---
+
 ## 2026-08-03 ｜打手新增编辑安全边界与按钮父级权限修复
 
 ### 本次动作

@@ -10,6 +10,7 @@ import { Permissions } from '../auth/decorators/permissions.decorator';
 
 const WITHDRAWALS_PAGE = 'wallet:withdrawals:page';
 const WALLET_TRANSACTIONS_PAGE = 'wallet:transactions:page';
+const WALLET_DEPOSIT_RECONCILIATION_PAGE = 'wallet:deposit-reconciliation:page';
 const FINANCE_RECORDS_PAGE = 'finance:records:list';
 
 function hasAnyPermission(user: any, permissions: string[]) {
@@ -171,6 +172,23 @@ export class WalletController {
             userId: Number(query.userId),
             page,
             limit,
+        });
+    }
+
+    @Get('deposit-reconciliation')
+    @UseGuards(PermissionsGuard)
+    @Permissions(WALLET_DEPOSIT_RECONCILIATION_PAGE, WITHDRAWALS_PAGE, FINANCE_RECORDS_PAGE)
+    async depositReconciliation(@Query() query: any) {
+        const page = Math.max(1, Number(query.page ?? 1));
+        const limit = Math.min(100, Math.max(1, Number(query.limit ?? 20)));
+
+        return this.walletDepositService.listDepositReconciliation({
+            page,
+            limit,
+            search: query.search,
+            employmentStatus: query.employmentStatus,
+            depositState: query.depositState,
+            manualOnly: String(query.manualOnly || '').trim().toLowerCase() === 'true',
         });
     }
 
