@@ -100,6 +100,20 @@ export class UsersController {
     return this.usersService.getStaffWalletStatistics();
   }
 
+  // 管理端用：获取可用评级。必须放在 :id 路由前，避免 ratings 被解析为用户 ID。
+  @Get('ratings/available')
+  @UseGuards(PermissionsGuard)
+  @Permissions(
+      ...UsersController.userManagePermissions,
+      'users:staff:create:button',
+      'users:staff:edit:button',
+      'users:staff:change-level:button',
+      'staff-ratings:page',
+  )
+  getAvailableRatings() {
+    return this.usersService.getAvailableRatings();
+  }
+
   @Get(':id')
   @UseGuards(PermissionsGuard)
   @Permissions(...UsersController.userManagePermissions)
@@ -204,14 +218,6 @@ export class UsersController {
       @Request() req,
   ) {
     return this.usersService.clearStaffAssets(id, dto, req.user.userId, req.user);
-  }
-
-  // 管理端用：获取可用评级（在用户管理页里常见）
-  @Get('ratings/available')
-  @UseGuards(PermissionsGuard)
-  @Permissions(...UsersController.userManagePermissions)
-  getAvailableRatings() {
-    return this.usersService.getAvailableRatings();
   }
 
   @Patch(':id/level')

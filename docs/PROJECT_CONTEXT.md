@@ -92,6 +92,7 @@
 - 用户管理页入口按 `users:member:page`、`users:staff:page`、`users:internal:page` 精确展示；普通 `ADMIN` 不再自动旁路看到全部用户域。“全部用户”入口默认隐藏。用户管理按钮级权限已经落地为可配置 `PermissionType.BUTTON`，并挂在对应页面节点下：会员页使用 `users:member:*:button`，打手页使用 `users:staff:*:button`，后台人员页使用 `users:internal:*:button`。
 - 页面权限只控制入口；按钮权限控制动作。角色保存时后端会根据按钮权限自动补齐其父级页面权限，避免“只给按钮导致页面入口丢失”。后端 `UsersService` 仍会按目标用户类型做范围校验，角色要操作打手时必须同时拥有 `users:staff:page` 和对应打手按钮权限。打手管理顶部员工资金统计属于敏感汇总，只允许拥有 `users:staff:wallet-stats:button` 或 `SUPER_ADMIN` 展示和加载。
 - 打手管理新增员工使用安全模式：前端默认并锁定 `STAFF`，后端非超管创建员工时固定绑定默认角色 `id=3/name=陪玩/description=俱乐部陪玩`，不接受任意 `roleId`、余额、押金、提现等敏感字段；新增和退店重新入店都必须选择员工标签。打手编辑时余额不可编辑；非超管只允许修改员工在职状态，且仅限“正常/冻结”，退店和黑名单必须走独立退店/清退流程。
+- 员工评级候选读取接口 `GET /users/ratings/available` 是打手新增、编辑、升降级弹窗的基础数据依赖，不等同于评级管理 CRUD；路由必须声明在 `GET /users/:id` 前，权限允许用户管理页、打手新增/编辑/升降级按钮或 `staff-ratings:page` 读取。
 - 订单模块按钮级权限已落地：客服工作台创建订单挂在 `orders:workbench:page` 下，订单列表创建/删除挂在 `orders:list:page` 下；订单详情所有业务按钮挂在 `orders:detail:page` 下，包括小票、确认收款、退款、编辑、派单/改派、修改实付、确认结单、客服代接/存单/结单、状态回退、更新参与者、结算调整、存单进度修复、重算订单结算。刷新、返回、纯导航不做按钮权限。
 - 超级管理员语义已统一：`User.userType = SUPER_ADMIN` 或 `Role.name = SUPER_ADMIN` 都视为超管；`FINANCE_ADMIN` 已通过 migration `20260803033000_fix_super_admin_finance_role` 拆分/重命名为 `FINANCE_MANAGER`（财务管理员）。`FINANCE_MANAGER` 不再全局放行，必须依赖显式权限。
 - `user-logs` 属于敏感审计数据，必须使用 `system:user-logs:page` 或历史系统管理员权限访问。
