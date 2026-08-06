@@ -177,7 +177,7 @@ export class WalletController {
 
     @Get('deposit-reconciliation')
     @UseGuards(PermissionsGuard)
-    @Permissions(WALLET_DEPOSIT_RECONCILIATION_PAGE, WITHDRAWALS_PAGE, FINANCE_RECORDS_PAGE)
+    @Permissions(WALLET_DEPOSIT_RECONCILIATION_PAGE)
     async depositReconciliation(@Query() query: any) {
         const page = Math.max(1, Number(query.page ?? 1));
         const limit = Math.min(100, Math.max(1, Number(query.limit ?? 20)));

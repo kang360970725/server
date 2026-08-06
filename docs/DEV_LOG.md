@@ -324,6 +324,22 @@
 
 ---
 
+## 2026-08-05 ｜保证金对账权限收敛
+
+### 本次动作
+- 修复保证金对账前端 access，`/wallet/deposit-reconciliation` 入口只受 `wallet:deposit-reconciliation:page` 控制，不再通过 `wallet:withdrawals:page` 或 `finance:records:list` 兜底展示。
+- 修复后端 `GET /wallet/deposit-reconciliation` 接口权限，只允许 `wallet:deposit-reconciliation:page` 或 `SUPER_ADMIN` 访问，避免直接请求接口绕过页面专用权限。
+
+---
+
+## 2026-08-05 ｜保证金手动缴纳统计口径修正
+
+### 本次动作
+- 明确保证金“手动缴纳”按保证金专用流水 `WalletDepositTransaction.bizType = MANUAL_DEPOSIT` 识别，不把提现自动补押金 `WITHDRAW_PERCENT` 计入线下手动录入。
+- 保证金对账统计兼容历史旧表 `WalletDepositTransaction` 与当前表 `wallet_deposit_transactions`，手动缴纳金额、手动笔数、总净变动、最近保证金流水和最近手动录入人统一按两张表合并口径计算。
+
+---
+
 ## 2026-08-03 ｜打手新增编辑安全边界与按钮父级权限修复
 
 ### 本次动作

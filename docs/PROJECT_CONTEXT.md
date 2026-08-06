@@ -96,7 +96,7 @@
 - 订单模块按钮级权限已落地：客服工作台创建订单挂在 `orders:workbench:page` 下，订单列表创建/删除挂在 `orders:list:page` 下；订单详情所有业务按钮挂在 `orders:detail:page` 下，包括小票、确认收款、退款、编辑、派单/改派、修改实付、确认结单、客服代接/存单/结单、状态回退、更新参与者、结算调整、存单进度修复、重算订单结算。刷新、返回、纯导航不做按钮权限。
 - 超级管理员语义已统一：`User.userType = SUPER_ADMIN` 或 `Role.name = SUPER_ADMIN` 都视为超管；`FINANCE_ADMIN` 已通过 migration `20260803033000_fix_super_admin_finance_role` 拆分/重命名为 `FINANCE_MANAGER`（财务管理员）。`FINANCE_MANAGER` 不再全局放行，必须依赖显式权限。
 - `user-logs` 属于敏感审计数据，必须使用 `system:user-logs:page` 或历史系统管理员权限访问。
-- 钱包域需要区分“本人钱包”和“后台管理钱包”：有效员工可访问自己的钱包概览/流水/提现申请；查询他人钱包流水、提现审批、人工保证金充值和保证金流水必须要求钱包/财务管理权限，避免普通登录用户通过 `userId` 参数越权。保证金全局核查使用 `wallet:deposit-reconciliation:page`，入口在 `system-admin` 的“钱包/保证金对账”；有效保证金口径为员工状态正常/冻结且当前保证金 > 0，无效/需处理包含退店、黑名单或无保证金员工。`MANUAL_DEPOSIT` 表示后台手动录入，业务上按线下收款对账。
+- 钱包域需要区分“本人钱包”和“后台管理钱包”：有效员工可访问自己的钱包概览/流水/提现申请；查询他人钱包流水、提现审批、人工保证金充值和保证金流水必须要求钱包/财务管理权限，避免普通登录用户通过 `userId` 参数越权。保证金全局核查使用 `wallet:deposit-reconciliation:page`，入口在 `system-admin` 的“钱包/保证金对账”；前端入口和后端接口都只认该专用权限，不能用 `wallet:withdrawals:page` 或 `finance:records:list` 兜底。有效保证金口径为员工状态正常/冻结且当前保证金 > 0，无效/需处理包含退店、黑名单或无保证金员工。`MANUAL_DEPOSIT` 表示后台手动录入，业务上按线下收款对账；对账统计需兼容历史旧表 `WalletDepositTransaction` 与当前表 `wallet_deposit_transactions`，避免流水列表可见但对账汇总漏算。
 
 ## 环境与域名
 

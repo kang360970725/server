@@ -434,40 +434,115 @@ export class WalletDepositService {
         });
 
         const userIds = users.map((u) => u.id);
-        const [manualGroups, totalGroups, latestRows, latestManualRows, config] = await Promise.all([
-            userIds.length
-                ? this.prisma.walletDepositTransaction.groupBy({
+        const legacyTableExists = await this.tableExists('WalletDepositTransaction');
+        let manualGroups: any[] = [];
+        let totalGroups: any[] = [];
+        let latestRows: any[] = [];
+        let latestManualRows: any[] = [];
+
+        if (userIds.length && legacyTableExists) {
+            const placeholders = userIds.map(() => '?').join(',');
+            [manualGroups, totalGroups, latestRows, latestManualRows] = await Promise.all([
+                this.prisma.$queryRawUnsafe<any[]>(
+                    `
+                        SELECT userId, SUM(amount) AS totalAmount, COUNT(*) AS transactionCount
+                        FROM (
+                            SELECT userId, amount
+                            FROM wallet_deposit_transactions
+                            WHERE userId IN (${placeholders}) AND bizType = 'MANUAL_DEPOSIT'
+                            UNION ALL
+                            SELECT userId, amount
+                            FROM WalletDepositTransaction
+                            WHERE userId IN (${placeholders}) AND bizType = 'MANUAL_DEPOSIT'
+                        ) t
+                        GROUP BY userId
+                    `,
+                    ...userIds,
+                    ...userIds,
+                ),
+                this.prisma.$queryRawUnsafe<any[]>(
+                    `
+                        SELECT userId, SUM(amount) AS totalAmount, COUNT(*) AS transactionCount
+                        FROM (
+                            SELECT userId, amount
+                            FROM wallet_deposit_transactions
+                            WHERE userId IN (${placeholders})
+                            UNION ALL
+                            SELECT userId, amount
+                            FROM WalletDepositTransaction
+                            WHERE userId IN (${placeholders})
+                        ) t
+                        GROUP BY userId
+                    `,
+                    ...userIds,
+                    ...userIds,
+                ),
+                this.prisma.$queryRawUnsafe<any[]>(
+                    `
+                        SELECT userId, createdAt
+                        FROM (
+                            SELECT userId, createdAt, id
+                            FROM wallet_deposit_transactions
+                            WHERE userId IN (${placeholders})
+                            UNION ALL
+                            SELECT userId, createdAt, id
+                            FROM WalletDepositTransaction
+                            WHERE userId IN (${placeholders})
+                        ) t
+                        ORDER BY createdAt DESC, id DESC
+                    `,
+                    ...userIds,
+                    ...userIds,
+                ),
+                this.prisma.$queryRawUnsafe<any[]>(
+                    `
+                        SELECT userId, operatorId, createdAt
+                        FROM (
+                            SELECT userId, operatorId, createdAt, id
+                            FROM wallet_deposit_transactions
+                            WHERE userId IN (${placeholders}) AND bizType = 'MANUAL_DEPOSIT'
+                            UNION ALL
+                            SELECT userId, operatorId, createdAt, id
+                            FROM WalletDepositTransaction
+                            WHERE userId IN (${placeholders}) AND bizType = 'MANUAL_DEPOSIT'
+                        ) t
+                        ORDER BY createdAt DESC, id DESC
+                    `,
+                    ...userIds,
+                    ...userIds,
+                ),
+            ]);
+        } else if (userIds.length) {
+            [manualGroups, totalGroups, latestRows, latestManualRows] = await Promise.all([
+                this.prisma.walletDepositTransaction.groupBy({
                     by: ['userId'],
                     where: { userId: { in: userIds }, bizType: 'MANUAL_DEPOSIT' as any },
                     _sum: { amount: true },
                     _count: { _all: true },
-                })
-                : [],
-            userIds.length
-                ? this.prisma.walletDepositTransaction.groupBy({
+                }),
+                this.prisma.walletDepositTransaction.groupBy({
                     by: ['userId'],
                     where: { userId: { in: userIds } },
                     _sum: { amount: true },
                     _count: { _all: true },
-                })
-                : [],
-            userIds.length
-                ? this.prisma.walletDepositTransaction.findMany({
+                }),
+                this.prisma.walletDepositTransaction.findMany({
                     where: { userId: { in: userIds } },
                     select: { userId: true, createdAt: true },
                     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-                })
-                : [],
-            userIds.length
-                ? this.prisma.walletDepositTransaction.findMany({
+                }),
+                this.prisma.walletDepositTransaction.findMany({
                     where: { userId: { in: userIds }, bizType: 'MANUAL_DEPOSIT' as any },
                     select: { userId: true, operatorId: true, createdAt: true },
                     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-                })
-                : [],
-            this.staffRuleEngineService.getConfig(),
-        ]);
+                }),
+            ]);
+        }
 
+        const config = await this.staffRuleEngineService.getConfig();
+
+        const readGroupAmount = (row: any) => row?._sum?.amount ?? row?.totalAmount ?? 0;
+        const readGroupCount = (row: any) => row?._count?._all ?? row?.transactionCount ?? 0;
         const manualMap = new Map<number, any>((manualGroups as any[]).map((row: any) => [Number(row.userId), row] as [number, any]));
         const totalMap = new Map<number, any>((totalGroups as any[]).map((row: any) => [Number(row.userId), row] as [number, any]));
         const latestMap = new Map<number, Date>();
@@ -493,10 +568,10 @@ export class WalletDepositService {
             const depositBalance = this.round2(user.walletAccount?.depositBalance ?? 0);
             const manual = manualMap.get(user.id) as any;
             const total = totalMap.get(user.id) as any;
-            const manualDepositAmount = this.round2(manual?._sum?.amount ?? 0);
+            const manualDepositAmount = this.round2(readGroupAmount(manual));
             const latestManual = latestManualMap.get(user.id);
             const latestManualOperator = operatorMap.get(Number(latestManual?.operatorId || 0));
-            const depositNetAmount = this.round2(total?._sum?.amount ?? 0);
+            const depositNetAmount = this.round2(readGroupAmount(total));
             const deductionAmount = this.round2(Math.abs(Math.min(0, depositNetAmount - manualDepositAmount)));
             const matchedRule = user.userType === UserType.STAFF
                 ? this.staffRuleEngineService.resolveMatchedRule(config, user.staffTags)
@@ -538,8 +613,8 @@ export class WalletDepositService {
                 latestManualOperatorPhone: latestManualOperator?.phone || '',
                 depositNetAmount,
                 deductionAmount,
-                transactionCount: Number(total?._count?._all || 0),
-                manualTransactionCount: Number(manual?._count?._all || 0),
+                transactionCount: Number(readGroupCount(total) || 0),
+                manualTransactionCount: Number(readGroupCount(manual) || 0),
                 latestDepositAt: latestMap.get(user.id) || null,
                 staffExitedAt: user.staffExitedAt,
                 createdAt: user.createdAt,
