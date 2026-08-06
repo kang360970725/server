@@ -311,6 +311,9 @@ export class OrdersController {
                 playerEvaluations: body?.playerEvaluations,
                 orderTipEnabled: body?.orderTipEnabled,
                 orderTipUserIds: body?.orderTipUserIds,
+                renewalAction: body?.renewalAction,
+                invalidateRenewal: body?.invalidateRenewal,
+                renewalInvalidateReason: body?.renewalInvalidateReason,
             },
         );
     }
@@ -491,6 +494,8 @@ export class OrdersController {
             playerEvaluations?: any;
             orderTipEnabled?: boolean;
             orderTipUserIds?: any;
+            invalidateRenewal?: boolean;
+            renewalInvalidateReason?: string;
         },
         @Req() req: any,
     ) {
@@ -512,6 +517,8 @@ export class OrdersController {
             playerEvaluations: body?.playerEvaluations,
             orderTipEnabled: body?.orderTipEnabled,
             orderTipUserIds: body?.orderTipUserIds,
+            invalidateRenewal: body?.invalidateRenewal,
+            renewalInvalidateReason: body?.renewalInvalidateReason,
         } as any);
     }
 

@@ -36,6 +36,40 @@ export class WalletWithdrawalsService {
         private readonly equipmentRentalFeeService?: EquipmentRentalFeeService,
     ) {}
 
+    private normalizeIdempotencyKey(idempotencyKey: string) {
+        const key = String(idempotencyKey || '').trim();
+        if (!key) {
+            throw new BadRequestException('提现幂等键必填');
+        }
+        if (key.length > 64) {
+            throw new BadRequestException('提现幂等键长度不能超过 64');
+        }
+        return key;
+    }
+
+    private async lockWalletAccountTx(tx: any, userId: number) {
+        await tx.$queryRawUnsafe(
+            'SELECT userId FROM wallet_accounts WHERE userId = ? FOR UPDATE',
+            Number(userId),
+        );
+    }
+
+    private async lockWithdrawalRequestTx(tx: any, requestId: number) {
+        await tx.$queryRawUnsafe(
+            'SELECT id FROM wallet_withdrawal_requests WHERE id = ? FOR UPDATE',
+            Number(requestId),
+        );
+    }
+
+    private assertWalletBucketsNonNegative(account: any) {
+        const available = round2(Number(account?.availableBalance ?? 0));
+        const frozen = round2(Number(account?.frozenBalance ?? 0));
+        const withdrawFrozen = round2(Number(account?.withdrawFrozenBalance ?? 0));
+        if (available < 0 || frozen < 0 || withdrawFrozen < 0) {
+            throw new BadRequestException('钱包余额异常，资金操作已阻断');
+        }
+    }
+
     private async autoFreezeDormantStaffIfNeeded(userId: number, tx: any) {
         const user = await tx.user.findUnique({
             where: { id: Number(userId) },
@@ -283,7 +317,8 @@ export class WalletWithdrawalsService {
         channel?: 'MANUAL' | 'WECHAT';
         payOfflineFeeAmount?: number;
     }) {
-        const { userId, amount, idempotencyKey, remark, channel = 'MANUAL', payOfflineFeeAmount } = params;
+        const { userId, amount, remark, channel = 'MANUAL', payOfflineFeeAmount } = params;
+        const idempotencyKey = this.normalizeIdempotencyKey(params.idempotencyKey);
 
         if (!amount || amount <= 0) {
             throw new BadRequestException('提现金额必须大于 0');
@@ -329,6 +364,13 @@ export class WalletWithdrawalsService {
             if (!u.canWithdraw && !allowExitedStaffWithdraw) {
                 throw new BadRequestException('当前账户暂不允许提现');
             }
+
+            await this.lockWalletAccountTx(tx, userId);
+
+            const repeatedRequest = await tx.walletWithdrawalRequest.findFirst({
+                where: { userId, idempotencyKey },
+            });
+            if (repeatedRequest) return repeatedRequest;
 
             // =========================
             // Step 1：提现次数限制
@@ -511,6 +553,7 @@ export class WalletWithdrawalsService {
                 depositDelta: depositAdd,
                 withdrawFrozenDelta: withdrawAmount,
             });
+            this.assertWalletBucketsNonNegative(accountAfterUpdate);
 
             // =========================
             // Step 5：押金流水
@@ -621,6 +664,7 @@ export class WalletWithdrawalsService {
         const { requestId, reviewerId, approve, reviewRemark } = params;
 
         return this.prisma.$transaction(async (tx) => {
+            await this.lockWithdrawalRequestTx(tx, requestId);
             const req = await tx.walletWithdrawalRequest.findUnique({
                 where: { id: requestId },
             });
@@ -641,6 +685,7 @@ export class WalletWithdrawalsService {
             if (approve) {
                 // 1) 幂等：是否已存在出款流水（避免重复扣 frozen）
                 const PAYOUT_SOURCE_TYPE = 'WITHDRAWAL_REQUEST_PAYOUT';
+                await this.lockWalletAccountTx(tx, req.userId);
 
                 const existingPayout = await tx.walletTransaction.findUnique({
                     where: {
@@ -659,6 +704,7 @@ export class WalletWithdrawalsService {
                     const accountAfterPayout = await this.walletService.applyWalletAccountDelta(tx as any, req.userId, {
                         withdrawFrozenDelta: -req.amount,
                     });
+                    this.assertWalletBucketsNonNegative(accountAfterPayout);
 
                     // 3) 写出款流水（WITHDRAW_PAYOUT）
                     const payoutTx = await tx.walletTransaction.upsert({
@@ -716,6 +762,7 @@ export class WalletWithdrawalsService {
             // ❌ 审批驳回：资金退回（frozen -> available）+ 幂等退回流水
             // ===========================
             const RELEASE_SOURCE_TYPE = 'WITHDRAWAL_REQUEST_RELEASE';
+            await this.lockWalletAccountTx(tx, req.userId);
 
             // 1) 先查“退回流水”是否已存在：存在则说明已退回过，避免重复回滚余额
             const existingReleaseTx = await tx.walletTransaction.findUnique({
@@ -736,6 +783,7 @@ export class WalletWithdrawalsService {
                     withdrawFrozenDelta: -req.amount,
                     availableDelta: req.amount,
                 });
+                this.assertWalletBucketsNonNegative(accountAfterRelease);
 
                 // 3) 写退回流水（WITHDRAW_RELEASE）
                 await tx.walletTransaction.upsert({

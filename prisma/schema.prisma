@@ -109,6 +109,7 @@ model User {
   csDutyLeaveCreated          CsDutyLeave[]              @relation("CsDutyLeaveCreator")
   orderParticipants           OrderParticipant[]
   orderSettlements            OrderSettlement[]
+  orderRenewalBonuses         OrderRenewalBonus[]
   orderPlayerEvaluations      OrderPlayerEvaluation[]    @relation("OrderPlayerEvaluationPlayer")
   orderPlayerEvaluationsGiven OrderPlayerEvaluation[]    @relation("OrderPlayerEvaluationEvaluator")
   recharges                   Recharge[]
@@ -154,21 +155,21 @@ model User {
 }
 
 model Questionnaire {
-  id               Int                        @id @default(autoincrement())
-  title            String                     @db.VarChar(255)
-  description      String?                    @db.Text
-  scope            QuestionnaireScope         @default(UNRESTRICTED)
-  status           QuestionnaireStatus        @default(DRAFT)
-  publishedAt      DateTime?
-  startAt          DateTime?
-  endAt            DateTime?
-  allowEditSubmit  Boolean                    @default(false)
-  createdBy        Int?
-  createdAt        DateTime                   @default(now())
-  updatedAt        DateTime                   @updatedAt
-  creator          User?                      @relation("QuestionnaireCreator", fields: [createdBy], references: [id], onDelete: SetNull)
-  questions        QuestionnaireQuestion[]
-  submissions      QuestionnaireSubmission[]
+  id              Int                       @id @default(autoincrement())
+  title           String                    @db.VarChar(255)
+  description     String?                   @db.Text
+  scope           QuestionnaireScope        @default(UNRESTRICTED)
+  status          QuestionnaireStatus       @default(DRAFT)
+  publishedAt     DateTime?
+  startAt         DateTime?
+  endAt           DateTime?
+  allowEditSubmit Boolean                   @default(false)
+  createdBy       Int?
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+  creator         User?                     @relation("QuestionnaireCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  questions       QuestionnaireQuestion[]
+  submissions     QuestionnaireSubmission[]
 
   @@index([scope, status, startAt, endAt], map: "idx_questionnaire_scope_status_time")
   @@index([createdBy], map: "idx_questionnaire_created_by")
@@ -176,54 +177,54 @@ model Questionnaire {
 }
 
 model QuestionnaireQuestion {
-  id               Int                        @id @default(autoincrement())
-  questionnaireId  Int
-  title            String                     @db.VarChar(255)
-  description      String?                    @db.Text
-  type             QuestionnaireQuestionType
-  required         Boolean                    @default(false)
-  sortOrder        Int                        @default(100)
-  createdAt        DateTime                   @default(now())
-  updatedAt        DateTime                   @updatedAt
-  questionnaire    Questionnaire              @relation(fields: [questionnaireId], references: [id], onDelete: Cascade)
-  options          QuestionnaireOption[]
-  answers          QuestionnaireAnswer[]
+  id              Int                       @id @default(autoincrement())
+  questionnaireId Int
+  title           String                    @db.VarChar(255)
+  description     String?                   @db.Text
+  type            QuestionnaireQuestionType
+  required        Boolean                   @default(false)
+  sortOrder       Int                       @default(100)
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+  questionnaire   Questionnaire             @relation(fields: [questionnaireId], references: [id], onDelete: Cascade)
+  options         QuestionnaireOption[]
+  answers         QuestionnaireAnswer[]
 
   @@index([questionnaireId, sortOrder], map: "idx_questionnaire_question_order")
   @@map("questionnaire_questions")
 }
 
 model QuestionnaireOption {
-  id               Int                        @id @default(autoincrement())
-  questionId       Int
-  label            String                     @db.VarChar(255)
-  isOther          Boolean                    @default(false)
-  sortOrder        Int                        @default(100)
-  createdAt        DateTime                   @default(now())
-  updatedAt        DateTime                   @updatedAt
-  question         QuestionnaireQuestion      @relation(fields: [questionId], references: [id], onDelete: Cascade)
-  answers          QuestionnaireAnswer[]
+  id         Int                   @id @default(autoincrement())
+  questionId Int
+  label      String                @db.VarChar(255)
+  isOther    Boolean               @default(false)
+  sortOrder  Int                   @default(100)
+  createdAt  DateTime              @default(now())
+  updatedAt  DateTime              @updatedAt
+  question   QuestionnaireQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  answers    QuestionnaireAnswer[]
 
   @@index([questionId, sortOrder], map: "idx_questionnaire_option_order")
   @@map("questionnaire_options")
 }
 
 model QuestionnaireSubmission {
-  id                    Int                      @id @default(autoincrement())
-  questionnaireId       Int
-  userId                Int?
-  submitterName         String?                  @db.VarChar(100)
-  submitterPhone        String?                  @db.VarChar(64)
-  submitterUserType     String?                  @db.VarChar(32)
-  submitterStaffStatus  String?                  @db.VarChar(32)
-  visitorToken          String?                  @db.VarChar(128)
-  clientIp              String?                  @db.VarChar(128)
-  userAgent             String?                  @db.VarChar(512)
-  createdAt             DateTime                 @default(now())
-  updatedAt             DateTime                 @updatedAt
-  questionnaire         Questionnaire            @relation(fields: [questionnaireId], references: [id], onDelete: Cascade)
-  user                  User?                    @relation(fields: [userId], references: [id], onDelete: SetNull)
-  answers               QuestionnaireAnswer[]
+  id                   Int                   @id @default(autoincrement())
+  questionnaireId      Int
+  userId               Int?
+  submitterName        String?               @db.VarChar(100)
+  submitterPhone       String?               @db.VarChar(64)
+  submitterUserType    String?               @db.VarChar(32)
+  submitterStaffStatus String?               @db.VarChar(32)
+  visitorToken         String?               @db.VarChar(128)
+  clientIp             String?               @db.VarChar(128)
+  userAgent            String?               @db.VarChar(512)
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  questionnaire        Questionnaire         @relation(fields: [questionnaireId], references: [id], onDelete: Cascade)
+  user                 User?                 @relation(fields: [userId], references: [id], onDelete: SetNull)
+  answers              QuestionnaireAnswer[]
 
   @@unique([questionnaireId, userId], map: "uniq_questionnaire_submission_user")
   @@index([questionnaireId, createdAt], map: "idx_questionnaire_submission_time")
@@ -232,16 +233,16 @@ model QuestionnaireSubmission {
 }
 
 model QuestionnaireAnswer {
-  id               Int                        @id @default(autoincrement())
-  submissionId     Int
-  questionId       Int
-  optionId         Int?
-  textValue        String?                    @db.Text
-  createdAt        DateTime                   @default(now())
-  updatedAt        DateTime                   @updatedAt
-  submission       QuestionnaireSubmission    @relation(fields: [submissionId], references: [id], onDelete: Cascade)
-  question         QuestionnaireQuestion      @relation(fields: [questionId], references: [id], onDelete: Cascade)
-  option           QuestionnaireOption?       @relation(fields: [optionId], references: [id], onDelete: SetNull)
+  id           Int                     @id @default(autoincrement())
+  submissionId Int
+  questionId   Int
+  optionId     Int?
+  textValue    String?                 @db.Text
+  createdAt    DateTime                @default(now())
+  updatedAt    DateTime                @updatedAt
+  submission   QuestionnaireSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  question     QuestionnaireQuestion   @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  option       QuestionnaireOption?    @relation(fields: [optionId], references: [id], onDelete: SetNull)
 
   @@index([submissionId], map: "idx_questionnaire_answer_submission")
   @@index([questionId], map: "idx_questionnaire_answer_question")
@@ -749,50 +750,50 @@ model MemberPointTransaction {
 }
 
 model MemberRechargePlan {
-  id             Int                   @id @default(autoincrement())
-  title          String                @db.VarChar(64)
-  amount         Decimal               @db.Decimal(10, 2)
-  bonusAmount    Decimal               @default(0.00) @db.Decimal(10, 2)
-  giftPoints     Int                   @default(0)
-  giftGrowthValue Int                  @default(0)
-  couponBenefits Json?
-  couponText     String?               @db.VarChar(120)
-  badgeText      String?               @db.VarChar(32)
-  sortOrder      Int                   @default(100)
-  enabled        Boolean               @default(true)
-  createdAt      DateTime              @default(now())
-  updatedAt      DateTime              @updatedAt
-  rechargeOrders MemberRechargeOrder[]
+  id              Int                   @id @default(autoincrement())
+  title           String                @db.VarChar(64)
+  amount          Decimal               @db.Decimal(10, 2)
+  bonusAmount     Decimal               @default(0.00) @db.Decimal(10, 2)
+  giftPoints      Int                   @default(0)
+  giftGrowthValue Int                   @default(0)
+  couponBenefits  Json?
+  couponText      String?               @db.VarChar(120)
+  badgeText       String?               @db.VarChar(32)
+  sortOrder       Int                   @default(100)
+  enabled         Boolean               @default(true)
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  rechargeOrders  MemberRechargeOrder[]
 
   @@index([enabled, sortOrder], map: "idx_member_recharge_plan_enabled_sort")
   @@map("member_recharge_plans")
 }
 
 model MemberRechargeOrder {
-  id            Int                       @id @default(autoincrement())
-  rechargeNo    String                    @unique @db.VarChar(64)
-  userId        Int
-  planId        Int?
-  amount        Decimal                   @db.Decimal(10, 2)
-  bonusAmount   Decimal                   @default(0.00) @db.Decimal(10, 2)
-  grantedAmount Decimal                   @default(0.00) @db.Decimal(10, 2)
-  giftPoints    Int                       @default(0)
-  giftGrowthValue Int                     @default(0)
-  couponBenefits Json?
-  payAmount     Decimal                   @db.Decimal(10, 2)
-  channel       String                    @default("WECHAT") @db.VarChar(20)
-  status        MemberRechargeOrderStatus @default(PENDING)
-  operatorId    Int?
-  remark        String?                   @db.VarChar(255)
-  payerOpenid   String?                   @db.VarChar(128)
-  prepayId      String?                   @db.VarChar(128)
-  transactionId String?                   @db.VarChar(128)
-  notifyRaw     Json?
-  paidAt        DateTime?
-  createdAt     DateTime                  @default(now())
-  updatedAt     DateTime                  @updatedAt
-  user          User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  plan          MemberRechargePlan?       @relation(fields: [planId], references: [id], onDelete: SetNull)
+  id              Int                       @id @default(autoincrement())
+  rechargeNo      String                    @unique @db.VarChar(64)
+  userId          Int
+  planId          Int?
+  amount          Decimal                   @db.Decimal(10, 2)
+  bonusAmount     Decimal                   @default(0.00) @db.Decimal(10, 2)
+  grantedAmount   Decimal                   @default(0.00) @db.Decimal(10, 2)
+  giftPoints      Int                       @default(0)
+  giftGrowthValue Int                       @default(0)
+  couponBenefits  Json?
+  payAmount       Decimal                   @db.Decimal(10, 2)
+  channel         String                    @default("WECHAT") @db.VarChar(20)
+  status          MemberRechargeOrderStatus @default(PENDING)
+  operatorId      Int?
+  remark          String?                   @db.VarChar(255)
+  payerOpenid     String?                   @db.VarChar(128)
+  prepayId        String?                   @db.VarChar(128)
+  transactionId   String?                   @db.VarChar(128)
+  notifyRaw       Json?
+  paidAt          DateTime?
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+  user            User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan            MemberRechargePlan?       @relation(fields: [planId], references: [id], onDelete: SetNull)
 
   @@index([userId, status, createdAt], map: "idx_member_recharge_order_user_status")
   @@index([planId], map: "idx_member_recharge_order_plan")
@@ -872,6 +873,12 @@ model Order {
   status                 OrderStatus             @default(WAIT_ASSIGN)
   /// 当前派单批次（为了快速查“这一轮派单/状态”）
   currentDispatchId      Int?
+  /// 是否续单：创建订单首轮派单时固化；续单订单推荐人失效
+  isRenewal              Boolean                 @default(false)
+  /// 续单榜单统计金额（客服确认结单后写入，默认按实付）
+  renewalAmount          Decimal                 @default(0) @db.Decimal(12, 2)
+  /// 续单榜单统计数量（订单维度，确认有效后为 1）
+  renewalCount           Decimal                 @default(0) @db.Decimal(8, 2)
   createdAt              DateTime                @default(now())
   updatedAt              DateTime                @updatedAt
   /// 是否赠送单：赠送单不收款，但仍正常结算/分红；
@@ -917,12 +924,15 @@ model Order {
   latestPayment          OrderPayment?           @relation("OrderLatestPayment", fields: [latestPaymentId], references: [id])
   payments               OrderPayment[]          @relation("OrderPayments")
   refunds                OrderRefund[]
+  renewalGroups          OrderRenewalGroup[]
+  renewalBonuses         OrderRenewalBonus[]
 
   @@index([projectId])
   @@index([dispatcherId])
   @@index([initialDispatcherId])
   @@index([customerUserId])
   @@index([status])
+  @@index([isRenewal])
   @@index([orderSource])
   @@index([customerGameId])
   @@index([currentDispatchId], map: "Order_currentDispatchId_fkey")
@@ -955,22 +965,22 @@ model OrderPayment {
 }
 
 model OrderRefund {
-  id              Int       @id @default(autoincrement())
+  id               Int           @id @default(autoincrement())
   orderId          Int
   paymentId        Int?
-  refundNo         String    @unique @db.VarChar(64)
-  channel          String    @db.VarChar(32) // MINIAPP_WECHAT/BALANCE/MANUAL_SHOUQIANBA/TUTU_PLATFORM/THIRD_PARTY_CHANNEL
-  status           String    @db.VarChar(24) // SUCCESS/MANUAL_REQUIRED/FAILED
-  amount           Decimal   @db.Decimal(10, 2)
-  currency         String    @default("CNY") @db.VarChar(8)
-  reason           String?   @db.VarChar(128)
-  externalRefundId String?   @db.VarChar(128)
+  refundNo         String        @unique @db.VarChar(64)
+  channel          String        @db.VarChar(32) // MINIAPP_WECHAT/BALANCE/MANUAL_SHOUQIANBA/TUTU_PLATFORM/THIRD_PARTY_CHANNEL
+  status           String        @db.VarChar(24) // SUCCESS/MANUAL_REQUIRED/FAILED
+  amount           Decimal       @db.Decimal(10, 2)
+  currency         String        @default("CNY") @db.VarChar(8)
+  reason           String?       @db.VarChar(128)
+  externalRefundId String?       @db.VarChar(128)
   operatorId       Int?
   raw              Json?
   refundedAt       DateTime?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-  order            Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  order            Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
   payment          OrderPayment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
 
   @@index([orderId, createdAt], map: "idx_order_refunds_order_time")
@@ -980,26 +990,26 @@ model OrderRefund {
 }
 
 model ComplaintWorkOrder {
-  id                     Int      @id @default(autoincrement())
-  ticketNo               String   @unique @db.VarChar(64)
-  orderId                Int      @unique
-  userId                 Int
-  status                 String   @db.VarChar(32)
-  reason                 String   @db.VarChar(120)
-  description            String?  @db.Text
-  paymentChannel         String?  @db.VarChar(32)
-  refundSupported        Boolean  @default(false)
-  refundUnsupportedReason String? @db.VarChar(255)
-  suggestedRefundAmount  Decimal? @db.Decimal(10, 2)
-  approvedRefundAmount   Decimal? @db.Decimal(10, 2)
-  reviewRemark           String?  @db.VarChar(255)
-  refundRemark           String?  @db.VarChar(255)
-  reviewedBy             Int?
-  reviewedAt             DateTime?
-  refundedBy             Int?
-  refundedAt             DateTime?
-  createdAt              DateTime @default(now())
-  updatedAt              DateTime @updatedAt
+  id                      Int       @id @default(autoincrement())
+  ticketNo                String    @unique @db.VarChar(64)
+  orderId                 Int       @unique
+  userId                  Int
+  status                  String    @db.VarChar(32)
+  reason                  String    @db.VarChar(120)
+  description             String?   @db.Text
+  paymentChannel          String?   @db.VarChar(32)
+  refundSupported         Boolean   @default(false)
+  refundUnsupportedReason String?   @db.VarChar(255)
+  suggestedRefundAmount   Decimal?  @db.Decimal(10, 2)
+  approvedRefundAmount    Decimal?  @db.Decimal(10, 2)
+  reviewRemark            String?   @db.VarChar(255)
+  refundRemark            String?   @db.VarChar(255)
+  reviewedBy              Int?
+  reviewedAt              DateTime?
+  refundedBy              Int?
+  refundedAt              DateTime?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
 
   @@index([status, createdAt], map: "idx_complaint_work_orders_status_time")
   @@index([userId, createdAt], map: "idx_complaint_work_orders_user_time")
@@ -1085,6 +1095,7 @@ model OrderDispatch {
   participants       OrderParticipant[]
   settlements        OrderSettlement[]
   playerEvaluations  OrderPlayerEvaluation[]
+  renewalGroups      OrderRenewalGroup[]
 
   @@unique([orderId, round])
   @@index([orderId])
@@ -1166,6 +1177,69 @@ model OrderSettlement {
   @@index([settlementBatchId])
 }
 
+model OrderRenewalGroup {
+  id                  Int                 @id @default(autoincrement())
+  orderId             Int
+  dispatchId          Int
+  /// 续单组合 key：续单打手 userId 升序拼接，例如 "12,18"
+  groupKey            String              @db.VarChar(255)
+  memberUserIds       Json
+  memberNamesSnapshot Json?
+  /// PENDING / SETTLED / INVALIDATED / REVERSED
+  status              String              @default("PENDING") @db.VarChar(24)
+  renewalOrderCount   Decimal             @default(0) @db.Decimal(8, 2)
+  renewalAmount       Decimal             @default(0) @db.Decimal(12, 2)
+  bonusBaseAmount     Decimal             @default(0) @db.Decimal(12, 2)
+  bonusRate           Decimal             @default(0) @db.Decimal(6, 4)
+  bonusTotalAmount    Decimal             @default(0) @db.Decimal(12, 2)
+  settlementBatchId   String?             @db.VarChar(36)
+  createdBy           Int?
+  settledBy           Int?
+  settledAt           DateTime?
+  invalidatedBy       Int?
+  invalidatedAt       DateTime?
+  invalidateReason    String?             @db.VarChar(255)
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  order               Order               @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  dispatch            OrderDispatch       @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
+  bonuses             OrderRenewalBonus[]
+
+  @@unique([orderId], map: "uniq_order_renewal_group_order")
+  @@index([groupKey, status, settledAt], map: "idx_order_renewal_group_rank")
+  @@index([dispatchId], map: "idx_order_renewal_group_dispatch")
+  @@map("order_renewal_groups")
+}
+
+model OrderRenewalBonus {
+  id                          Int               @id @default(autoincrement())
+  orderId                     Int
+  renewalGroupId              Int
+  userId                      Int
+  bonusBaseAmount             Decimal           @default(0) @db.Decimal(12, 2)
+  bonusRate                   Decimal           @default(0) @db.Decimal(6, 4)
+  bonusTotalAmount            Decimal           @default(0) @db.Decimal(12, 2)
+  bonusShareAmount            Decimal           @default(0) @db.Decimal(12, 2)
+  /// PAID / REVERSED
+  status                      String            @default("PAID") @db.VarChar(24)
+  settlementBatchId           String?           @db.VarChar(36)
+  walletTransactionId         Int?
+  reversalWalletTransactionId Int?
+  reversalReason              String?           @db.VarChar(255)
+  reversedAt                  DateTime?
+  createdAt                   DateTime          @default(now())
+  updatedAt                   DateTime          @updatedAt
+  order                       Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  renewalGroup                OrderRenewalGroup @relation(fields: [renewalGroupId], references: [id], onDelete: Cascade)
+  user                        User              @relation(fields: [userId], references: [id])
+
+  @@unique([renewalGroupId, userId], map: "uniq_order_renewal_bonus_group_user")
+  @@index([orderId], map: "idx_order_renewal_bonus_order")
+  @@index([userId, createdAt], map: "idx_order_renewal_bonus_user_time")
+  @@index([status], map: "idx_order_renewal_bonus_status")
+  @@map("order_renewal_bonuses")
+}
+
 model OrderPlayerEvaluation {
   id                   Int           @id @default(autoincrement())
   orderId              Int
@@ -1220,23 +1294,23 @@ model SettlementBatch {
 }
 
 model WalletAccount {
-  id               Int      @id @default(autoincrement())
+  id                    Int      @id @default(autoincrement())
   /// 一人一账
-  userId           Int      @unique
+  userId                Int      @unique
   /// 可用余额（可提现/可抵扣）
-  availableBalance Decimal  @default(0.0) @db.Decimal(10, 1)
+  availableBalance      Decimal  @default(0.0) @db.Decimal(10, 1)
   /// 冻结余额（未到解冻时间）
-  frozenBalance    Decimal  @default(0.0) @db.Decimal(10, 1)
+  frozenBalance         Decimal  @default(0.0) @db.Decimal(10, 1)
   /// 收益冻结余额（由 wallet_holds 驱动）
-  earningFrozenBalance Decimal @default(0.0) @db.Decimal(10, 1)
+  earningFrozenBalance  Decimal  @default(0.0) @db.Decimal(10, 1)
   /// 提现冻结余额（由 wallet_withdrawal_requests 驱动）
-  withdrawFrozenBalance Decimal @default(0.0) @db.Decimal(10, 1)
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  withdrawFrozenBalance Decimal  @default(0.0) @db.Decimal(10, 1)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
   /// 钱包UID：展示级唯一号（大写字母+数字混合），兼容老数据先允许为空
-  walletUid        String?  @unique @db.VarChar(20)
-  depositBalance   Decimal  @default(0.00) @db.Decimal(10, 2)
-  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  walletUid             String?  @unique @db.VarChar(20)
+  depositBalance        Decimal  @default(0.00) @db.Decimal(10, 2)
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("wallet_accounts")
 }
@@ -1347,20 +1421,20 @@ model WalletWithdrawalRequest {
 }
 
 model EquipmentRentalContract {
-  id                  Int                           @id @default(autoincrement())
-  userId              Int
-  monthlyAmount       Decimal                       @db.Decimal(10, 2)
-  startMonth          String                        @db.VarChar(7)
-  endMonth            String?                       @db.VarChar(7)
-  startDate           DateTime?
-  endDate             DateTime?
-  status              EquipmentRentalContractStatus @default(ACTIVE)
-  remark              String?                       @db.Text
-  createdBy           Int?
-  createdAt           DateTime                      @default(now())
-  updatedAt           DateTime                      @updatedAt
-  user                User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  bills               EquipmentRentalBill[]
+  id            Int                           @id @default(autoincrement())
+  userId        Int
+  monthlyAmount Decimal                       @db.Decimal(10, 2)
+  startMonth    String                        @db.VarChar(7)
+  endMonth      String?                       @db.VarChar(7)
+  startDate     DateTime?
+  endDate       DateTime?
+  status        EquipmentRentalContractStatus @default(ACTIVE)
+  remark        String?                       @db.Text
+  createdBy     Int?
+  createdAt     DateTime                      @default(now())
+  updatedAt     DateTime                      @updatedAt
+  user          User                          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bills         EquipmentRentalBill[]
 
   @@index([userId, status], map: "idx_equipment_rental_contract_user_status")
   @@index([status, startMonth], map: "idx_equipment_rental_contract_status_month")
@@ -1369,26 +1443,26 @@ model EquipmentRentalContract {
 }
 
 model EquipmentRentalBill {
-  id             Int                       @id @default(autoincrement())
-  contractId     Int
-  userId         Int
-  billMonth      String                    @db.VarChar(7)
-  periodStart    DateTime
-  periodEnd      DateTime
-  amount         Decimal                   @db.Decimal(10, 2)
-  paidAmount     Decimal                   @default(0.00) @db.Decimal(10, 2)
-  remainingAmount Decimal                  @db.Decimal(10, 2)
-  status         EquipmentRentalBillStatus @default(PENDING)
-  dueAt          DateTime?
-  confirmedAt    DateTime?
-  generatedAt    DateTime                  @default(now())
-  walletTxId      Int?                     @unique
-  remark         String?                   @db.Text
-  createdAt      DateTime                  @default(now())
-  updatedAt      DateTime                  @updatedAt
-  contract       EquipmentRentalContract   @relation(fields: [contractId], references: [id], onDelete: Cascade)
-  user           User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  walletTx       WalletTransaction?        @relation("EquipmentRentalWalletTx", fields: [walletTxId], references: [id])
+  id              Int                       @id @default(autoincrement())
+  contractId      Int
+  userId          Int
+  billMonth       String                    @db.VarChar(7)
+  periodStart     DateTime
+  periodEnd       DateTime
+  amount          Decimal                   @db.Decimal(10, 2)
+  paidAmount      Decimal                   @default(0.00) @db.Decimal(10, 2)
+  remainingAmount Decimal                   @db.Decimal(10, 2)
+  status          EquipmentRentalBillStatus @default(PENDING)
+  dueAt           DateTime?
+  confirmedAt     DateTime?
+  generatedAt     DateTime                  @default(now())
+  walletTxId      Int?                      @unique
+  remark          String?                   @db.Text
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+  contract        EquipmentRentalContract   @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  user            User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  walletTx        WalletTransaction?        @relation("EquipmentRentalWalletTx", fields: [walletTxId], references: [id])
 
   @@unique([userId, billMonth], map: "uniq_equipment_rental_user_month")
   @@index([contractId, billMonth], map: "idx_equipment_rental_bill_contract_month")
@@ -1659,6 +1733,10 @@ enum WalletBizType {
   SETTLEMENT_BOMB_LOSS
   /// ✅ 客服分红
   SETTLEMENT_EARNING_CS
+  /// ✅ 续单额外分红
+  ORDER_RENEWAL_BONUS
+  /// ✅ 续单额外分红冲正
+  ORDER_RENEWAL_BONUS_REVERSAL
   RELEASE_FROZEN
   REFUND_REVERSAL
   /// ✅ 提现：申请时的资金预扣（available -> frozen）

@@ -111,6 +111,7 @@ export class SystemConfigService implements OnModuleInit {
     COS_REGION: 'cos_region',
     COS_CDN_DOMAIN: 'cos_cdn_domain',
     ORDER_SOURCE_OPTIONS: 'order_source_options',
+    ORDER_RENEWAL_BONUS_RULES: 'order_renewal_bonus_rules',
     MINIAPP_HOME_CONFIG: 'miniapp_home_config',
     MINIAPP_HOME_CONFIG_DRAFT: 'miniapp_home_config_draft',
     MINIAPP_HOME_CONFIG_PUBLISHED: 'miniapp_home_config_published',
@@ -320,6 +321,19 @@ export class SystemConfigService implements OnModuleInit {
         ], null, 2),
         valueType: 'JSON',
         remark: '订单渠道来源选项',
+      },
+      {
+        key: SystemConfigService.KEYS.ORDER_RENEWAL_BONUS_RULES,
+        value: JSON.stringify({
+          enabled: true,
+          baseAmountField: 'paidAmount',
+          tiers: [
+            { min: 0, max: 300, rate: 0.01 },
+            { min: 300.01, max: null, rate: 0.02 },
+          ],
+        }, null, 2),
+        valueType: 'JSON',
+        remark: '续单额外分红配置；配置失效时兜底为实付<=300按1%，>300按2%',
       },
       {
         key: SystemConfigService.KEYS.MINIAPP_HOME_CONFIG,

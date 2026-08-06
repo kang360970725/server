@@ -6,7 +6,9 @@ import {
     IsDateString,
     Min,
     IsBoolean, // ✅ 新增
+    IsArray,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 
 /**
  * 创建订单 DTO（v0.1）
@@ -136,5 +138,25 @@ export class CreateOrderDto {
     @IsOptional()
     @IsInt()
     userCouponId?: number;
+
+    /**
+     * 是否续单：
+     * - 只能在创建订单并首轮派单时设置
+     * - 开启后推荐人失效
+     */
+    @IsOptional()
+    @IsBoolean()
+    isRenewal?: boolean;
+
+    /**
+     * 续单归属打手：
+     * - 必须是本次创建订单传入 playerIds 的子集
+     * - 多人时榜单按组合维度统计，分红按人均分
+     */
+    @IsOptional()
+    @IsArray()
+    @Type(() => Number)
+    @IsInt({ each: true })
+    renewalPlayerIds?: number[];
 
 }

@@ -1102,6 +1102,7 @@ export class WalletService {
                     sourceId: params.sourceId,
                     availableAfter: round2(Number(accountAfter?.availableBalance ?? 0)),
                     frozenAfter: round2(Number(accountAfter?.frozenBalance ?? 0)),
+                    remark: params.remark || null,
                 } as any,
             });
         };

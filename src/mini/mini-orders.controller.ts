@@ -75,6 +75,12 @@ export class MiniOrdersController {
     return `WX_${orderId}_${ts}_${suffix}`;
   }
 
+  private toMoney2(value: any): number {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.trunc(n * 100) / 100;
+  }
+
   private normalizeReviewLabel(score: number) {
     if (score <= 2) return '差评';
     if (score === 3) return '中评';
@@ -363,24 +369,31 @@ export class MiniOrdersController {
     await this.memberService.assertMiniPhoneBound(uid);
     const playerIds = await this.resolveMiniOrderPlayerIds(body);
     const projectId = Number(body?.projectId);
+    const orderQuantity = Math.max(1, Math.floor(Number(body?.orderQuantity ?? 1)));
     const customerGameId = await this.memberService.assertMiniGameCardForOrder(uid, projectId, body?.customerGameId);
+    const project = await this.prisma.gameProject.findUnique({
+      where: { id: projectId },
+      select: { id: true, price: true },
+    });
+    if (!project) throw new BadRequestException('项目不存在');
+
+    const payableAmount = this.toMoney2(Number(project.price || 0) * orderQuantity);
+    if (payableAmount <= 0) throw new BadRequestException('项目价格异常，暂不可下单');
+
     const payload = {
       projectId,
-      receivableAmount: Number(body?.receivableAmount ?? body?.paidAmount ?? 0),
-      paidAmount: Number(body?.paidAmount ?? 0),
-      orderQuantity: Number(body?.orderQuantity ?? 1),
+      receivableAmount: payableAmount,
+      paidAmount: payableAmount,
+      orderQuantity,
       customerGameId,
       inviter: body?.inviter ? String(body.inviter) : undefined,
-      customClubRate: body?.customClubRate == null ? undefined : Number(body.customClubRate),
-      isGifted: Boolean(body?.isGifted),
-      isPaid: Boolean(body?.isPaid),
+      isGifted: false,
+      isPaid: false,
       userCouponId: body?.userCouponId == null ? undefined : Number(body.userCouponId),
       ...(playerIds.length ? { playerIds } : {}),
     };
 
     if (!payload.projectId) throw new BadRequestException('projectId 必填');
-    if (payload.paidAmount < 0) throw new BadRequestException('paidAmount 不能小于0');
-    if (payload.orderQuantity < 1) throw new BadRequestException('orderQuantity 最小为1');
 
     const order = await this.ordersService.createOrder(payload as any, uid, {
       scene: 'MINIAPP',
@@ -512,18 +525,13 @@ export class MiniOrdersController {
       }, '该订单已支付');
     }
 
-    const paidAmount = Number(body?.paidAmount ?? 0);
-    if (!Number.isFinite(paidAmount) || paidAmount < 0) {
-      throw new BadRequestException('paidAmount 非法');
-    }
-
     const data = await this.prisma.$transaction(async (tx) => {
       await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', Number(id));
       await tx.$queryRawUnsafe('SELECT userId FROM `wallet_accounts` WHERE userId = ? FOR UPDATE', Number(uid));
 
       const currentOrder = await tx.order.findUnique({
         where: { id },
-        select: { id: true, isPaid: true },
+        select: { id: true, isPaid: true, paidAmount: true, finalPayableAmount: true, receivableAmount: true },
       });
       if (!currentOrder) throw new BadRequestException('订单不存在或无权限操作');
       if (currentOrder.isPaid) {
@@ -538,6 +546,13 @@ export class MiniOrdersController {
             paymentTime: true,
           },
         });
+      }
+
+      const paidAmount = this.toMoney2(
+        Number(currentOrder.finalPayableAmount ?? currentOrder.paidAmount ?? currentOrder.receivableAmount ?? 0),
+      );
+      if (paidAmount <= 0) {
+        throw new BadRequestException('订单应付金额异常，无法确认支付');
       }
 
       await this.walletService.ensureWalletAccount(uid, tx as any);

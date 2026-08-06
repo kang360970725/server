@@ -8,6 +8,7 @@ describe('WalletWithdrawalsService.applyWithdrawal', () => {
       applyWalletAccountDelta: jest.fn().mockResolvedValue({
         availableBalance: 0,
         frozenBalance: 500,
+        withdrawFrozenBalance: 500,
       }),
     } as any;
     const offlineFeeService = {
@@ -31,6 +32,7 @@ describe('WalletWithdrawalsService.applyWithdrawal', () => {
   it('uses configured first withdrawal accepted-days threshold', async () => {
     const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
     const tx: any = {
+      $queryRawUnsafe: jest.fn().mockResolvedValue([]),
       user: {
         findUnique: jest
           .fn()
@@ -58,6 +60,7 @@ describe('WalletWithdrawalsService.applyWithdrawal', () => {
           .mockResolvedValueOnce(0)
           .mockResolvedValueOnce(0)
           .mockResolvedValueOnce(0),
+        findFirst: jest.fn().mockResolvedValue(null),
       },
       orderParticipant: {
         findFirst: jest.fn().mockResolvedValue({ acceptedAt: twoDaysAgo }),
@@ -92,6 +95,7 @@ describe('WalletWithdrawalsService.applyWithdrawal', () => {
 
   it('does not auto deduct deposit for exited staff withdrawal', async () => {
     const tx: any = {
+      $queryRawUnsafe: jest.fn().mockResolvedValue([]),
       user: {
         findUnique: jest
           .fn()
@@ -115,6 +119,7 @@ describe('WalletWithdrawalsService.applyWithdrawal', () => {
       },
       walletWithdrawalRequest: {
         count: jest.fn().mockResolvedValue(0),
+        findFirst: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockResolvedValue({
           id: 31,
           userId: 7,

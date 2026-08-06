@@ -9,6 +9,7 @@
 - 为 `system-admin` 提供后台、客服、打手工作台、财务、运营管理 API。
 - 为 `client-miniapp` 提供 `/mini/*` 小程序 API。
 - 承载核心资金与履约状态：订单、派单、结算、钱包、提现、会员资产、罚单、线下费用。
+- 关联后台项目路径：相对路径 `../system-admin`，当前机器绝对路径 `/Users/allen/Desktop/BlueCat-App/newObject/system-admin`。订单/派单/结算类需求通常需要同步开发该前端项目。
 
 关键入口：
 
@@ -39,7 +40,7 @@
 | 用户/员工 | `src/users` | `User`、`StaffRating`、`WalletAccount`、`MemberGameCard` | admin 用户、打手管理、退店、钱包抽屉 |
 | 权限/角色 | `src/permission`、`src/role` | `Role`、`Permission` | admin 角色/权限 |
 | 商品/菜单 | `src/game-project`、`src/system-config` 商品配置 | `GameProject`、`ProductReview`、`SystemConfig` | admin 商品/分类/标签，公开菜单，小程序首页/搜索/详情 |
-| 订单/派单 | `src/orders`、`src/mini/mini-orders.controller.ts` | `Order`、`OrderDispatch`、`OrderParticipant`、`OrderSettlement`、`OrderPayment`、`OrderRefund`、`ComplaintWorkOrder` | admin 订单/客服工作台/打手工作台，小程序订单 |
+| 订单/派单 | `src/orders`、`src/mini/mini-orders.controller.ts` | `Order`、`OrderDispatch`、`OrderParticipant`、`OrderSettlement`、`OrderRenewalGroup`、`OrderRenewalBonus`、`OrderPayment`、`OrderRefund`、`ComplaintWorkOrder` | admin 订单/客服工作台/打手工作台，小程序订单 |
 | 结算/批次 | `src/settlements`、订单结算方法 | `OrderSettlement`、`SettlementBatch` | admin 结算、订单详情 |
 | 钱包/提现 | `src/wallet` | `WalletAccount`、`WalletTransaction`、`WalletHold`、`WalletWithdrawalRequest`、`WalletDepositTransaction`、`WalletAnomalyIgnore` | admin 钱包、提现审批、员工钱包 |
 | 会员资产 | `src/member`、`src/mini/mini-member.controller.ts` | `MemberProfile`、`MemberPointAccount`、`MemberPointTransaction`、`MemberRechargePlan`、`MemberRechargeOrder`、`MemberGameCard` | admin 会员等级/充值方案/用户，小程序会员/钱包/充值/积分 |
@@ -97,6 +98,7 @@
 - 超级管理员语义已统一：`User.userType = SUPER_ADMIN` 或 `Role.name = SUPER_ADMIN` 都视为超管；`FINANCE_ADMIN` 已通过 migration `20260803033000_fix_super_admin_finance_role` 拆分/重命名为 `FINANCE_MANAGER`（财务管理员）。`FINANCE_MANAGER` 不再全局放行，必须依赖显式权限。
 - `user-logs` 属于敏感审计数据，必须使用 `system:user-logs:page` 或历史系统管理员权限访问。
 - 钱包域需要区分“本人钱包”和“后台管理钱包”：有效员工可访问自己的钱包概览/流水/提现申请；查询他人钱包流水、提现审批、人工保证金充值和保证金流水必须要求钱包/财务管理权限，避免普通登录用户通过 `userId` 参数越权。保证金全局核查使用 `wallet:deposit-reconciliation:page`，入口在 `system-admin` 的“钱包/保证金对账”；前端入口和后端接口都只认该专用权限，不能用 `wallet:withdrawals:page` 或 `finance:records:list` 兜底。有效保证金口径为员工状态正常/冻结且当前保证金 > 0，无效/需处理包含退店、黑名单或无保证金员工。`MANUAL_DEPOSIT` 表示后台手动录入，业务上按线下收款对账；对账统计需兼容历史旧表 `WalletDepositTransaction` 与当前表 `wallet_deposit_transactions`，避免流水列表可见但对账汇总漏算。
+- 提现申请和提现审核属于资金写链路，必须在事务内通过 `SELECT ... FOR UPDATE` 锁定 `wallet_accounts`；审核还必须先锁定 `wallet_withdrawal_requests`，再检查状态和幂等流水，避免并发重复冻结、重复退回或重复扣除提现冻结余额。提现 `idempotencyKey` 必须非空且不超过 64 字符，重复提交同一 key 返回原提现单，不再次改余额。
 
 ## 环境与域名
 
@@ -118,6 +120,8 @@
 - `OrderDispatch`：派单轮次，支持多轮。
 - `OrderParticipant`：被派员工、接单状态、进度。
 - `OrderSettlement`：每个参与者最终收益。
+- `OrderRenewalGroup`：续单组合归因，创建订单首轮派单时固化，榜单按组合维度统计。
+- `OrderRenewalBonus`：续单额外分红明细，客服确认结单时生成，并通过钱包可用余额实时到账；冲正时保留明细和原因。
 
 重要副作用：
 
@@ -141,6 +145,16 @@
 - 当前结单 `COMPLETED` 轮次必须有有效打手，否则不能生成收益归属，必须报错。
 - 有效结算参与者口径在 `revenueInit.ts`：`userId` 有效、未拒单；`ARCHIVED/COMPLETED` 轮次还必须有 `acceptedAt`。
 - 存单/结单入口在 `orders.service.ts` 的 `archiveDispatchWithOptions`，当前轮必须存在活跃且未拒单的参与者；客服强制存/结单会为活跃参与者补齐 `acceptedAt`。
+- 当前派单人数产品限制为 1~2 人，后端 `AssignDispatchDto`、`OrdersController.dispatch`、`OrdersService.assignDispatch` 均会拦截，避免客服误操作多选。
+- 订单结算安全校验已在订单维度落地：`OrderSettlement.finalEarnings` 正向收益合计不得超过有效结算安全基数。基础金额优先取 `settlementBaseAmount`，历史数据兜底 `paidAmount/receivableAmount/originalAmount`；存在炸单负收益时，有效基数会加上炸单补偿额度，避免补偿单被误判超额；客服分红、续单分红作为既有独立分红口径也计入有效基数。首次确认结单、订单重算修复、人工调整结算收益、续单分红发放前校验、旧派单完成 upsert 路径都必须经过该校验；超额时抛错并回滚事务，不写入结算或钱包影响。
+- 小程序自助订单不能信任客户端金额或支付状态：`mini/orders` 创建订单时强制 `isPaid=false/isGifted=false`，金额按服务端 `GameProject.price * orderQuantity` 计算；余额支付确认读取订单 `finalPayableAmount/paidAmount/receivableAmount`，不使用 body 传入的 `paidAmount`。
+- 续单只能在“创建订单 + 首轮派单”时设置：`isRenewal=true` 时必须传 `playerIds` 和 `renewalPlayerIds`，续单打手必须是本次派单打手子集；订单创建后续派、改派、更新参与者均不能新增续单归因。
+- 续单订单推荐人失效：后端创建时强制 `inviter=null`、`inviteRate=0`。前端应禁用/清空推荐人输入。
+- 续单分红配置 key 为 `order_renewal_bonus_rules`，默认按实付金额计算：`<=300` 为 1%，`>300` 为 2%；配置失效时使用该兜底规则。
+- 续单分红不在创建订单时到账；它依赖客服确认结单。确认结单页面需要展示续单组合、预计分红，并支持确认有效或置为无效。确认有效时写 `OrderRenewalBonus` 和 `WalletTransaction(ORDER_RENEWAL_BONUS)`，置无效时 `OrderRenewalGroup.status=INVALIDATED` 且必须记录原因。
+- 退款均按全额退款处理。退款时续单待结算记录置无效；已结算续单分红生成 `ORDER_RENEWAL_BONUS_REVERSAL` 钱包冲正流水，并将续单组置为 `REVERSED`。
+- 订单重算 `repairWalletForOrderSettlementsV2` 支持 `invalidateRenewal` 与 `renewalInvalidateReason`，应用重算时可将续单置为无效；若已发放分红，必须冲正并记录原因。
+- 后续续单榜只统计 `OrderRenewalGroup.status = SETTLED`，按 `groupKey` 聚合 `renewalOrderCount/renewalAmount/bonusTotalAmount`，不做单人拆分。
 
 ### 钱包与提现
 
@@ -169,6 +183,12 @@
 6. 余额变更：`availableDelta=-amount`、`depositDelta=depositAdd`、`withdrawFrozenDelta=withdrawAmount`。
 7. 只有 `depositAdd > 0` 时写保证金流水。
 8. 创建提现申请和提现预扣流水。
+9. 资金变更前先锁定钱包账户行；审核通过/驳回前先锁定提现申请行和钱包账户行，并在余额变更后阻断负数余额桶。
+
+SQL 安全注意事项：
+
+- 优先使用 Prisma 查询构造器；必须使用原生 SQL 时，值只能走参数占位符。
+- `$queryRawUnsafe/$executeRawUnsafe` 仅允许拼接服务端固定 SQL 片段。动态列名、排序字段、表名必须使用白名单；客诉工单更新 helper 已对白名单字段做拦截。
 
 退店逻辑在 `src/users/users.service.ts`：释放冻结资金和可退保证金到可用余额。任何提现/保证金改动都必须验证 `EXITED` 员工行为和 admin 端提现预览。
 
@@ -273,6 +293,8 @@
 - `../system-admin/config/config.ts`
 - `../system-admin/src/services/api.ts`
 - 具体页面：`../system-admin/src/pages/...`
+- 当前机器绝对路径：`/Users/allen/Desktop/BlueCat-App/newObject/system-admin`
+- 订单续单前端关联页面：`../system-admin/src/pages/CSWorkbench/index.tsx`、`../system-admin/src/pages/Orders/index.tsx`、`../system-admin/src/pages/Orders/Detail.tsx`、`../system-admin/src/services/api.ts`
 
 用户提到小程序时，优先读：
 

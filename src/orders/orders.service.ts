@@ -47,10 +47,14 @@ type CreateOrderContext = {
 type AssignDispatchOptions = {
     updateOrderDispatcherId?: boolean;
     writeOperatorLog?: boolean;
+    renewalPlayerIds?: number[];
+    renewalCreatedBy?: number;
 };
 type ArchiveDispatchOptions = {
     forceByAdmin?: boolean;
 };
+
+type RenewalConfirmMode = 'SETTLE' | 'INVALIDATE';
 
 const ORDER_SOURCE_DEFAULTS = [
     { value: 'TUTU_PLATFORM', label: '突突平台', enabled: true },
@@ -427,6 +431,24 @@ export class OrdersService {
         });
     }
 
+    private splitAmountByUsers2(totalAmount: number, userIds: number[]) {
+        const uniqueUserIds = this.normalizeIdArray(userIds);
+        if (!uniqueUserIds.length) return [] as Array<{ userId: number; amount: number }>;
+
+        const totalCents = Math.max(0, Math.round(Number(totalAmount || 0) * 100));
+        const base = Math.floor(totalCents / uniqueUserIds.length);
+        let remainder = totalCents - base * uniqueUserIds.length;
+
+        return uniqueUserIds.map((userId) => {
+            const extra = remainder > 0 ? 1 : 0;
+            remainder = Math.max(0, remainder - extra);
+            return {
+                userId,
+                amount: (base + extra) / 100,
+            };
+        });
+    }
+
     /**
      * 按权重分配金额，结果统一保留到 0.1 元，且总和等于总额。
      */
@@ -510,6 +532,69 @@ export class OrdersService {
             : [];
     }
 
+    private resolveRenewalConfirmMode(dto: any): RenewalConfirmMode {
+        const action = String(dto?.renewalAction || '').trim().toUpperCase();
+        if (action === 'INVALIDATE') return 'INVALIDATE';
+        if (action === 'SETTLE') return 'SETTLE';
+        return Boolean(dto?.invalidateRenewal) ? 'INVALIDATE' : 'SETTLE';
+    }
+
+    private getRenewalInvalidateReason(input: any, message = '续单置为无效需填写原因') {
+        return this.normalizeRequiredRemark(input, message).slice(0, 255);
+    }
+
+    private resolveRenewalBonusBaseAmount(order: any, baseAmountField?: string) {
+        const field = String(baseAmountField || 'paidAmount').trim();
+        const raw =
+            field === 'settlementBaseAmount'
+                ? order?.settlementBaseAmount
+                : field === 'finalPayableAmount'
+                    ? order?.finalPayableAmount
+                    : order?.paidAmount;
+        return this.toAmount2(Number(raw ?? 0));
+    }
+
+    private async resolveRenewalBonusRule(order: any) {
+        const fallbackBaseAmount = this.resolveRenewalBonusBaseAmount(order, 'paidAmount');
+        const fallbackRate = fallbackBaseAmount <= 300 ? 0.01 : 0.02;
+        const fallback = {
+            baseAmountField: 'paidAmount',
+            baseAmount: fallbackBaseAmount,
+            rate: fallbackRate,
+            source: 'FALLBACK',
+        };
+
+        const config = await this.systemConfigService.getJson<any>(
+            SystemConfigService.KEYS.ORDER_RENEWAL_BONUS_RULES,
+            null as any,
+        );
+        if (!config || config.enabled === false) return fallback;
+
+        const baseAmount = this.resolveRenewalBonusBaseAmount(order, config.baseAmountField);
+        if (!Number.isFinite(baseAmount) || baseAmount <= 0) return fallback;
+
+        const tiers = Array.isArray(config.tiers) ? config.tiers : [];
+        for (const tier of tiers) {
+            const min = tier?.min == null ? 0 : Number(tier.min);
+            const max = tier?.max == null ? null : Number(tier.max);
+            const rate = Number(tier?.rate);
+            if (!Number.isFinite(min) || (max !== null && !Number.isFinite(max)) || !Number.isFinite(rate) || rate < 0) {
+                continue;
+            }
+            if (baseAmount >= min && (max === null || baseAmount <= max)) {
+                return {
+                    baseAmountField: String(config.baseAmountField || 'paidAmount'),
+                    baseAmount,
+                    rate,
+                    source: 'CONFIG',
+                    tier,
+                };
+            }
+        }
+
+        return fallback;
+    }
+
     private buildPlayerEvaluationKey(dispatchId: number, playerUserId: number) {
         return `${Number(dispatchId)}_${Number(playerUserId)}`;
     }
@@ -532,6 +617,370 @@ export class OrdersService {
         return {
             userId: dispatcherId,
             user: order?.dispatcher || null,
+        };
+    }
+
+    private async createRenewalGroupTx(params: {
+        tx: any;
+        orderId: number;
+        dispatchId: number;
+        playerIds: number[];
+        renewalPlayerIds: number[];
+        operatorId: number;
+    }) {
+        const { tx, orderId, dispatchId, playerIds, renewalPlayerIds, operatorId } = params;
+        const normalizedPlayers = this.normalizeIdArray(playerIds);
+        const normalizedRenewalPlayers = this.normalizeIdArray(renewalPlayerIds).sort((a, b) => a - b);
+        if (!normalizedRenewalPlayers.length) {
+            throw new BadRequestException('续单必须选择续单打手');
+        }
+        const playerSet = new Set(normalizedPlayers);
+        const invalid = normalizedRenewalPlayers.filter((id) => !playerSet.has(id));
+        if (invalid.length) {
+            throw new BadRequestException('续单打手必须从当前派单打手中选择');
+        }
+
+        const users = await tx.user.findMany({
+            where: { id: { in: normalizedRenewalPlayers } },
+            select: { id: true, name: true, phone: true },
+        });
+        if (users.length !== normalizedRenewalPlayers.length) {
+            throw new BadRequestException('续单打手不存在或已不可用');
+        }
+        const userMap = new Map<number, any>(users.map((u: any) => [Number(u.id), u]));
+        const memberNamesSnapshot = normalizedRenewalPlayers.map((id) => {
+            const u = userMap.get(id);
+            return {
+                id,
+                name: u?.name || `#${id}`,
+                phone: u?.phone || null,
+            };
+        });
+
+        const group = await tx.orderRenewalGroup.create({
+            data: {
+                orderId,
+                dispatchId,
+                groupKey: normalizedRenewalPlayers.join(','),
+                memberUserIds: normalizedRenewalPlayers as any,
+                memberNamesSnapshot: memberNamesSnapshot as any,
+                status: 'PENDING',
+                createdBy: operatorId || null,
+            },
+        });
+
+        await tx.order.update({
+            where: { id: orderId },
+            data: {
+                isRenewal: true,
+                inviter: null,
+                inviteRate: 0,
+            },
+        });
+
+        return group;
+    }
+
+    private async processRenewalAtConfirmTx(params: {
+        tx: any;
+        order: any;
+        settlementBatchId: string;
+        operatorId: number;
+        mode: RenewalConfirmMode;
+        invalidateReason?: string;
+    }) {
+        const { tx, order, settlementBatchId, operatorId, mode } = params;
+        const orderId = Number(order?.id);
+        const group = await tx.orderRenewalGroup.findUnique({
+            where: { orderId },
+            include: { bonuses: true },
+        });
+        if (!group) return { skipped: 'NO_RENEWAL_GROUP' };
+
+        if (String(group.status) === 'SETTLED') return { skipped: 'ALREADY_SETTLED', groupId: group.id };
+        if (['INVALIDATED', 'REVERSED'].includes(String(group.status))) {
+            return { skipped: 'ALREADY_INACTIVE', groupId: group.id, status: group.status };
+        }
+        if (String(group.status) !== 'PENDING') {
+            throw new BadRequestException(`续单状态异常，无法确认结算：${group.status}`);
+        }
+
+        if (mode === 'INVALIDATE') {
+            const reason = this.getRenewalInvalidateReason(params.invalidateReason);
+            await tx.orderRenewalGroup.update({
+                where: { id: group.id },
+                data: {
+                    status: 'INVALIDATED',
+                    invalidatedBy: operatorId,
+                    invalidatedAt: new Date(),
+                    invalidateReason: reason,
+                },
+            });
+            await tx.order.update({
+                where: { id: orderId },
+                data: {
+                    renewalAmount: 0,
+                    renewalCount: 0,
+                },
+            });
+            return { action: 'INVALIDATED', groupId: group.id, reason };
+        }
+
+        const memberUserIds = this.normalizeIdArray(group.memberUserIds);
+        if (!memberUserIds.length) {
+            throw new BadRequestException('续单组缺少续单打手，无法结算');
+        }
+
+        const rule = await this.resolveRenewalBonusRule(order);
+        const bonusBaseAmount = this.toAmount2(Number(rule.baseAmount || 0));
+        const bonusRate = Number(rule.rate || 0);
+        const bonusTotalAmount = this.toAmount2(bonusBaseAmount * bonusRate);
+        const settledAt = new Date();
+
+        if (bonusBaseAmount <= 0 || bonusRate <= 0 || bonusTotalAmount <= 0) {
+            await tx.orderRenewalGroup.update({
+                where: { id: group.id },
+                data: {
+                    status: 'SETTLED',
+                    renewalOrderCount: 1,
+                    renewalAmount: bonusBaseAmount,
+                    bonusBaseAmount,
+                    bonusRate,
+                    bonusTotalAmount: 0,
+                    settlementBatchId,
+                    settledBy: operatorId,
+                    settledAt,
+                },
+            });
+            await tx.order.update({
+                where: { id: orderId },
+                data: {
+                    renewalAmount: bonusBaseAmount,
+                    renewalCount: 1,
+                },
+            });
+            return { action: 'SETTLED_NO_BONUS', groupId: group.id, bonusBaseAmount, bonusRate };
+        }
+
+        await this.assertPersistedOrderSettlementPayoutWithinBaseTx({
+            tx,
+            order,
+            context: '续单分红结算',
+            extraPositivePayoutAmount: bonusTotalAmount,
+            extraAllowanceAmount: bonusTotalAmount,
+        });
+
+        const shares = this.splitAmountByUsers2(bonusTotalAmount, memberUserIds);
+        const bonusRows: any[] = [];
+        for (const share of shares) {
+            const bonus = await tx.orderRenewalBonus.create({
+                data: {
+                    orderId,
+                    renewalGroupId: group.id,
+                    userId: share.userId,
+                    bonusBaseAmount,
+                    bonusRate,
+                    bonusTotalAmount,
+                    bonusShareAmount: share.amount,
+                    status: 'PAID',
+                    settlementBatchId,
+                },
+            });
+            const walletTx = await this.wallet.creditAvailableBalance({
+                userId: share.userId,
+                amount: share.amount,
+                bizType: WalletBizType.ORDER_RENEWAL_BONUS,
+                sourceType: 'ORDER_RENEWAL_BONUS',
+                sourceId: bonus.id,
+                remark: `续单分红：订单 ${order?.autoSerial || `#${orderId}`}`,
+            }, tx);
+            await tx.orderRenewalBonus.update({
+                where: { id: bonus.id },
+                data: { walletTransactionId: Number(walletTx.id) || null },
+            });
+            bonusRows.push({
+                id: bonus.id,
+                userId: share.userId,
+                amount: share.amount,
+                walletTransactionId: Number(walletTx.id) || null,
+            });
+        }
+
+        await tx.orderRenewalGroup.update({
+            where: { id: group.id },
+            data: {
+                status: 'SETTLED',
+                renewalOrderCount: 1,
+                renewalAmount: bonusBaseAmount,
+                bonusBaseAmount,
+                bonusRate,
+                bonusTotalAmount,
+                settlementBatchId,
+                settledBy: operatorId,
+                settledAt,
+            },
+        });
+        await tx.order.update({
+            where: { id: orderId },
+            data: {
+                renewalAmount: bonusBaseAmount,
+                renewalCount: 1,
+            },
+        });
+
+        return {
+            action: 'SETTLED',
+            groupId: group.id,
+            groupKey: group.groupKey,
+            bonusBaseAmount,
+            bonusRate,
+            bonusTotalAmount,
+            bonusRows,
+            ruleSource: rule.source,
+        };
+    }
+
+    private async reverseRenewalBonusesTx(params: {
+        tx: any;
+        orderId: number;
+        operatorId: number;
+        reason: string;
+        groupStatusAfter?: 'INVALIDATED' | 'REVERSED';
+    }) {
+        const { tx, orderId, operatorId } = params;
+        const reason = this.getRenewalInvalidateReason(params.reason, '续单分红冲正需填写原因');
+        const group = await tx.orderRenewalGroup.findUnique({
+            where: { orderId: Number(orderId) },
+            include: { bonuses: true },
+        });
+        if (!group) return { skipped: 'NO_RENEWAL_GROUP' };
+
+        const now = new Date();
+        if (String(group.status) === 'PENDING') {
+            await tx.orderRenewalGroup.update({
+                where: { id: group.id },
+                data: {
+                    status: 'INVALIDATED',
+                    invalidatedBy: operatorId,
+                    invalidatedAt: now,
+                    invalidateReason: reason,
+                },
+            });
+            await tx.order.update({
+                where: { id: Number(orderId) },
+                data: { renewalAmount: 0, renewalCount: 0 },
+            });
+            return { action: 'INVALIDATED_PENDING', groupId: group.id, reason };
+        }
+
+        if (!['SETTLED', 'REVERSED'].includes(String(group.status))) {
+            return { skipped: 'ALREADY_INACTIVE', groupId: group.id, status: group.status };
+        }
+
+        const reversedRows: any[] = [];
+        for (const bonus of group.bonuses || []) {
+            if (String(bonus.status) === 'REVERSED') continue;
+            const amount = this.toAmount2(Number(bonus.bonusShareAmount ?? 0));
+            if (amount <= 0) {
+                await tx.orderRenewalBonus.update({
+                    where: { id: bonus.id },
+                    data: {
+                        status: 'REVERSED',
+                        reversalReason: reason,
+                        reversedAt: now,
+                    },
+                });
+                continue;
+            }
+
+            const sourceId = Number(bonus.walletTransactionId || bonus.id);
+            const existing = await tx.walletTransaction.findUnique({
+                where: {
+                    sourceType_sourceId: {
+                        sourceType: 'ORDER_RENEWAL_BONUS_REVERSAL',
+                        sourceId,
+                    },
+                },
+                select: { id: true },
+            });
+
+            let reversalTxId = Number(existing?.id || 0);
+            if (!existing) {
+                await this.wallet.ensureWalletAccount(Number(bonus.userId), tx);
+                const accountAfter = await tx.walletAccount.update({
+                    where: { userId: Number(bonus.userId) },
+                    data: {
+                        availableBalance: { decrement: amount },
+                    },
+                    select: {
+                        availableBalance: true,
+                        frozenBalance: true,
+                    },
+                });
+                const reversalTx = await tx.walletTransaction.create({
+                    data: {
+                        userId: Number(bonus.userId),
+                        direction: WalletDirection.OUT,
+                        bizType: WalletBizType.ORDER_RENEWAL_BONUS_REVERSAL,
+                        amount,
+                        status: WalletTxStatus.AVAILABLE,
+                        sourceType: 'ORDER_RENEWAL_BONUS_REVERSAL',
+                        sourceId,
+                        orderId: Number(orderId),
+                        dispatchId: Number(group.dispatchId || 0) || null,
+                        reversalOfTxId: Number(bonus.walletTransactionId || 0) || null,
+                        availableAfter: this.toAmount2(Number(accountAfter?.availableBalance ?? 0)),
+                        frozenAfter: this.toAmount2(Number(accountAfter?.frozenBalance ?? 0)),
+                        remark: reason,
+                    },
+                    select: { id: true },
+                });
+                reversalTxId = Number(reversalTx.id);
+            }
+
+            if (bonus.walletTransactionId) {
+                await tx.walletTransaction.updateMany({
+                    where: { id: Number(bonus.walletTransactionId), status: { not: WalletTxStatus.REVERSED } },
+                    data: { status: WalletTxStatus.REVERSED },
+                });
+            }
+            await tx.orderRenewalBonus.update({
+                where: { id: bonus.id },
+                data: {
+                    status: 'REVERSED',
+                    reversalWalletTransactionId: reversalTxId || null,
+                    reversalReason: reason,
+                    reversedAt: now,
+                },
+            });
+            reversedRows.push({
+                bonusId: bonus.id,
+                userId: bonus.userId,
+                amount,
+                reversalWalletTransactionId: reversalTxId || null,
+            });
+        }
+
+        await tx.orderRenewalGroup.update({
+            where: { id: group.id },
+            data: {
+                status: params.groupStatusAfter || 'REVERSED',
+                invalidatedBy: operatorId,
+                invalidatedAt: now,
+                invalidateReason: reason,
+            },
+        });
+        await tx.order.update({
+            where: { id: Number(orderId) },
+            data: { renewalAmount: 0, renewalCount: 0 },
+        });
+
+        return {
+            action: 'REVERSED',
+            groupId: group.id,
+            reason,
+            reversedCount: reversedRows.length,
+            reversedRows,
         };
     }
 
@@ -1274,11 +1723,37 @@ export class OrdersService {
         const project = await this.prisma.gameProject.findUnique({where: {id: dto.projectId}});
         if (!project) throw new NotFoundException('项目不存在');
 
+        const playerIds = Array.isArray((dto as any)?.playerIds)
+            ? this.normalizeIdArray((dto as any).playerIds)
+            : [];
+        const isRenewal = Boolean((dto as any).isRenewal);
+        const renewalPlayerIds = this.normalizeIdArray((dto as any).renewalPlayerIds);
+        if (isRenewal) {
+            if (!playerIds.length) {
+                throw new BadRequestException('续单只能在创建订单首轮派单时设置，请先选择派单打手');
+            }
+            if (!renewalPlayerIds.length) {
+                throw new BadRequestException('续单必须选择续单打手');
+            }
+            const playerSet = new Set(playerIds);
+            if (renewalPlayerIds.some((id) => !playerSet.has(id))) {
+                throw new BadRequestException('续单打手必须从当前派单打手中选择');
+            }
+        }
+        if (playerIds.length) {
+            const playerCount = await this.prisma.user.count({
+                where: { id: { in: playerIds } },
+            });
+            if (playerCount !== playerIds.length) {
+                throw new BadRequestException('派单打手不存在或已不可用');
+            }
+        }
+
         // 默认客服分佣：体验单为 0，其他为 0.01
         const defaultCsRate = project.type === 'EXPERIENCE' ? 0 : 0.01;
 
         // 默认推广分佣：有 inviter 才默认 0.05
-        const defaultInviteRate = dto.inviter ? 0.05 : 0;
+        const defaultInviteRate = isRenewal ? 0 : (dto.inviter ? 0.05 : 0);
 
         // 默认俱乐部抽成：订单级优先，其次项目默认；允许为空（表示未来按评级等扩展）
         const clubRate = dto.customClubRate ?? project.clubRate ?? null;
@@ -1438,8 +1913,8 @@ export class OrdersService {
                     initialDispatcherId: dispatcherId,
                     orderSource,
                     csRate: dto.csRate ?? defaultCsRate,
-                    inviteRate: dto.inviteRate ?? defaultInviteRate,
-                    inviter: dto.inviter ?? null,
+                    inviteRate: isRenewal ? 0 : (dto.inviteRate ?? defaultInviteRate),
+                    inviter: isRenewal ? null : (dto.inviter ?? null),
                     customClubRate: dto.customClubRate ?? null,
                     clubRate: clubRate ?? null,
                     // ✅ 落库赠送标识
@@ -1455,6 +1930,9 @@ export class OrdersService {
                     marketingCostAmount: discountAmount,
                     discountType,
                     status: OrderStatus.WAIT_ASSIGN,
+                    isRenewal,
+                    renewalAmount: 0,
+                    renewalCount: 0,
                     ...(discountDetails.length
                         ? {
                             discountDetails: {
@@ -1601,15 +2079,13 @@ export class OrdersService {
         });
 
         // ✅ 新建即派单：若传了 playerIds，则直接创建首轮派单并指派
-        const playerIds = Array.isArray((dto as any)?.playerIds)
-            ? (dto as any).playerIds.map((x: any) => Number(x)).filter((n: number) => Number.isFinite(n))
-            : [];
-
         if (playerIds.length > 0) {
             // 复用现有派单逻辑（包含防重复、参与者写入、日志等）
             await this.assignDispatch(order.id, playerIds, operatorId, 'AUTO_CREATE', {
                 updateOrderDispatcherId: scene !== 'MINIAPP',
                 writeOperatorLog: scene !== 'MINIAPP',
+                renewalPlayerIds: isRenewal ? renewalPlayerIds : undefined,
+                renewalCreatedBy: operatorId,
             });
             // 派单后返回完整详情（带 currentDispatch/participants）
             return this.getOrderDetail(order.id);
@@ -1812,6 +2288,17 @@ export class OrdersService {
                         status: true,
                         notifyRaw: true,
                     },
+                },
+                renewalGroups: {
+                    include: {
+                        bonuses: {
+                            include: {
+                                user: { select: { id: true, name: true, phone: true, avatar: true } },
+                            },
+                            orderBy: { id: 'asc' },
+                        },
+                    },
+                    orderBy: { id: 'desc' },
                 },
             },
         } as any);
@@ -2165,6 +2652,7 @@ export class OrdersService {
     async assignDispatch(orderId: number, playerIds: number[], operatorId: number, remark?: string, options?: AssignDispatchOptions) {
         if (!orderId) throw new BadRequestException('orderId 必填');
         if (!Array.isArray(playerIds)) throw new BadRequestException('playerIds 必须为数组');
+        playerIds = this.normalizeIdArray(playerIds);
         if (playerIds.length < 1 || playerIds.length > 2) throw new BadRequestException('playerIds 必须为 1~2 个');
 
         const order = await this.prisma.order.findUnique({
@@ -2203,53 +2691,79 @@ export class OrdersService {
 
         // round 从 1 开始递增
         const nextRound = (order.dispatches?.reduce((max, d) => Math.max(max, d.round), 0) || 0) + 1;
+        const renewalPlayerIds = this.normalizeIdArray(options?.renewalPlayerIds);
+        if (renewalPlayerIds.length && nextRound !== 1) {
+            throw new BadRequestException('续单只能在首轮派单时设置');
+        }
 
-        // 创建本轮派单
-        const dispatch = await this.prisma.orderDispatch.create({
-            data: {
-                orderId,
-                round: nextRound,
-                status: 'WAIT_ACCEPT' as any,
-                assignedAt: new Date(),
-                remark: remark || null,
-            },
-        });
-
-        // 创建参与者
-        await this.prisma.orderParticipant.createMany({
-            data: playerIds.map((userId) => ({
-                dispatchId: dispatch.id,
-                userId,
-                isActive: true,
-            })),
-        });
-
-        // 更新订单状态 + currentDispatch 指针（状态流转与新建订单一致）
-        const updateOrderDispatcherId = options?.updateOrderDispatcherId !== false;
-
-        await this.prisma.order.update({
-            where: {id: orderId},
-            data: {
-                status: 'WAIT_ACCEPT' as any,
-                currentDispatchId: dispatch.id,
-                ...(updateOrderDispatcherId ? { dispatcherId: operatorId || order.dispatcherId } : {}),
-            },
-        });
-
-        // 记录日志
-        if (options?.writeOperatorLog !== false && operatorId) {
-            await this.prisma.userLog.create({
+        const dispatch = await this.prisma.$transaction(async (tx) => {
+            // 创建本轮派单
+            const createdDispatch = await tx.orderDispatch.create({
                 data: {
-                    userId: operatorId,
-                    action: 'ASSIGN_DISPATCH',
-                    targetType: 'ORDER',
-                    targetId: orderId,
-                    oldData: {status: order.status} as any,
-                    newData: {status: 'WAIT_ACCEPT', playerIds, round: nextRound} as any,
-                    remark: remark || `派单 round=${nextRound}`,
+                    orderId,
+                    round: nextRound,
+                    status: 'WAIT_ACCEPT' as any,
+                    assignedAt: new Date(),
+                    remark: remark || null,
                 },
             });
-        }
+
+            // 创建参与者
+            await tx.orderParticipant.createMany({
+                data: playerIds.map((userId) => ({
+                    dispatchId: createdDispatch.id,
+                    userId,
+                    isActive: true,
+                })),
+            });
+
+            // 更新订单状态 + currentDispatch 指针（状态流转与新建订单一致）
+            const updateOrderDispatcherId = options?.updateOrderDispatcherId !== false;
+
+            await tx.order.update({
+                where: {id: orderId},
+                data: {
+                    status: 'WAIT_ACCEPT' as any,
+                    currentDispatchId: createdDispatch.id,
+                    ...(updateOrderDispatcherId ? { dispatcherId: operatorId || order.dispatcherId } : {}),
+                },
+            });
+
+            let renewalGroup: any = null;
+            if (renewalPlayerIds.length) {
+                renewalGroup = await this.createRenewalGroupTx({
+                    tx,
+                    orderId,
+                    dispatchId: createdDispatch.id,
+                    playerIds,
+                    renewalPlayerIds,
+                    operatorId: Number(options?.renewalCreatedBy || operatorId || 0),
+                });
+            }
+
+            // 记录日志
+            if (options?.writeOperatorLog !== false && operatorId) {
+                await tx.userLog.create({
+                    data: {
+                        userId: operatorId,
+                        action: 'ASSIGN_DISPATCH',
+                        targetType: 'ORDER',
+                        targetId: orderId,
+                        oldData: {status: order.status} as any,
+                        newData: {
+                            status: 'WAIT_ACCEPT',
+                            playerIds,
+                            round: nextRound,
+                            renewalGroupId: renewalGroup?.id ?? null,
+                            renewalPlayerIds: renewalPlayerIds.length ? renewalPlayerIds : undefined,
+                        } as any,
+                        remark: remark || `派单 round=${nextRound}`,
+                    },
+                });
+            }
+
+            return createdDispatch;
+        });
 
         // 派单成功后给对应打手推送接单通知（通知失败不影响主流程）
         try {
@@ -2802,6 +3316,16 @@ export class OrdersService {
                     calculatedEarnings: true,
                     finalEarnings: true,
                     manualAdjustment: true,
+                    order: {
+                        select: {
+                            id: true,
+                            autoSerial: true,
+                            settlementBaseAmount: true,
+                            paidAmount: true,
+                            receivableAmount: true,
+                            originalAmount: true,
+                        },
+                    },
                 },
             });
             if (!s) throw new NotFoundException('结算记录不存在');
@@ -2841,6 +3365,21 @@ export class OrdersService {
             // ===========================
             const calculated = Number(s.calculatedEarnings ?? 0);
             const manualAdjustment = finalEarnings - calculated;
+
+            const orderSettlements = await tx.orderSettlement.findMany({
+                where: { orderId: Number(s.orderId) },
+                select: { id: true, finalEarnings: true, settlementType: true },
+            });
+            const adjustedRows = orderSettlements.map((row: any) => (
+                Number(row.id) === settlementId
+                    ? { ...row, finalEarnings }
+                    : row
+            ));
+            this.assertOrderSettlementPayoutWithinBase({
+                order: s.order,
+                settlements: adjustedRows,
+                context: '人工调整结算收益',
+            });
 
             const updated = await tx.orderSettlement.update({
                 where: {id: settlementId},
@@ -2963,11 +3502,30 @@ export class OrdersService {
     }
 
     private async updateComplaintWorkOrderTx(db: any, id: number, patch: Record<string, any>) {
+        const allowedColumns = new Set([
+            'status',
+            'reason',
+            'description',
+            'paymentChannel',
+            'refundSupported',
+            'refundUnsupportedReason',
+            'suggestedRefundAmount',
+            'approvedRefundAmount',
+            'reviewRemark',
+            'refundRemark',
+            'reviewedBy',
+            'reviewedAt',
+            'refundedBy',
+            'refundedAt',
+        ]);
         const entries = Object.entries(patch || {}).filter(([, value]) => value !== undefined);
         if (!entries.length) return this.findComplaintWorkOrderById(db, id);
         const sets: string[] = [];
         const values: any[] = [];
         for (const [key, rawValue] of entries) {
+            if (!allowedColumns.has(key)) {
+                throw new BadRequestException('客诉工单更新字段不合法');
+            }
             let value = rawValue;
             if (typeof value === 'boolean') value = value ? 1 : 0;
             if (value && typeof value === 'object' && !(value instanceof Date)) value = JSON.stringify(value);
@@ -3591,6 +4149,15 @@ export class OrdersService {
 
             // ✅ 4) 钱包冲正：无论是否已有 settlements，只要订单曾产生收益流水都要回滚
             await this.wallet.reverseOrderSettlementEarnings({orderId}, tx);
+
+            // ✅ 4.1) 续单分红全额冲正 / 待结算续单置无效
+            await this.reverseRenewalBonusesTx({
+                tx,
+                orderId,
+                operatorId,
+                reason: remark ? `ORDER_REFUNDED:${remark}` : 'ORDER_REFUNDED',
+                groupStatusAfter: 'REVERSED',
+            });
 
             // ✅ 5) 退款回滚会员成长值与订单奖励积分
             await this.rollbackOrderMemberBenefitsTx(tx, orderWithPayment, refundAmount);
@@ -4557,6 +5124,12 @@ export class OrdersService {
             throw new BadRequestException('settlementCreateData 为空，无法写入');
         }
 
+        this.assertOrderSettlementPayoutWithinBase({
+            order,
+            settlements: settlementCreateData,
+            context: mode === 'FINAL_CONFIRM' ? '客服确认结单' : '订单重算修复',
+        });
+
         /**
          * 先做重复键校验，避免 createMany 后才炸
          */
@@ -5034,6 +5607,9 @@ export class OrdersService {
             autoConfirm?: boolean;
             orderTipEnabled?: boolean;
             orderTipUserIds?: any[];
+            renewalAction?: string;
+            invalidateRenewal?: boolean;
+            renewalInvalidateReason?: string;
         },
     ) {
         orderId = Number(orderId);
@@ -5176,6 +5752,15 @@ export class OrdersService {
                     reason: remark,
                 });
 
+                const renewalResult = await this.processRenewalAtConfirmTx({
+                    tx,
+                    order: latestOrder,
+                    settlementBatchId: result.settlementBatchId,
+                    operatorId,
+                    mode: this.resolveRenewalConfirmMode(dto),
+                    invalidateReason: dto?.renewalInvalidateReason || remark,
+                });
+
                 if (evaluationRows.length) {
                     for (const item of evaluationRows) {
                         await tx.orderPlayerEvaluation.upsert({
@@ -5241,6 +5826,7 @@ export class OrdersService {
                         freezeStartAt: result.freezeStartAt,
                         freezeEndAt: result.freezeEndAt,
                         confirmMode: isAutoConfirm ? 'AUTO' : 'MANUAL',
+                        renewalResult,
                     },
                 });
 
@@ -5255,6 +5841,7 @@ export class OrdersService {
                     freezeStartAt: result.freezeStartAt,
                     freezeEndAt: result.freezeEndAt,
                     confirmMode: isAutoConfirm ? 'AUTO' : 'MANUAL',
+                    renewalResult,
                 };
             } catch (err: any) {
                 const errMsg = String(err?.message || err || '');
@@ -5527,6 +6114,8 @@ export class OrdersService {
         playerEvaluations?: any[];
         orderTipEnabled?: boolean;
         orderTipUserIds?: any[];
+        invalidateRenewal?: boolean;
+        renewalInvalidateReason?: string;
     }) {
         const {
             orderId,
@@ -5540,6 +6129,8 @@ export class OrdersService {
             playerEvaluations,
             orderTipEnabled,
             orderTipUserIds,
+            invalidateRenewal,
+            renewalInvalidateReason,
         } = params;
         const parsedSettlementBaseAmount = Number(settlementBaseAmount ?? 0);
         const hasExplicitSettlementBaseAmount = Number.isFinite(parsedSettlementBaseAmount) && parsedSettlementBaseAmount > 0;
@@ -5730,6 +6321,16 @@ export class OrdersService {
                 reason,
             });
 
+            const renewalRepairResult = invalidateRenewal
+                ? await this.reverseRenewalBonusesTx({
+                    tx,
+                    orderId,
+                    operatorId,
+                    reason: renewalInvalidateReason || reason || 'RENEWAL_INVALIDATED_BY_RECALCULATION',
+                    groupStatusAfter: 'INVALIDATED',
+                })
+                : null;
+
             /**
              * Step 6：后置同步
              * - 注意：重算不改订单状态
@@ -5747,6 +6348,7 @@ export class OrdersService {
                     oldSettlementCount: result.oldSettlementCount,
                     deletedOldSettlementCount: result.deletedOldSettlementCount,
                     rebuiltSettlementCount: result.rebuiltSettlementCount,
+                    renewalRepairResult,
                 },
             });
 
@@ -5758,6 +6360,7 @@ export class OrdersService {
                 oldSettlementCount: result.oldSettlementCount,
                 deletedOldSettlementCount: result.deletedOldSettlementCount,
                 rebuiltSettlementCount: result.rebuiltSettlementCount,
+                renewalRepairResult,
             };
         });
     }
@@ -7104,6 +7707,12 @@ export class OrdersService {
         // ===========================
         // 7️⃣ 聚合回写订单
         // ===========================
+        await this.assertPersistedOrderSettlementPayoutWithinBaseTx({
+            tx,
+            order,
+            context: mode === 'COMPLETE' ? '客服结单' : '客服存单',
+        });
+
         const agg = await tx.orderSettlement.aggregate({
             where: {orderId},
             _sum: {finalEarnings: true, clubEarnings: true},
@@ -7669,6 +8278,102 @@ export class OrdersService {
         if (Number.isFinite(original) && original > 0) return this.toDecimal2(original);
 
         return 0;
+    }
+
+    private getPositiveSettlementPayoutTotal(settlements: any[], extraPositivePayoutAmount = 0): number {
+        return this.toDecimal2(
+            (settlements || []).reduce((sum: number, s: any) => {
+                const finalEarnings = Number(s?.finalEarnings ?? 0);
+                if (!Number.isFinite(finalEarnings) || finalEarnings <= 0) return sum;
+                return sum + finalEarnings;
+            }, 0) + Math.max(0, Number(extraPositivePayoutAmount || 0)),
+        );
+    }
+
+    private getOrderSettlementSafetyBudget(order: any, settlements: any[], extraAllowanceAmount = 0) {
+        const settlementBaseAmount = this.toDecimal2(this.getSettlementBaseAmountFromOrder(order));
+        const bombCompensationAllowance = this.toDecimal2(
+            (settlements || []).reduce((sum: number, s: any) => {
+                const settlementType = String(s?.settlementType || '');
+                const finalEarnings = Number(s?.finalEarnings ?? 0);
+                if (settlementType === 'CUSTOMER_SERVICE' || !Number.isFinite(finalEarnings) || finalEarnings >= 0) {
+                    return sum;
+                }
+                return sum + Math.abs(finalEarnings);
+            }, 0),
+        );
+        const customerServiceAllowance = this.toDecimal2(
+            (settlements || []).reduce((sum: number, s: any) => {
+                if (String(s?.settlementType || '') !== 'CUSTOMER_SERVICE') return sum;
+                const finalEarnings = Number(s?.finalEarnings ?? 0);
+                if (!Number.isFinite(finalEarnings) || finalEarnings <= 0) return sum;
+                return sum + finalEarnings;
+            }, 0),
+        );
+        const renewalBonusAllowance = this.toDecimal2(Math.max(0, Number(extraAllowanceAmount || 0)));
+
+        return {
+            settlementBaseAmount,
+            bombCompensationAllowance,
+            customerServiceAllowance,
+            renewalBonusAllowance,
+            effectiveSettlementBaseAmount: this.toDecimal2(
+                settlementBaseAmount + bombCompensationAllowance + customerServiceAllowance + renewalBonusAllowance,
+            ),
+        };
+    }
+
+    private assertOrderSettlementPayoutWithinBase(params: {
+        order: any;
+        settlements: any[];
+        context: string;
+        extraPositivePayoutAmount?: number;
+        extraAllowanceAmount?: number;
+    }) {
+        const { order, settlements, context } = params;
+        const orderId = Number(order?.id || 0);
+        const {
+            settlementBaseAmount,
+            bombCompensationAllowance,
+            customerServiceAllowance,
+            renewalBonusAllowance,
+            effectiveSettlementBaseAmount,
+        } = this.getOrderSettlementSafetyBudget(order, settlements, params.extraAllowanceAmount);
+        if (!orderId) {
+            throw new BadRequestException('订单结算安全校验失败：缺少订单ID');
+        }
+        if (!Number.isFinite(settlementBaseAmount) || settlementBaseAmount <= 0) {
+            throw new BadRequestException(`订单结算安全校验失败：订单 ${order?.autoSerial || `#${orderId}`} 结算金额非法`);
+        }
+
+        const payoutTotal = this.getPositiveSettlementPayoutTotal(settlements, params.extraPositivePayoutAmount);
+        if (payoutTotal - effectiveSettlementBaseAmount > 0.01) {
+            throw new BadRequestException(
+                `订单结算安全拦截：${context} 的正向结算合计 ¥${payoutTotal.toFixed(2)} 不得超过有效结算基数 ¥${effectiveSettlementBaseAmount.toFixed(2)}（订单结算 ¥${settlementBaseAmount.toFixed(2)}，炸单补偿 ¥${bombCompensationAllowance.toFixed(2)}，客服分红 ¥${customerServiceAllowance.toFixed(2)}，续单分红 ¥${renewalBonusAllowance.toFixed(2)}），订单 ${order?.autoSerial || `#${orderId}`}`,
+            );
+        }
+    }
+
+    private async assertPersistedOrderSettlementPayoutWithinBaseTx(params: {
+        tx: any;
+        order: any;
+        context: string;
+        extraPositivePayoutAmount?: number;
+        extraAllowanceAmount?: number;
+    }) {
+        const { tx, order, context } = params;
+        const orderId = Number(order?.id || 0);
+        const settlements = await tx.orderSettlement.findMany({
+            where: { orderId },
+            select: { id: true, finalEarnings: true, settlementType: true },
+        });
+        this.assertOrderSettlementPayoutWithinBase({
+            order,
+            settlements,
+            context,
+            extraPositivePayoutAmount: params.extraPositivePayoutAmount,
+            extraAllowanceAmount: params.extraAllowanceAmount,
+        });
     }
 
     private normalizeSettlementBaseMode(

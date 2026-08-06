@@ -7,6 +7,63 @@
 
 ---
 
+## 2026-08-06 ｜资金安全审计与小程序支付收敛
+
+### 本次动作
+- 收敛小程序订单资金入口：自助创建订单不再接受客户端 `isPaid/isGifted/customClubRate/paidAmount/receivableAmount` 改写，金额按服务端项目价格与数量计算，订单创建后保持待支付。
+- 修复小程序余额支付确认风险：`mini/orders/:id/pay-confirm` 不再使用 body 传入金额，而是读取订单 `finalPayableAmount/paidAmount/receivableAmount` 作为支付扣款基数，阻断 0 元或低金额伪支付。
+- 提现申请与审核增加事务行锁：申请锁定 `wallet_accounts`，审核先锁定 `wallet_withdrawal_requests` 再锁定钱包账户，避免并发重复冻结、重复释放或重复扣除提现冻结余额。
+- 提现幂等键增加非空与 64 字符长度校验；重复 `userId + idempotencyKey` 提交直接返回原提现单，不再次改余额。
+- 客诉工单原生 SQL 更新 helper 增加列名白名单，避免未来调用时将用户可控字段名拼接进 SQL。
+
+### 验证
+- `npm run build`
+- `npm test -- wallet-withdrawals.service.spec.ts --runInBand`
+- `git diff --check`
+
+---
+
+## 2026-08-06 ｜安全模块第一阶段：订单结算超额拦截
+
+### 本次动作
+- 订单维度新增结算安全校验：`OrderSettlement.finalEarnings` 正向收益合计不得超过有效结算安全基数，订单结算金额优先取 `settlementBaseAmount`，历史数据兜底 `paidAmount/receivableAmount/originalAmount`。
+- 有效结算安全基数已包含炸单负收益补偿额度，避免 `CARRY_COMPENSATION` 补偿单被误判为超额；客服分红、续单分红按既有独立分红口径计入有效基数。
+- 校验已覆盖首次确认结单、订单重算修复、人工调整结算收益，以及旧派单完成直接 upsert `OrderSettlement` 的路径。
+- 超额时直接抛出 `订单结算安全拦截` 错误，事务回滚，不落库结算记录，也不保留钱包流水影响。
+- 负收益只作为扣减/炸单处理，不参与“正向收益合计”放大，但会作为炸单补偿额度上浮有效安全基数；续单分红发放前也会以额外正向支出和额外允许额度纳入校验；校验口径聚焦系统实际发放成本是否突破有效结算基数。
+
+### 后续仍需推进
+- 全量代码安全审计：SQL 注入、接口越权、参数污染、恶意构造请求增加余额或破坏资金数据。
+- 数据安全巡检：设计定期核查钱包余额、结算流水、冲正流水、订单财务记录一致性的任务与告警。
+
+---
+
+## 2026-08-06 ｜订单续单归因与分红后端落地
+
+### 本次动作
+- 新增续单组合归因模型 `OrderRenewalGroup` 与续单分红明细 `OrderRenewalBonus`；迁移为 `20260806103000_add_order_renewal_bonus`。
+- 创建订单首轮派单支持 `isRenewal`、`renewalPlayerIds`；续单打手必须从当前派单打手中选择，且续单订单推荐人强制失效。
+- 派单人数仍按当前产品限制控制为 1~2 人，避免客服误操作多选。
+- 续单分红配置 key 为 `order_renewal_bonus_rules`；默认实付金额 `<=300` 按 1%，`>300` 按 2%，配置失效时按该规则兜底。
+- 客服确认结单时处理续单：默认确认有效并发放 `ORDER_RENEWAL_BONUS` 可用余额流水，也支持 `renewalAction=INVALIDATE` / `invalidateRenewal=true` 将续单置无效。
+- 退款与重算支持续单冲正：全额退款或重算置无效时，已发放续单分红生成 `ORDER_RENEWAL_BONUS_REVERSAL` 冲正流水并记录原因。
+
+### 前后端已落地
+- `../system-admin/src/pages/CSWorkbench/index.tsx`、`../system-admin/src/pages/Orders/index.tsx`：创建订单/派单区域增加续单开关与续单打手多选，选项来源于当前派单打手；开启续单后禁用并清空推荐人。
+- `../system-admin/src/pages/Orders/Detail.tsx`：确认结算页面展示续单组合、预计分红，支持确认有效或置为无效并填写原因。
+- `../system-admin/src/services/api.ts`：补充创建订单、确认结算、重算修复相关请求字段类型。
+
+---
+
+## 2026-08-06 ｜后续计划：安全模块
+
+### 下一步计划
+- 订单结算安全校验已完成第一阶段，详见上方“安全模块第一阶段：订单结算超额拦截”。
+- 代码安全审计：检查整体代码是否存在 SQL 注入、接口越权、参数污染、恶意构造请求导致余额异常增加或数据损害等风险。
+- 数据安全巡检：评估并设计定期核查功能，周期性检查钱包余额、结算流水、冲正流水、订单财务记录之间是否一致，发现异常时生成告警/报告，避免资金数据长期不一致。
+
+---
+
 ## 📅 2025-12-21 ｜v0.1 基础架构与订单系统落地
 
 ### 🎯 阶段目标

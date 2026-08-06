@@ -3,7 +3,7 @@ import { Type } from 'class-transformer';
 
 /**
  * 派单 / 更新参与者
- * - v0.1：应用层限制最多 2 人（你说不必 DB 强约束）
+ * - 当前产品限制最多 2 人，避免客服误操作多选
  * - 仅当前 dispatch.status=WAIT_ASSIGN 才允许变更参与者
  */
 export class AssignDispatchDto {
