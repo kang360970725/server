@@ -63,6 +63,18 @@ export class EquipmentRentalFeeController {
     return this.service.payBillByAdmin(Number(body?.billId), Number.isFinite(operatorId) ? operatorId : undefined, body?.remark);
   }
 
+  @Post('bills/confirm-paid-external')
+  @UseGuards(PermissionsGuard)
+  @Permissions(FINANCE_EQUIPMENT_RENTAL_FEES_PAGE, FINANCE_RECORDS_PAGE)
+  confirmPaidByOtherChannel(@Body() body: any, @Req() req: any) {
+    const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.confirmPaidByOtherChannel(
+      Number(body?.billId),
+      Number.isFinite(operatorId) ? operatorId : undefined,
+      body?.remark,
+    );
+  }
+
   @Get('my/pending')
   listMyPending(@Req() req: any) {
     const userId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);

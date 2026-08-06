@@ -188,4 +188,48 @@ describe('EquipmentRentalFeeService', () => {
     expect(tx.walletAccount.update).not.toHaveBeenCalled();
     expect(tx.walletTransaction.create).not.toHaveBeenCalled();
   });
+
+  it('confirms external channel payment without touching wallet balance', async () => {
+    const tx: any = {
+      equipmentRentalBill: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 13,
+          userId: 7,
+          billMonth: '2026-07',
+          remainingAmount: 120,
+          amount: 120,
+          status: 'PENDING',
+        }),
+        update: jest.fn().mockResolvedValue({ id: 13, status: 'PAID', walletTxId: null }),
+      },
+      walletAccount: {
+        update: jest.fn(),
+      },
+      walletTransaction: {
+        create: jest.fn(),
+      },
+    };
+    const prisma = {
+      $transaction: jest.fn((callback) => callback(tx)),
+    } as any;
+    const service = new EquipmentRentalFeeService(prisma);
+
+    const result = await service.confirmPaidByOtherChannel(13, 1, '微信收款码已收');
+
+    expect(result).toMatchObject({ id: 13, status: 'PAID', walletTxId: null });
+    expect(tx.equipmentRentalBill.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 13 },
+        data: expect.objectContaining({
+          paidAmount: 120,
+          remainingAmount: 0,
+          status: 'PAID',
+          walletTxId: null,
+          remark: expect.stringContaining('微信收款码已收'),
+        }),
+      }),
+    );
+    expect(tx.walletAccount.update).not.toHaveBeenCalled();
+    expect(tx.walletTransaction.create).not.toHaveBeenCalled();
+  });
 });

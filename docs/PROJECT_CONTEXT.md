@@ -211,6 +211,8 @@ SQL 安全注意事项：
 - `EquipmentRentalBill` 是每月账单；账单月份表示缴费月份，缴费日按起租日落到下一月，例如 8 月 15 日起租，第一张账单为 9 月账单，周期 8 月 15 日到 9 月 14 日，缴费日 9 月 15 日。
 - 系统每月 1 日自动生成当月账单，也支持财务页面手动生成指定月份。
 - 员工在自己的提现/钱包页面主动确认账单后扣费，财务后台也可对待确认账单手动缴费；扣费写 `WalletTransaction.bizType=EQUIPMENT_RENTAL_FEE`。
+- 账单状态语义：`WAIVED` 是减免，不等同于已缴费；`PAID` 表示已缴清。`PAID + walletTxId != null` 表示从员工钱包扣费，`PAID + walletTxId == null` 表示管理员确认已通过其他渠道缴费，不产生钱包扣款流水。
+- 财务后台接口 `equipment-rental-fees/bills/confirm-paid-external` 用于“其他渠道已缴费”确认，必须填写缴费说明；该操作仅更新账单为 `PAID`，不改员工钱包余额。
 - 扣费允许 `availableBalance` 变负，但扣费后 `availableBalance + frozenBalance` 不能小于 0。
 - 提现申请前会预留设备租赁费：已出未确认账单 + 下月即将产生账单。提现后总资产不足以覆盖时，不允许提交提现申请。
 - 财务页面需要展示未确认账单的余额不足风险，使用账单行的 `insufficient` 标识。

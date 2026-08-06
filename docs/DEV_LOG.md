@@ -7,6 +7,21 @@
 
 ---
 
+## 2026-08-07 ｜设备租赁费其他渠道缴费确认
+
+### 本次动作
+- 明确设备租赁费账单状态语义：`WAIVED` 为减免，不等同于已缴费；`PAID` 为已缴清。
+- 新增后端接口 `POST /equipment-rental-fees/bills/confirm-paid-external`，用于管理员确认账单已通过微信收款码、现金、银行转账等其他渠道缴费；该操作不扣员工钱包、不写 `EQUIPMENT_RENTAL_FEE` 钱包流水，账单更新为 `PAID`、`paidAmount=remainingAmount`、`remainingAmount=0`、`walletTxId=null`。
+- `system-admin` 设备租赁费页面新增“其他渠道已缴”操作，弹窗要求填写缴费说明；账单状态展示区分“已扣费”和“已缴费”。
+- 补充单测覆盖其他渠道缴费确认，确保不会修改钱包余额或创建钱包流水。
+
+### 验证
+- `npm test -- equipment-rental-fee.service.spec.ts --runInBand`
+- `npm run build`
+- `yarn build:dev`
+
+---
+
 ## 2026-08-06 ｜后台前端体验与移动端显示优化
 
 ### 本次动作

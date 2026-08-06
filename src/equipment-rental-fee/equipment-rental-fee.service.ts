@@ -400,6 +400,34 @@ export class EquipmentRentalFeeService {
     });
   }
 
+  async confirmPaidByOtherChannel(billId: number, operatorId?: number, remark?: string) {
+    const id = Number(billId);
+    if (!id) throw new BadRequestException('billId 必填');
+    const normalizedRemark = String(remark || '').trim();
+    if (!normalizedRemark) {
+      throw new BadRequestException('请填写其他渠道缴费说明');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const bill = await (tx as any).equipmentRentalBill.findUnique({ where: { id } });
+      if (!bill) throw new NotFoundException('设备租赁账单不存在');
+      if (bill.status !== 'PENDING') throw new BadRequestException('该账单无需重复确认');
+
+      const amount = this.toAmount(bill.remainingAmount);
+      return (tx as any).equipmentRentalBill.update({
+        where: { id },
+        data: {
+          paidAmount: amount,
+          remainingAmount: 0,
+          status: 'PAID',
+          confirmedAt: new Date(),
+          walletTxId: null,
+          remark: `其他渠道已缴费，操作人：${operatorId || '-'}；${normalizedRemark}`,
+        },
+      });
+    });
+  }
+
   async waiveBill(billId: number, remark?: string) {
     const id = Number(billId);
     if (!id) throw new BadRequestException('billId 必填');
