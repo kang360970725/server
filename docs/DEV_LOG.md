@@ -15,8 +15,14 @@
 - 公告中心弹窗改为左侧列表 + 右侧详情布局，支持选中公告、查看正文、标记已读；左侧列表宽度已缩窄到 256px。
 - 登录页和后台页备案展示模块已调整：ICP备案固定底部展示，登录页首屏可见，后台 PC 端和移动端避免被内容遮挡，移动端全屏页面自动隐藏。
 - 创建订单共用弹窗 `../system-admin/src/pages/Orders/components/OrderForm.tsx` 已限制视口高度：弹窗顶部固定留白，表单主体内部滚动，底部保存/取消按钮保持可见；订单列表、订单详情、客服工作台三处创建/编辑入口同步生效。
+- 钱包流水类型展示已补齐：后端 `meta` 字典补充续单分红/冲正、会员充值/消费、线下费用、设备租赁、退店等 `WalletBizType` 文案；前端钱包流水、用户钱包抽屉、单用户预核算页面同步补齐中文展示、标签颜色和续单分红已冲正识别。
+- 订单详情页收益概览和对账详情已纳入续单分红：`结算参考 = OrderSettlement.finalEarnings 汇总 + 已结算未冲正续单分红`；钱包对账同步统计 `ORDER_RENEWAL_BONUS` 与 `ORDER_RENEWAL_BONUS_REVERSAL`，退款/重算冲正后的续单分红不再计入当前成本。
+- 修正续单分红钱包流水关联：新发放的 `ORDER_RENEWAL_BONUS` 钱包流水写入 `orderId/dispatchId`；订单详情对账兼容历史缺 `orderId` 的分红流水，通过 `OrderRenewalBonus.walletTransactionId` 纳入钱包净额和按人对账；新增迁移 `20260806122000_backfill_order_renewal_bonus_wallet_order_id` 回填历史续单分红流水订单关联。
+- 订单财务记录成本口径同步纳入续单分红：重建 `OrderFinanceRecord` 时将已结算未冲正续单分红计入玩家成本，避免财务毛利净额与订单详情对账净额不一致。
 
 ### 验证
+- `npm run build`
+- `npx prisma validate`
 - `yarn build:dev`
 
 ---

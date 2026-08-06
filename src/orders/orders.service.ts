@@ -792,6 +792,8 @@ export class OrdersService {
                 bizType: WalletBizType.ORDER_RENEWAL_BONUS,
                 sourceType: 'ORDER_RENEWAL_BONUS',
                 sourceId: bonus.id,
+                orderId,
+                dispatchId: Number(group.dispatchId || 0) || null,
                 remark: `续单分红：订单 ${order?.autoSerial || `#${orderId}`}`,
             }, tx);
             await tx.orderRenewalBonus.update({
@@ -2345,12 +2347,23 @@ export class OrdersService {
             }
         }
 
+        const activeRenewalBonuses = (Array.isArray(order?.renewalGroups) ? order.renewalGroups : [])
+            .filter((group: any) => String(group?.status || '') === 'SETTLED')
+            .flatMap((group: any) => Array.isArray(group?.bonuses) ? group.bonuses : [])
+            .filter((bonus: any) => String(bonus?.status || '') === 'PAID');
+        const activeRenewalWalletTxIds = activeRenewalBonuses
+            .map((bonus: any) => Number(bonus?.walletTransactionId || 0))
+            .filter((id: number) => Number.isFinite(id) && id > 0);
+
         // ===========================
         // 2️⃣ 查询钱包真实流水（保留原始有效流水全集）
         // ===========================
         const walletTxs = await this.prisma.walletTransaction.findMany({
             where: {
-                orderId: id,
+                OR: [
+                    { orderId: id },
+                    ...(activeRenewalWalletTxIds.length ? [{ id: { in: activeRenewalWalletTxIds } }] : []),
+                ],
                 status: { not: 'REVERSED' }, // ❗ 已冲正流水不参与当前统计
             },
             select: {
@@ -2381,6 +2394,8 @@ export class OrdersService {
             'SETTLEMENT_EARNING_CARRY',
             'SETTLEMENT_BOMB_LOSS',
             'SETTLEMENT_EARNING_CS',
+            'ORDER_RENEWAL_BONUS',
+            'ORDER_RENEWAL_BONUS_REVERSAL',
             'REFUND_REVERSAL',
             'SETTLEMENT_REVERSAL',
             'SETTLEMENT_RECALC',
@@ -2423,10 +2438,15 @@ export class OrdersService {
         // ===========================
         // 4️⃣ 结算参考汇总
         // ===========================
-        const settlementTotal = order.settlements.reduce(
+        const settlementFinalEarningsTotal = order.settlements.reduce(
             (sum, s) => sum + Number(s.finalEarnings || 0),
             0,
         );
+        const renewalBonusTotal = activeRenewalBonuses.reduce(
+            (sum: number, bonus: any) => sum + Number(bonus?.bonusShareAmount || 0),
+            0,
+        );
+        const settlementTotal = Number((settlementFinalEarningsTotal + renewalBonusTotal).toFixed(2));
 
         // ===========================
         // 5️⃣ 对账提示（只读）- ✅用净额对账
@@ -2447,14 +2467,26 @@ export class OrdersService {
         // ✅ 4.1 结算按人汇总（参考）
         // ===========================
         const settlementByUser = new Map<number, number>();
+        const userMap = new Map<number, { id: number; name: string; phone?: string }>();
         for (const s of order.settlements || []) {
             const uid = Number(s?.userId || 0);
             if (!uid) continue;
             const v = Number(s?.finalEarnings || 0);
             settlementByUser.set(uid, (settlementByUser.get(uid) || 0) + v);
+            if (s?.user) {
+                userMap.set(uid, s.user);
+            }
+        }
+        for (const bonus of activeRenewalBonuses) {
+            const uid = Number(bonus?.userId || 0);
+            if (!uid) continue;
+            const v = Number(bonus?.bonusShareAmount || 0);
+            settlementByUser.set(uid, (settlementByUser.get(uid) || 0) + v);
+            if (bonus?.user) {
+                userMap.set(uid, bonus.user);
+            }
         }
 
-        const userMap = new Map<number, { id: number; name: string; phone?: string }>();
         for (const tx of walletTxsForReconcile) {
             if (tx.user) {
                 userMap.set(tx.user.id, tx.user);
@@ -2549,6 +2581,8 @@ export class OrdersService {
             reconcileHint: {
                 status: reconcileStatus,
                 settlementTotal,
+                settlementFinalEarningsTotal: Number(settlementFinalEarningsTotal.toFixed(2)),
+                renewalBonusTotal: Number(renewalBonusTotal.toFixed(2)),
                 walletTotal, // ✅ 净额
                 diff,        // ✅ 净额 - 结算
             },
@@ -8630,6 +8664,13 @@ export class OrdersService {
             }
         }
 
+        const renewalBonusCostAmount = (Array.isArray(order?.renewalGroups) ? order.renewalGroups : [])
+            .filter((group: any) => String(group?.status || '') === 'SETTLED')
+            .flatMap((group: any) => Array.isArray(group?.bonuses) ? group.bonuses : [])
+            .filter((bonus: any) => String(bonus?.status || '') === 'PAID')
+            .reduce((sum: number, bonus: any) => sum + this.toDecimal2(Number(bonus?.bonusShareAmount ?? 0)), 0);
+        playerCostAmount += renewalBonusCostAmount;
+
         playerCostAmount = this.toDecimal2(playerCostAmount);
         csCostAmount = this.toDecimal2(csCostAmount);
         operationCostAmount = this.toDecimal2(operationCostAmount);
@@ -8828,6 +8869,20 @@ export class OrdersService {
                             select: {
                                 id: true,
                                 name: true,
+                            },
+                        },
+                    },
+                },
+                renewalGroups: {
+                    select: {
+                        id: true,
+                        status: true,
+                        bonuses: {
+                            select: {
+                                id: true,
+                                userId: true,
+                                status: true,
+                                bonusShareAmount: true,
                             },
                         },
                     },

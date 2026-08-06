@@ -132,6 +132,8 @@ export class MetaController {
                 SETTLEMENT_EARNING_CARRY: '补单收益（炸单补偿）',
                 SETTLEMENT_BOMB_LOSS: '炸单损耗（成本扣减）',
                 SETTLEMENT_EARNING_CS: '客服分红',
+                ORDER_RENEWAL_BONUS: '续单额外分红',
+                ORDER_RENEWAL_BONUS_REVERSAL: '续单分红冲正',
                 SETTLEMENT_REVERSAL: '(重复结算)旧结算收益冲正',
                 SETTLEMENT_RECALC: '重算后新结算收益',
 
@@ -140,6 +142,12 @@ export class MetaController {
                 DEPOSIT_DEDUCT: '押金扣减',
                 RELEASE_FROZEN: '解冻入账',
                 REFUND_REVERSAL: '退款冲正',
+                OFFLINE_FEE_PAYMENT: '线下费用缴费',
+                EQUIPMENT_RENTAL_FEE: '设备租赁费',
+                MEMBER_RECHARGE: '会员充值',
+                MEMBER_RECHARGE_BONUS: '会员充值赠送',
+                MEMBER_ORDER_CONSUME: '会员订单消费',
+                MEMBER_RECHARGE_REFUND: '会员充值退款',
                 STAFF_EXIT_RELEASE: '退店解冻转可用',
                 STAFF_EXIT_CLEAR: '退店一键清零',
 

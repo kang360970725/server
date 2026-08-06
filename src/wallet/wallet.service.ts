@@ -1063,6 +1063,8 @@ export class WalletService {
             bizType: WalletBizType;
             sourceType: string;
             sourceId: number;
+            orderId?: number | null;
+            dispatchId?: number | null;
             remark?: string;
         },
         tx?: PrismaTx,
@@ -1100,6 +1102,8 @@ export class WalletService {
                     status: WalletTxStatus.AVAILABLE,
                     sourceType: params.sourceType,
                     sourceId: params.sourceId,
+                    orderId: params.orderId ? Number(params.orderId) : null,
+                    dispatchId: params.dispatchId ? Number(params.dispatchId) : null,
                     availableAfter: round2(Number(accountAfter?.availableBalance ?? 0)),
                     frozenAfter: round2(Number(accountAfter?.frozenBalance ?? 0)),
                     remark: params.remark || null,
