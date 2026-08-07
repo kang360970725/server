@@ -442,10 +442,21 @@ export class EquipmentRentalFeeService {
   }
 
   async getWithdrawalObligationTx(db: PrismaTx, userId: number) {
+    // 提前生成账单只用于展示和方便员工主动缴费。只有进入到期前 24 小时的
+    // 账单才需要在提现时预留，避免未来月份的账单提前限制正常提现。
+    const withdrawalGuardAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     const nextMonth = this.getNextMonth();
     const [billAgg, nextMonthBill, contracts] = await Promise.all([
       (db as any).equipmentRentalBill.aggregate({
-        where: { userId, status: 'PENDING' },
+        where: {
+          userId,
+          status: 'PENDING',
+          OR: [
+            { dueAt: { lte: withdrawalGuardAt } },
+            // 兼容历史上没有到期时间的账单，这类账单仍按已到期处理。
+            { dueAt: null },
+          ],
+        },
         _sum: { remainingAmount: true },
       }),
       (db as any).equipmentRentalBill.findUnique({
@@ -454,11 +465,25 @@ export class EquipmentRentalFeeService {
       }),
       (db as any).equipmentRentalContract.findMany({
         where: { userId, status: 'ACTIVE' },
-        select: { monthlyAmount: true, startMonth: true, endMonth: true, status: true },
+        select: {
+          monthlyAmount: true,
+          startMonth: true,
+          endMonth: true,
+          startDate: true,
+          endDate: true,
+          status: true,
+        },
       }),
     ]);
     const outstanding = this.toAmount(billAgg?._sum?.remainingAmount || 0);
-    const upcoming = nextMonthBill
+    const upcomingDueAt = contracts.length
+      ? Math.min(
+          ...contracts
+            .filter((contract: any) => this.isContractEffectiveForMonth(contract, nextMonth))
+            .map((contract: any) => this.getBillingSchedule(contract, nextMonth).dueAt.getTime()),
+        )
+      : Number.POSITIVE_INFINITY;
+    const upcoming = nextMonthBill || upcomingDueAt > withdrawalGuardAt.getTime()
       ? 0
       : contracts
         .filter((contract: any) => this.isContractEffectiveForMonth(contract, nextMonth))

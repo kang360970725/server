@@ -232,4 +232,66 @@ describe('EquipmentRentalFeeService', () => {
     expect(tx.walletAccount.update).not.toHaveBeenCalled();
     expect(tx.walletTransaction.create).not.toHaveBeenCalled();
   });
+
+  it('only reserves pending rental bills within 24 hours before their due time', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-13T00:00:00.000Z'));
+    const aggregate = jest.fn().mockResolvedValue({ _sum: { remainingAmount: 0 } });
+    const db = {
+      equipmentRentalBill: {
+        aggregate,
+        findUnique: jest.fn().mockResolvedValue({ id: 81 }),
+      },
+      equipmentRentalContract: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+    } as any;
+    const service = new EquipmentRentalFeeService({} as any);
+
+    await expect(service.getWithdrawalObligationTx(db, 7)).resolves.toMatchObject({
+      outstanding: 0,
+      upcoming: 0,
+      totalObligation: 0,
+    });
+    expect(aggregate).toHaveBeenCalledWith({
+      where: {
+        userId: 7,
+        status: 'PENDING',
+        OR: [
+          { dueAt: { lte: new Date('2026-09-14T00:00:00.000Z') } },
+          { dueAt: null },
+        ],
+      },
+      _sum: { remainingAmount: true },
+    });
+    jest.useRealTimers();
+  });
+
+  it('reserves an ungenerated next-month bill only after entering its due-soon window', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-31T00:00:00.000Z'));
+    const db = {
+      equipmentRentalBill: {
+        aggregate: jest.fn().mockResolvedValue({ _sum: { remainingAmount: 0 } }),
+        findUnique: jest.fn().mockResolvedValue(null),
+      },
+      equipmentRentalContract: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            monthlyAmount: 120,
+            startDate: new Date('2026-07-01T00:00:00.000Z'),
+            endDate: null,
+            status: 'ACTIVE',
+          },
+        ]),
+      },
+    } as any;
+    const service = new EquipmentRentalFeeService({} as any);
+
+    await expect(service.getWithdrawalObligationTx(db, 7)).resolves.toMatchObject({
+      outstanding: 0,
+      upcoming: 120,
+      totalObligation: 120,
+      nextMonth: '2026-09',
+    });
+    jest.useRealTimers();
+  });
 });
