@@ -181,3 +181,84 @@ describe('WalletWithdrawalsService.applyWithdrawal', () => {
     );
   });
 });
+
+describe('WalletWithdrawalsService.reviewWithdrawal', () => {
+  const createService = (prisma: any, staffRuleEngineService: any = {}) => {
+    const walletService = {
+      ensureWalletAccountBucketsReady: jest.fn().mockResolvedValue(undefined),
+      applyWalletAccountDelta: jest.fn(),
+    } as any;
+    const offlineFeeService = {
+      attachWithdrawalToPayment: jest.fn().mockResolvedValue(undefined),
+      validateAndCollectForWithdrawalTx: jest.fn(),
+    } as any;
+
+    return {
+      service: new WalletWithdrawalsService(
+        prisma,
+        walletService,
+        {} as any,
+        offlineFeeService,
+        staffRuleEngineService,
+      ),
+      walletService,
+    };
+  };
+
+  it('allows rejecting a withdrawal when release only partially offsets a negative available balance', async () => {
+    const tx: any = {
+      $queryRawUnsafe: jest.fn().mockResolvedValue([]),
+      walletWithdrawalRequest: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 12,
+          userId: 7,
+          amount: 500,
+          status: 'PENDING_REVIEW',
+        }),
+        update: jest.fn().mockResolvedValue({
+          id: 12,
+          userId: 7,
+          amount: 500,
+          status: 'REJECTED',
+        }),
+      },
+      walletTransaction: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        upsert: jest.fn().mockResolvedValue({ id: 91 }),
+      },
+    };
+    const prisma = {
+      $transaction: jest.fn((callback) => callback(tx)),
+    } as any;
+    const { service, walletService } = createService(prisma);
+
+    walletService.applyWalletAccountDelta.mockResolvedValue({
+      availableBalance: -300,
+      frozenBalance: 0,
+      withdrawFrozenBalance: 0,
+    });
+
+    const result = await service.reviewWithdrawal({
+      requestId: 12,
+      reviewerId: 3,
+      approve: false,
+      reviewRemark: '余额为负，驳回提现用于冲抵欠款',
+    });
+
+    expect(result.status).toBe('REJECTED');
+    expect(walletService.applyWalletAccountDelta).toHaveBeenCalledWith(tx, 7, {
+      withdrawFrozenDelta: -500,
+      availableDelta: 500,
+    });
+    expect(tx.walletTransaction.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          bizType: 'WITHDRAW_RELEASE',
+          amount: 500,
+          availableAfter: -300,
+          frozenAfter: 0,
+        }),
+      }),
+    );
+  });
+});

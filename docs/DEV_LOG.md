@@ -7,6 +7,24 @@
 
 ---
 
+## 2026-08-07 ｜提现、退店保证金与结算冻结周期规则修正
+
+### 本次动作
+- 提现审核驳回分支允许可用余额仍为负：驳回时释放提现冻结到可用余额，用于冲抵线下费用、罚单、设备租赁等欠款；审核通过仍保持严格余额桶校验。
+- 设备租赁费提现限制口径收敛：提前生成的未来账单不限制提现，仅进入缴费日前 1 天窗口的待缴账单或即将出账金额才需要在提现时预留。
+- 普通退店保证金规则落地：入店不足规则押金不退天数、有效接单量少于 50 单、或保证金未缴满规则阈值时，保证金不退；有效接单量只统计已接单、未拒单、派单已完成或已存档的记录。
+- 退店补扣保证金缺口时最多扣到可用余额为 0，不允许把账户余额扣成负数；未补齐部分通过 `depositTopUpUnpaidAmount` 返回并由前端展示。
+- 员工标签与提现/退店规则新增结算冻结周期字段：`settlementFreezeExperienceDays` 用于体验单/福袋单，兜底 3 天；`settlementFreezeRegularDays` 用于普通单，兜底 7 天。
+- 订单结算冻结周期从统一配置改为逐人匹配员工标签规则；同一订单的不同结算对象可以拥有不同解冻周期。`applySettlementPlanTx` 保留汇总 `freezeDays/freezeStartAt/freezeEndAt`，并新增 `freezeInfoByUser` 用于排查逐人冻结信息。
+
+### 验证
+- `yarn test wallet-withdrawals.service.spec.ts --runInBand`
+- `yarn test users.service.spec.ts --runInBand`
+- `yarn test staff-rule-engine.service.spec.ts settlement-freeze.rule.spec.ts --runInBand`
+- `yarn build`
+- `yarn build:dev`
+- `git diff --check`
+
 ## 2026-08-07 ｜设备租赁费其他渠道缴费确认
 
 ### 本次动作

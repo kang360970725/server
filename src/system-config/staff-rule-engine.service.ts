@@ -21,6 +21,8 @@ export type StaffRuleItem = {
   quitCoolingDays: number;
   depositForfeitDays: number;
   dormantFreezeDays: number;
+  settlementFreezeExperienceDays: number;
+  settlementFreezeRegularDays: number;
   refundWhenDepositInsufficient?: boolean;
 };
 
@@ -51,6 +53,8 @@ export class StaffRuleEngineService {
       quitCoolingDays: 180,
       depositForfeitDays: 30,
       dormantFreezeDays: 7,
+      settlementFreezeExperienceDays: 3,
+      settlementFreezeRegularDays: 7,
       refundWhenDepositInsufficient: true,
     };
   }
@@ -121,6 +125,12 @@ export class StaffRuleEngineService {
       dormantFreezeDays: item?.dormantFreezeDays === undefined || item?.dormantFreezeDays === null
         ? fallbackDefault.dormantFreezeDays
         : this.toSafeNumber(item?.dormantFreezeDays, `规则 ${name} 的自动冻结周期`),
+      settlementFreezeExperienceDays: item?.settlementFreezeExperienceDays === undefined || item?.settlementFreezeExperienceDays === null
+        ? fallbackDefault.settlementFreezeExperienceDays
+        : this.toSafeNumber(item?.settlementFreezeExperienceDays, `规则 ${name} 的体验单结算冻结周期`),
+      settlementFreezeRegularDays: item?.settlementFreezeRegularDays === undefined || item?.settlementFreezeRegularDays === null
+        ? fallbackDefault.settlementFreezeRegularDays
+        : this.toSafeNumber(item?.settlementFreezeRegularDays, `规则 ${name} 的普通单结算冻结周期`),
       refundWhenDepositInsufficient: true,
     };
   }
@@ -239,6 +249,8 @@ export class StaffRuleEngineService {
           tagCodes: ruleTags,
           firstWithdrawMinAcceptedDays: Number(rule?.firstWithdrawMinAcceptedDays ?? 15),
           dormantFreezeDays: Number(rule?.dormantFreezeDays ?? 7),
+          settlementFreezeExperienceDays: Number(rule?.settlementFreezeExperienceDays ?? 3),
+          settlementFreezeRegularDays: Number(rule?.settlementFreezeRegularDays ?? 7),
           refundWhenDepositInsufficient: true,
         };
       }
@@ -251,6 +263,8 @@ export class StaffRuleEngineService {
       tagCodes: [],
       firstWithdrawMinAcceptedDays: Number(defaultRule?.firstWithdrawMinAcceptedDays ?? 15),
       dormantFreezeDays: Number(defaultRule?.dormantFreezeDays ?? 7),
+      settlementFreezeExperienceDays: Number(defaultRule?.settlementFreezeExperienceDays ?? 3),
+      settlementFreezeRegularDays: Number(defaultRule?.settlementFreezeRegularDays ?? 7),
       refundWhenDepositInsufficient: true,
     };
   }

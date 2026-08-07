@@ -28,7 +28,11 @@ describe('StaffRuleEngineService', () => {
 
     expect(config.rules[0].firstWithdrawMinAcceptedDays).toBe(15);
     expect(config.rules[0].dormantFreezeDays).toBe(7);
+    expect(config.rules[0].settlementFreezeExperienceDays).toBe(3);
+    expect(config.rules[0].settlementFreezeRegularDays).toBe(7);
     expect(config.defaultRule.dormantFreezeDays).toBe(7);
+    expect(config.defaultRule.settlementFreezeExperienceDays).toBe(3);
+    expect(config.defaultRule.settlementFreezeRegularDays).toBe(7);
   });
 
   it('uses default rule when staff has no matching tag', () => {
@@ -42,6 +46,8 @@ describe('StaffRuleEngineService', () => {
         quitCoolingDays: 90,
         depositForfeitDays: 45,
         dormantFreezeDays: 12,
+        settlementFreezeExperienceDays: 4,
+        settlementFreezeRegularDays: 8,
       },
       tags: [{ code: 'vip', name: 'VIP' }],
       rules: [
@@ -55,6 +61,8 @@ describe('StaffRuleEngineService', () => {
           quitCoolingDays: 180,
           depositForfeitDays: 60,
           dormantFreezeDays: 5,
+          settlementFreezeExperienceDays: 2,
+          settlementFreezeRegularDays: 6,
         },
       ],
     });
@@ -63,6 +71,8 @@ describe('StaffRuleEngineService', () => {
     expect(matched?.id).toBe('default_rule');
     expect(matched?.depositAmount).toBe(600);
     expect(service.getDormantFreezeDays(config, [])).toBe(12);
+    expect(matched?.settlementFreezeExperienceDays).toBe(4);
+    expect(matched?.settlementFreezeRegularDays).toBe(8);
   });
 
   it('requires new saved rules to bind exactly one tag', () => {

@@ -155,6 +155,9 @@
 - 退款均按全额退款处理。退款时续单待结算记录置无效；已结算续单分红生成 `ORDER_RENEWAL_BONUS_REVERSAL` 钱包冲正流水，并将续单组置为 `REVERSED`。
 - 订单重算 `repairWalletForOrderSettlementsV2` 支持 `invalidateRenewal` 与 `renewalInvalidateReason`，应用重算时可将续单置为无效；若已发放分红，必须冲正并记录原因。
 - 后续续单榜只统计 `OrderRenewalGroup.status = SETTLED`，按 `groupKey` 聚合 `renewalOrderCount/renewalAmount/bonusTotalAmount`，不做单人拆分。
+- 订单结算收益冻结周期不走全局配置；`orders.service.ts` 会按每条 `OrderSettlement.userId` 查询员工 `staffTags` 并匹配 `StaffRuleEngineService` 规则。同一订单不同结算人可以有不同解冻时间。
+- 员工规则字段：`settlementFreezeExperienceDays` 用于体验单/福袋单，兜底 3 天；`settlementFreezeRegularDays` 用于普通单，兜底 7 天。`computeSettlementFreezeTime` 保持纯函数，只接收规则后的天数配置，不直接访问数据库。
+- `applySettlementPlanTx` 返回保留顶层 `freezeDays/freezeStartAt/freezeEndAt` 作为汇总兼容字段，同时返回 `freezeInfoByUser` 记录逐人冻结周期；排查具体员工解冻时间时应看 `freezeInfoByUser`。
 
 ### 钱包与提现
 
@@ -185,12 +188,27 @@
 8. 创建提现申请和提现预扣流水。
 9. 资金变更前先锁定钱包账户行；审核通过/驳回前先锁定提现申请行和钱包账户行，并在余额变更后阻断负数余额桶。
 
+提现审核：
+
+- 审核通过仍要求钱包余额桶非负，负余额/异常余额不能通过。
+- 审核驳回会释放提现冻结到可用余额，可用余额允许释放后仍为负，用于冲抵线下费用、罚单、设备租赁等造成的欠款。
+- 驳回分支只要求 `frozenBalance` 和 `withdrawFrozenBalance` 不被扣成负数，避免负可用余额阻断正常驳回。
+
 SQL 安全注意事项：
 
 - 优先使用 Prisma 查询构造器；必须使用原生 SQL 时，值只能走参数占位符。
 - `$queryRawUnsafe/$executeRawUnsafe` 仅允许拼接服务端固定 SQL 片段。动态列名、排序字段、表名必须使用白名单；客诉工单更新 helper 已对白名单字段做拦截。
 
 退店逻辑在 `src/users/users.service.ts`：释放冻结资金和可退保证金到可用余额。任何提现/保证金改动都必须验证 `EXITED` 员工行为和 admin 端提现预览。
+
+普通退店保证金规则：
+
+- 退店预览和实际退店必须共用 `buildStaffExitPreviewFromUser` 的计算口径。
+- 入店天数不足员工规则中的 `depositForfeitDays`，或有效接单量少于 50 单，保证金不退。
+- 有效接单量口径：`OrderParticipant.acceptedAt != null`、`rejectedAt = null`，且关联派单状态为 `COMPLETED` 或 `ARCHIVED`。
+- 入店天数和接单量都达标时，如当前保证金仍低于规则 `depositAmount`，保证金仍不退。
+- 保证金未缴满且本次不退时，会从可用余额中补扣缺口；补扣金额最多为退店释放后可用余额，不允许将可用余额扣成负数。未补齐部分通过 `depositTopUpUnpaidAmount` 返回给前端展示。
+- `CLEAR_ALL` 清退仍走独立清退逻辑，不等同于普通退店保证金规则。
 
 ### 线下费用
 

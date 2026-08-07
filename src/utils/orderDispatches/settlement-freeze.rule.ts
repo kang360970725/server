@@ -1,16 +1,27 @@
 /**
  * 计算结算冻结起止时间
  * - 冻结起点：COMPLETED dispatch.completedAt
- * - 冻结时长：根据 OrderType（3 / 7 天）
+ * - 冻结时长：根据 OrderType 与配置（体验/福袋默认 3 天，其他默认 7 天）
  */
 export function computeSettlementFreezeTime(params: {
     order: any;
+    freezeDaysConfig?: {
+        experienceDays?: number;
+        regularDays?: number;
+    };
 }): {
     freezeStartAt: Date;
     freezeEndAt: Date;
     freezeDays: number;
 } {
     const { order } = params;
+    const normalizeDays = (value: any, fallback: number) => {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n < 0) return fallback;
+        return Math.floor(n);
+    };
+    const configuredExperienceDays = normalizeDays(params.freezeDaysConfig?.experienceDays, 3);
+    const configuredRegularDays = normalizeDays(params.freezeDaysConfig?.regularDays, 7);
 
     if (!order) {
         throw new Error('order 不能为空');
@@ -32,15 +43,15 @@ export function computeSettlementFreezeTime(params: {
     if (completedDispatch) freezeStartAt = new Date(completedDispatch.completedAt || completedDispatch.acceptedAllAt)
 
     // 2️⃣ 冻结天数判定（集中规则）
-    let freezeDays = 7;
+    let freezeDays = configuredRegularDays;
 
     switch (projectSnap.type) {
         case 'EXPERIENCE':
         case 'LUCKY_BAG':
-            freezeDays = 3;
+            freezeDays = configuredExperienceDays;
             break;
         default:
-            freezeDays = 7;
+            freezeDays = configuredRegularDays;
             break;
     }
 

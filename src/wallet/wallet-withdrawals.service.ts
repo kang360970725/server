@@ -70,6 +70,14 @@ export class WalletWithdrawalsService {
         }
     }
 
+    private assertWithdrawalFrozenBucketsNonNegative(account: any) {
+        const frozen = round2(Number(account?.frozenBalance ?? 0));
+        const withdrawFrozen = round2(Number(account?.withdrawFrozenBalance ?? 0));
+        if (frozen < 0 || withdrawFrozen < 0) {
+            throw new BadRequestException('钱包余额异常，资金操作已阻断');
+        }
+    }
+
     private async autoFreezeDormantStaffIfNeeded(userId: number, tx: any) {
         const user = await tx.user.findUnique({
             where: { id: Number(userId) },
@@ -778,12 +786,13 @@ export class WalletWithdrawalsService {
                     repairReason: '提现审核驳回前自动修复钱包异常',
                     operatorId: reviewerId,
                 });
-                // 2) 资金退回：frozen -amount, available +amount
+                // 2) 资金退回：frozen -amount, available +amount。
+                // 可用余额允许仍为负，用于冲抵线下费用、罚单、设备租赁等扣款造成的欠款。
                 const accountAfterRelease = await this.walletService.applyWalletAccountDelta(tx as any, req.userId, {
                     withdrawFrozenDelta: -req.amount,
                     availableDelta: req.amount,
                 });
-                this.assertWalletBucketsNonNegative(accountAfterRelease);
+                this.assertWithdrawalFrozenBucketsNonNegative(accountAfterRelease);
 
                 // 3) 写退回流水（WITHDRAW_RELEASE）
                 await tx.walletTransaction.upsert({

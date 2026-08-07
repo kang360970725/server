@@ -36,6 +36,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { MiniSubscribeMessageService } from '../notifications/mini-subscribe-message.service';
 import { PenaltiesService } from '../penalties/penalties.service';
 import { SystemConfigService } from '../system-config/system-config.service';
+import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
 import { WechatPayService } from '../mini/wechat-pay.service';
 
 type OrderCreateScene = 'ADMIN' | 'MINIAPP' | 'OFFICIAL_ACCOUNT';
@@ -75,6 +76,7 @@ export class OrdersService {
         private miniSubscribeMessageService: MiniSubscribeMessageService,
         private penaltiesService: PenaltiesService,
         private systemConfigService: SystemConfigService,
+        private staffRuleEngineService: StaffRuleEngineService,
         private wechatPayService: WechatPayService,
   ) {
   }
@@ -593,6 +595,48 @@ export class OrdersService {
         }
 
         return fallback;
+    }
+
+    private normalizeSettlementFreezeDays(value: any, fallback: number) {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n < 0) return fallback;
+        return Math.floor(n);
+    }
+
+    private getExperienceFreezeDaysFromRule(rule: any) {
+        return this.normalizeSettlementFreezeDays(rule?.settlementFreezeExperienceDays, 3);
+    }
+
+    private getRegularFreezeDaysFromRule(rule: any) {
+        return this.normalizeSettlementFreezeDays(rule?.settlementFreezeRegularDays, 7);
+    }
+
+    private async buildSettlementFreezeInfoByUserTx(tx: any, order: any, userIds: number[]) {
+        const uniqueUserIds = Array.from(new Set(userIds.map((id) => Number(id || 0)).filter((id) => id > 0)));
+        const config = await this.staffRuleEngineService.getConfig();
+        const users = uniqueUserIds.length
+            ? await tx.user.findMany({
+                where: { id: { in: uniqueUserIds } },
+                select: { id: true, staffTags: true },
+            })
+            : [];
+        const userById = new Map<number, any>(users.map((user: any) => [Number(user.id), user]));
+        const defaultRule = this.staffRuleEngineService.resolveMatchedRule(config, []);
+        const map = new Map<number, ReturnType<typeof computeSettlementFreezeTime>>();
+
+        uniqueUserIds.forEach((userId) => {
+            const user = userById.get(userId);
+            const rule = this.staffRuleEngineService.resolveMatchedRule(config, user?.staffTags || []) || defaultRule;
+            map.set(userId, computeSettlementFreezeTime({
+                order,
+                freezeDaysConfig: {
+                    experienceDays: this.getExperienceFreezeDaysFromRule(rule),
+                    regularDays: this.getRegularFreezeDaysFromRule(rule),
+                },
+            }));
+        });
+
+        return map;
     }
 
     private buildPlayerEvaluationKey(dispatchId: number, playerUserId: number) {
@@ -5121,8 +5165,6 @@ export class OrdersService {
             throw new BadRequestException('未找到可应用的 settlement 计划');
         }
 
-        const freezeInfo = computeSettlementFreezeTime({ order });
-        const unlockAt = freezeInfo.freezeEndAt;
         const settlementBatchId = randomUUID();
 
         /**
@@ -5157,6 +5199,27 @@ export class OrdersService {
         if (!settlementCreateData.length) {
             throw new BadRequestException('settlementCreateData 为空，无法写入');
         }
+
+        const settlementFreezeInfoByUser = await this.buildSettlementFreezeInfoByUserTx(
+            tx,
+            order,
+            settlementCreateData.map((item: any) => Number(item.userId)),
+        );
+        const getSettlementFreezeInfo = (userId: number) => {
+            const freezeInfo = settlementFreezeInfoByUser.get(Number(userId));
+            if (freezeInfo) return freezeInfo;
+            return computeSettlementFreezeTime({ order });
+        };
+        const buildFreezeInfoList = (rows: any[]) =>
+            rows.map((row: any) => {
+                const freezeInfo = getSettlementFreezeInfo(Number(row.userId));
+                return {
+                    userId: Number(row.userId),
+                    freezeDays: freezeInfo.freezeDays,
+                    freezeStartAt: freezeInfo.freezeStartAt,
+                    freezeEndAt: freezeInfo.freezeEndAt,
+                };
+            });
 
         this.assertOrderSettlementPayoutWithinBase({
             order,
@@ -5233,6 +5296,7 @@ export class OrdersService {
             // ✅ 首次确认：沿用旧逻辑，正收益冻结
             const walletResults: any[] = [];
             for (const s of createdSettlements) {
+                const freezeInfo = getSettlementFreezeInfo(Number(s.userId));
                 const w = await this.wallet.applySettlementEarningToWalletV1({
                     tx,
                     userId: s.userId,
@@ -5240,7 +5304,7 @@ export class OrdersService {
                     orderId,
                     dispatchId: s.dispatchId,
                     finalEarnings: Number(s.finalEarnings ?? 0),
-                    unlockAt,
+                    unlockAt: freezeInfo.freezeEndAt,
                     freezeWhenPositive: true,
                 });
 
@@ -5248,6 +5312,8 @@ export class OrdersService {
                     settlementId: s.id,
                     userId: s.userId,
                     dispatchId: s.dispatchId,
+                    freezeDays: freezeInfo.freezeDays,
+                    freezeEndAt: freezeInfo.freezeEndAt,
                     applyResult: w,
                 });
             }
@@ -5276,14 +5342,19 @@ export class OrdersService {
                     userName: extra.userName,
                 };
             });
+            const freezeInfoByUser = buildFreezeInfoList(createdSettlements);
+            const summaryFreezeInfo = freezeInfoByUser.reduce((max: any, item: any) => (
+                !max || item.freezeEndAt > max.freezeEndAt ? item : max
+            ), null);
 
             return {
                 mode,
                 orderId,
                 settlementBatchId,
-                freezeDays: freezeInfo.freezeDays,
-                freezeStartAt: freezeInfo.freezeStartAt,
-                freezeEndAt: freezeInfo.freezeEndAt,
+                freezeDays: summaryFreezeInfo?.freezeDays ?? 7,
+                freezeStartAt: summaryFreezeInfo?.freezeStartAt ?? null,
+                freezeEndAt: summaryFreezeInfo?.freezeEndAt ?? null,
+                freezeInfoByUser,
                 walletResults,
                 settlements: mergedSettlements,
                 oldSettlementCount: 0,
@@ -5325,6 +5396,7 @@ export class OrdersService {
              */
             const reversalApplyResults: any[] = [];
             for (const plan of rollbackSettlementResult.reversalPlans ?? []) {
+                const freezeInfo = getSettlementFreezeInfo(Number(plan.userId));
                 const r = await this.wallet.applySettlementEarningToWalletV2({
                 tx,
                 userId: plan.userId,
@@ -5333,7 +5405,7 @@ export class OrdersService {
                 dispatchId: plan.dispatchId ?? null,
                 finalEarnings: Number(plan.finalEarnings ?? 0),
 
-                    unlockAt,
+                    unlockAt: freezeInfo.freezeEndAt,
                     freezeWhenPositive: true,
                     statusHint: plan.statusHint ?? null,
 
@@ -5385,6 +5457,7 @@ export class OrdersService {
             for (const t of orphanTxs) {
                 const amount = round2(Number(t.amount ?? 0));
                 if (!t.userId || !amount) continue;
+                const freezeInfo = getSettlementFreezeInfo(Number(t.userId));
 
                 const originalDirection = String(t.direction);
                 const reversalFinalEarnings = originalDirection === 'OUT' ? amount : -amount;
@@ -5397,7 +5470,7 @@ export class OrdersService {
                     dispatchId: t.dispatchId ?? null,
                     finalEarnings: reversalFinalEarnings,
 
-                    unlockAt,
+                    unlockAt: freezeInfo.freezeEndAt,
                     freezeWhenPositive: true,
                     statusHint: String(t.status) === 'FROZEN' ? 'FROZEN' : 'AVAILABLE',
 
@@ -5467,6 +5540,7 @@ export class OrdersService {
             for (const s of createdSettlements) {
                 const key = `${Number(s.dispatchId)}_${Number(s.userId)}_${String(s.settlementType)}`;
                 const statusHint = recalcStatusHintByKey.get(key) ?? 'AVAILABLE';
+                const freezeInfo = getSettlementFreezeInfo(Number(s.userId));
                 const r = await this.wallet.applySettlementEarningToWalletV2({
                     tx,
                     userId: s.userId,
@@ -5475,7 +5549,7 @@ export class OrdersService {
                     dispatchId: s.dispatchId,
                     finalEarnings: Number(s.finalEarnings ?? 0),
 
-                    unlockAt,
+                    unlockAt: freezeInfo.freezeEndAt,
                     freezeWhenPositive: true,
                     statusHint,
 
@@ -5489,6 +5563,8 @@ export class OrdersService {
                     userId: s.userId,
                     dispatchId: s.dispatchId,
                     finalEarnings: Number(s.finalEarnings ?? 0),
+                    freezeDays: freezeInfo.freezeDays,
+                    freezeEndAt: freezeInfo.freezeEndAt,
                     applyResult: r,
                 });
             }
@@ -5519,6 +5595,10 @@ export class OrdersService {
                     userName: extra.userName,
                 };
             });
+            const freezeInfoByUser = buildFreezeInfoList(createdSettlements);
+            const summaryFreezeInfo = freezeInfoByUser.reduce((max: any, item: any) => (
+                !max || item.freezeEndAt > max.freezeEndAt ? item : max
+            ), null);
 
             return {
                 mode,
@@ -5527,9 +5607,10 @@ export class OrdersService {
                 oldSettlementCount: oldSettlements.length,
                 deletedOldSettlementCount: deleteOldSettlementResult.count,
                 rebuiltSettlementCount: mergedSettlements.length,
-                freezeDays: freezeInfo.freezeDays,
-                freezeStartAt: freezeInfo.freezeStartAt,
-                freezeEndAt: freezeInfo.freezeEndAt,
+                freezeDays: summaryFreezeInfo?.freezeDays ?? 7,
+                freezeStartAt: summaryFreezeInfo?.freezeStartAt ?? null,
+                freezeEndAt: summaryFreezeInfo?.freezeEndAt ?? null,
+                freezeInfoByUser,
                 rollbackSettlementResult,
                 reversalApplyResults,
                 orphanReversalResults,
@@ -7163,12 +7244,6 @@ export class OrdersService {
 
 
         // ===========================
-        // v0.2 测试参数：冻结时间用“分钟”
-        // ===========================
-        const EXPERIENCE_UNLOCK_MINUTES = 3 * 60 * 24;
-        const REGULAR_UNLOCK_MINUTES = 7 * 60 * 24;
-
-        // ===========================
         // 客服分红比例（不落库，纯规则）
         // ===========================
         const CUSTOMER_SERVICE_SHARE_RATE = 0.01;
@@ -7236,11 +7311,29 @@ export class OrdersService {
         // 3️⃣ 本轮基础结算类型（体验单 / 正价单）
         const baseSettlementType = order.type === OrderType.EXPERIENCE ? 'EXPERIENCE' : 'REGULAR';
 
-        // 解冻时间
-        const unlockAt =
-            baseSettlementType === 'EXPERIENCE'
-                ? new Date(Date.now() + EXPERIENCE_UNLOCK_MINUTES * 60 * 1000)
-                : new Date(Date.now() + REGULAR_UNLOCK_MINUTES * 60 * 1000);
+        const settlementUserIds = Array.from(new Set([
+            ...participants.map((p: any) => Number(p.userId || 0)),
+            Number(order?.dispatcherId || 0),
+            Number(order?.initialDispatcherId || 0),
+        ].filter((id) => id > 0)));
+        const settlementFreezeInfoByUser = await this.buildSettlementFreezeInfoByUserTx(
+            tx,
+            {
+                ...order,
+                projectSnapshot: { type: order.type },
+                dispatches: [{ status: 'COMPLETED', completedAt: new Date() }],
+            },
+            settlementUserIds,
+        );
+        const getUnlockAt = (userId: number) => (
+            settlementFreezeInfoByUser.get(Number(userId)) || computeSettlementFreezeTime({
+                order: {
+                    ...order,
+                    projectSnapshot: { type: order.type },
+                    dispatches: [{ status: 'COMPLETED', completedAt: new Date() }],
+                },
+            })
+        ).freezeEndAt;
 
         // 4️⃣ 分摊规则（原有逻辑兼容）
         const ratioMap = this.buildProgressRatioMap(participants);
@@ -7532,7 +7625,7 @@ export class OrdersService {
                         {
                             userId,
                             finalEarnings: settlementFinal,
-                            unlockAt,
+                            unlockAt: getUnlockAt(userId),
                             sourceType: 'ORDER_SETTLEMENT',
                             bizType:
                                 grossRmb !== null && grossRmb < 0
@@ -7636,7 +7729,7 @@ export class OrdersService {
                         {
                             userId,
                             finalEarnings: settlementFinal,
-                            unlockAt,
+                            unlockAt: getUnlockAt(userId),
                             sourceType: 'ORDER_SETTLEMENT',
                             bizType: WalletBizType.SETTLEMENT_EARNING_CARRY,
                             sourceId: settlementId,
@@ -7724,7 +7817,7 @@ export class OrdersService {
                         {
                             userId: initialDispatcher.userId,
                             finalEarnings: csFinal,
-                            unlockAt,
+                            unlockAt: getUnlockAt(initialDispatcher.userId),
                             sourceType: 'ORDER_SETTLEMENT',
                             bizType: WalletBizType.SETTLEMENT_EARNING_CS,
                             sourceId: csId,

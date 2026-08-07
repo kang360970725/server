@@ -19,6 +19,7 @@ export class UsersService {
   private static readonly defaultStaffRoleName = '陪玩';
   private readonly autoOfflineDisabled = true;
   private readonly staffExitCooldownDays = 180;
+  private readonly staffExitDepositRefundMinAcceptedOrders = 50;
   private readonly logger = new Logger(UsersService.name);
 
   static readonly PLAYER_ONLINE_LEASE_MS = 2 * 60 * 60 * 1000;
@@ -1084,17 +1085,41 @@ export class UsersService {
     };
   }
 
-  private buildStaffExitPreviewFromUser(user: any, config: any) {
+  private async countEffectiveAcceptedOrders(userId: number, db: any = this.prisma) {
+    return db.orderParticipant.count({
+      where: {
+        userId: Number(userId),
+        acceptedAt: { not: null },
+        rejectedAt: null,
+        dispatch: {
+          status: { in: ['ARCHIVED', 'COMPLETED'] as any },
+        },
+      },
+    });
+  }
+
+  private buildStaffExitPreviewFromUser(user: any, config: any, effectiveAcceptedOrderCount = 0) {
     const ruleSummary = this.buildStaffRuleSummary(user, config);
     const availableBalance = Number(user?.walletAccount?.availableBalance ?? 0);
     const frozenBalance = Number(user?.walletAccount?.frozenBalance ?? 0);
     const depositBalance = Number(user?.walletAccount?.depositBalance ?? 0);
+    const depositAmountRule = Number(ruleSummary.matchedDepositAmount || 0);
     const joinedAt = this.getStaffJoinedAt(user);
     const inShopDays = Math.max(0, Math.floor((Date.now() - joinedAt.getTime()) / (1000 * 60 * 60 * 24)));
-    const isDepositForfeit = inShopDays < Number(ruleSummary.matchedDepositForfeitDays || 0);
+    const isDepositForfeitByDays = inShopDays < Number(ruleSummary.matchedDepositForfeitDays || 0);
+    const isDepositForfeitByOrders = Number(effectiveAcceptedOrderCount || 0) < this.staffExitDepositRefundMinAcceptedOrders;
+    const depositShortfallAmount = Math.max(0, Number((depositAmountRule - depositBalance).toFixed(2)));
+    const isDepositInsufficient = depositShortfallAmount > 0;
+    const isDepositForfeit = isDepositForfeitByDays || isDepositForfeitByOrders || isDepositInsufficient;
     const refundDepositAmount = isDepositForfeit ? 0 : depositBalance;
     const forfeitDepositAmount = Math.max(0, Number((depositBalance - refundDepositAmount).toFixed(2)));
     const releaseAmount = Number((frozenBalance + refundDepositAmount).toFixed(2));
+    const maxAvailableForDepositTopUp = Math.max(0, Number((availableBalance + releaseAmount).toFixed(2)));
+    const depositTopUpForfeitAmount = isDepositForfeit
+      ? Math.min(depositShortfallAmount, maxAvailableForDepositTopUp)
+      : 0;
+    const depositTopUpUnpaidAmount = Math.max(0, Number((depositShortfallAmount - depositTopUpForfeitAmount).toFixed(2)));
+    const finalAvailableBalance = Number((availableBalance + releaseAmount - depositTopUpForfeitAmount).toFixed(2));
 
     return {
       userId: Number(user.id),
@@ -1104,19 +1129,27 @@ export class UsersService {
       inShopDays,
       quitCoolingDays: ruleSummary.matchedQuitCoolingDays,
       depositForfeitDays: ruleSummary.matchedDepositForfeitDays,
+      effectiveAcceptedOrderCount: Number(effectiveAcceptedOrderCount || 0),
+      minAcceptedOrdersForDepositRefund: this.staffExitDepositRefundMinAcceptedOrders,
       isDepositForfeit,
+      isDepositForfeitByDays,
+      isDepositForfeitByOrders,
+      isDepositInsufficient,
       availableBalance,
       frozenBalance,
       depositBalance,
       refundDepositAmount,
       forfeitDepositAmount,
+      depositTopUpForfeitAmount,
+      depositTopUpUnpaidAmount,
       releaseAmount,
+      finalAvailableBalance,
       clearAmount: Number((availableBalance + frozenBalance + depositBalance).toFixed(2)),
-      depositAmountRule: ruleSummary.matchedDepositAmount,
+      depositAmountRule,
       firstWithdrawMinBalance: ruleSummary.matchedFirstWithdrawMinBalance,
       firstWithdrawMinAcceptedDays: ruleSummary.matchedFirstWithdrawMinAcceptedDays,
-      refundWhenDepositInsufficient: true,
-      blacklistAllowed: availableBalance <= 0 && releaseAmount <= 0,
+      refundWhenDepositInsufficient: false,
+      blacklistAllowed: finalAvailableBalance <= 0,
       suggestedExitMode: StaffExitMode.RELEASE_TO_AVAILABLE,
     };
   }
@@ -1148,7 +1181,12 @@ export class UsersService {
       throw new BadRequestException('该员工已在黑名单中，不支持退店操作');
     }
 
-    return this.buildStaffExitPreviewFromUser(user, await this.staffRuleEngineService.getConfig());
+    const [config, effectiveAcceptedOrderCount] = await Promise.all([
+      this.staffRuleEngineService.getConfig(),
+      this.countEffectiveAcceptedOrders(id),
+    ]);
+
+    return this.buildStaffExitPreviewFromUser(user, config, effectiveAcceptedOrderCount);
   }
 
   async exitStaffShop(id: number, dto: StaffExitDto, operatorId?: number, actor?: { userType?: UserType }) {
@@ -1198,14 +1236,19 @@ export class UsersService {
 
     const mode = dto?.mode;
     const addToBlacklist = Boolean(dto?.addToBlacklist);
-    const preview = this.buildStaffExitPreviewFromUser(oldUser, await this.staffRuleEngineService.getConfig());
+    const [config, effectiveAcceptedOrderCount] = await Promise.all([
+      this.staffRuleEngineService.getConfig(),
+      this.countEffectiveAcceptedOrders(id),
+    ]);
+    const preview = this.buildStaffExitPreviewFromUser(oldUser, config, effectiveAcceptedOrderCount);
     const available = Number(preview.availableBalance ?? 0);
     const frozen = Number(preview.frozenBalance ?? 0);
     const deposit = Number(preview.depositBalance ?? 0);
     const refundableDeposit = Number(preview.refundDepositAmount ?? 0);
     const forfeitDeposit = Number(preview.forfeitDepositAmount ?? 0);
+    const depositTopUpForfeit = Number(preview.depositTopUpForfeitAmount ?? 0);
     const releaseAmount = Number((frozen + refundableDeposit).toFixed(2));
-    const finalAvailable = Number((available + releaseAmount).toFixed(2));
+    const finalAvailable = Number((available + releaseAmount - depositTopUpForfeit).toFixed(2));
 
     if (addToBlacklist && finalAvailable > 0) {
       throw new BadRequestException('加入黑名单前需先清空可用余额，请使用一键清零');
@@ -1228,12 +1271,14 @@ export class UsersService {
             availableBalance: available,
             frozenBalance: frozen,
             depositBalance: deposit,
+            effectiveAcceptedOrderCount: preview.effectiveAcceptedOrderCount,
           },
           newData: {
             mode,
             addToBlacklist,
             refundDepositAmount: refundableDeposit,
             forfeitDepositAmount: forfeitDeposit,
+            depositTopUpForfeitAmount: depositTopUpForfeit,
           },
           remark: addToBlacklist ? '员工退店并加入黑名单' : '员工退店',
         },
@@ -1257,7 +1302,7 @@ export class UsersService {
       const accountAfter = await tx.walletAccount.update({
         where: { userId: id },
         data: {
-          availableBalance: { increment: releaseAmount },
+          availableBalance: { increment: Number((releaseAmount - depositTopUpForfeit).toFixed(2)) },
           frozenBalance: 0,
           earningFrozenBalance: 0,
           withdrawFrozenBalance: 0,
@@ -1298,6 +1343,32 @@ export class UsersService {
             remark: '员工退店，保证金按规则不退',
             operatorId: operatorId ?? null,
           },
+        });
+      }
+
+      if (depositTopUpForfeit > 0) {
+        await tx.walletDepositTransaction.create({
+          data: {
+            userId: id,
+            amount: -depositTopUpForfeit,
+            bizType: 'STAFF_EXIT_CLEAR' as any,
+            remark: '员工退店，保证金未缴满，从余额补扣后不退',
+            operatorId: operatorId ?? null,
+          },
+        });
+        await tx.walletTransaction.create({
+          data: {
+            userId: id,
+            direction: 'OUT',
+            bizType: 'STAFF_EXIT_CLEAR' as any,
+            amount: depositTopUpForfeit,
+            status: 'AVAILABLE',
+            sourceType: 'STAFF_EXIT_DEPOSIT_TOP_UP_FORFEIT',
+            sourceId: log.id,
+            availableAfter: Number(accountAfter?.availableBalance ?? 0),
+            frozenAfter: Number(accountAfter?.frozenBalance ?? 0),
+            remark: '员工退店，保证金未缴满，从余额补扣',
+          } as any,
         });
       }
 
