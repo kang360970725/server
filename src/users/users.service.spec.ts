@@ -30,6 +30,31 @@ describe('UsersService.create staff rejoin', () => {
     );
   };
 
+  it('rejects multiple staff rule groups when creating staff', async () => {
+    const prisma: any = {
+      user: {
+        findUnique: jest.fn(),
+        findMany: jest.fn(),
+      },
+    };
+    const service = createService(prisma);
+
+    await expect(
+      service.create(
+        {
+          phone: '13800138000',
+          password: '123456',
+          userType: UserType.STAFF,
+          realName: '赵六',
+          idCard: '510000199001010099',
+          staffTags: ['group_a', 'group_b'],
+        } as any,
+        1,
+        actor,
+      ),
+    ).rejects.toThrow('员工规则分组仅支持选择一个');
+  });
+
   it('requires confirmation when exited staff is still in cooling period', async () => {
     const cooldownUntil = new Date(Date.now() + 24 * 60 * 60 * 1000);
     const prisma: any = {

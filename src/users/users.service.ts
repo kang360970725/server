@@ -382,9 +382,15 @@ export class UsersService {
     return String(value || '').trim();
   }
 
-  private assertStaffTagsRequired(tags: string[]) {
+  private assertStaffRuleGroupRequired(tags: string[]) {
     if (!tags.length) {
-      throw new BadRequestException('新增或重新入店员工必须选择员工标签');
+      throw new BadRequestException('新增或重新入店员工必须选择员工规则分组');
+    }
+  }
+
+  private assertStaffRuleGroupSingle(tags: string[]) {
+    if (tags.length > 1) {
+      throw new BadRequestException('员工规则分组仅支持选择一个');
     }
   }
 
@@ -537,7 +543,8 @@ export class UsersService {
       if (!normalizedPhone) throw new BadRequestException('员工手机号不能为空');
       if (!normalizedRealName) throw new BadRequestException('员工姓名不能为空');
       if (!normalizedIdCard) throw new BadRequestException('员工身份证号不能为空');
-      this.assertStaffTagsRequired(normalizedStaffTags);
+      this.assertStaffRuleGroupRequired(normalizedStaffTags);
+      this.assertStaffRuleGroupSingle(normalizedStaffTags);
 
       const phoneOwner = await this.prisma.user.findUnique({ where: { phone: normalizedPhone } });
       if (phoneOwner && phoneOwner.userType !== UserType.STAFF) {
@@ -1696,6 +1703,9 @@ export class UsersService {
     const normalizedStaffTags = Object.prototype.hasOwnProperty.call(updateUserDto, 'staffTags')
       ? this.normalizeStaffTags((updateUserDto as any).staffTags)
       : undefined;
+    if (normalizedStaffTags !== undefined) {
+      this.assertStaffRuleGroupSingle(normalizedStaffTags);
+    }
 
     const shouldRestoreWithdrawOnStaffUnfreeze =
       oldUser.userType === UserType.STAFF &&

@@ -87,7 +87,7 @@ describe('StaffRuleEngineService', () => {
         rules: [
           {
             id: 'multi',
-            name: '多标签规则',
+            name: '多分组规则',
             tagCodes: ['a', 'b'],
             depositAmount: 500,
             firstWithdrawMinBalance: 1000,
@@ -96,7 +96,7 @@ describe('StaffRuleEngineService', () => {
           },
         ],
       }),
-    ).toThrow('必须且只能关联一个标签');
+    ).toThrow('必须且只能关联一个规则分组');
   });
 
   it('can normalize legacy multi-tag rules for read compatibility', () => {
@@ -111,7 +111,7 @@ describe('StaffRuleEngineService', () => {
         rules: [
           {
             id: 'multi',
-            name: '旧多标签规则',
+            name: '旧多分组规则',
             tagCodes: ['a', 'b'],
             depositAmount: 500,
             firstWithdrawMinBalance: 1000,
