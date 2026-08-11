@@ -6230,13 +6230,42 @@ export class OrdersService {
 
         const keyword = String(params.keyword || '').trim();
         const aggMap = new Map<string, any>();
+        const normalizeMemberName = (value: any) => {
+            if (value === null || value === undefined) return '';
+            if (typeof value === 'string' || typeof value === 'number') return String(value).trim();
+            if (typeof value === 'object') {
+                return String(
+                    value.nickname ??
+                    value.name ??
+                    value.realName ??
+                    value.displayName ??
+                    value.username ??
+                    value.userId ??
+                    value.id ??
+                    '',
+                ).trim();
+            }
+            return String(value || '').trim();
+        };
+        const normalizeMemberId = (value: any) => {
+            if (value === null || value === undefined) return '';
+            if (typeof value === 'string' || typeof value === 'number') return String(value).trim();
+            if (typeof value === 'object') {
+                return String(value.userId ?? value.id ?? value.value ?? '').trim();
+            }
+            return String(value || '').trim();
+        };
 
         for (const group of groups) {
-            const memberNames = Array.isArray(group.memberNamesSnapshot) ? group.memberNamesSnapshot : [];
-            const memberUserIds = Array.isArray(group.memberUserIds) ? group.memberUserIds : [];
-            const groupKey = String(group.groupKey || memberUserIds.join(',') || group.id);
-            const memberNameText = memberNames.map((name: any) => String(name || '').trim()).filter(Boolean).join('、');
-            const memberIdText = memberUserIds.map((id: any) => String(id || '').trim()).filter(Boolean).join(',');
+            const memberNames = (Array.isArray(group.memberNamesSnapshot) ? group.memberNamesSnapshot : [])
+                .map(normalizeMemberName)
+                .filter(Boolean);
+            const memberUserIds = (Array.isArray(group.memberUserIds) ? group.memberUserIds : [])
+                .map(normalizeMemberId)
+                .filter(Boolean);
+            const memberIdText = memberUserIds.join(',');
+            const groupKey = String(group.groupKey || memberIdText || group.id);
+            const memberNameText = memberNames.join('、');
             if (keyword) {
                 const hit =
                     groupKey.includes(keyword) ||
