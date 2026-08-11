@@ -571,7 +571,7 @@ export class SystemConfigService implements OnModuleInit {
         key: SystemConfigService.KEYS.STAFF_RULE_ENGINE_V1,
         value: JSON.stringify({ tags: [], rules: [] }, null, 2),
         valueType: 'JSON',
-        remark: '员工规则分组与提现/退店规则配置',
+        remark: '服务者规则分组与提现/退店规则配置',
       },
     ] as const;
 

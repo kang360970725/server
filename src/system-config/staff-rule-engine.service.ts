@@ -87,7 +87,7 @@ export class StaffRuleEngineService {
     if (!id) throw new BadRequestException(`第 ${index + 1} 条规则缺少 id`);
     if (!name) throw new BadRequestException(`第 ${index + 1} 条规则缺少名称`);
     if (isDefaultRule) {
-      if (tagCodes.length) throw new BadRequestException('默认规则不能关联员工规则分组');
+      if (tagCodes.length) throw new BadRequestException('默认规则不能关联服务者规则分组');
     } else {
       if (options?.allowMultipleTags) {
         if (!tagCodes.length) throw new BadRequestException(`规则 ${name} 至少关联一个规则分组`);
@@ -210,13 +210,13 @@ export class StaffRuleEngineService {
         key: SystemConfigService.KEYS.STAFF_RULE_ENGINE_V1,
         value: JSON.stringify(normalized, null, 2),
         valueType: 'JSON',
-        remark: '员工规则分组与提现/退店规则配置',
+        remark: '服务者规则分组与提现/退店规则配置',
         enabled: true,
       },
       update: {
         value: JSON.stringify(normalized, null, 2),
         valueType: 'JSON',
-        remark: '员工规则分组与提现/退店规则配置',
+        remark: '服务者规则分组与提现/退店规则配置',
         enabled: true,
       },
     });

@@ -52,7 +52,7 @@ describe('UsersService.create staff rejoin', () => {
         1,
         actor,
       ),
-    ).rejects.toThrow('员工规则分组仅支持选择一个');
+    ).rejects.toThrow('服务者规则分组仅支持选择一个');
   });
 
   it('requires confirmation when exited staff is still in cooling period', async () => {

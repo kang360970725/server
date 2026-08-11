@@ -384,13 +384,13 @@ export class UsersService {
 
   private assertStaffRuleGroupRequired(tags: string[]) {
     if (!tags.length) {
-      throw new BadRequestException('新增或重新入店员工必须选择员工规则分组');
+      throw new BadRequestException('新增或重新入驻服务者必须选择服务者规则分组');
     }
   }
 
   private assertStaffRuleGroupSingle(tags: string[]) {
     if (tags.length > 1) {
-      throw new BadRequestException('员工规则分组仅支持选择一个');
+      throw new BadRequestException('服务者规则分组仅支持选择一个');
     }
   }
 
@@ -1858,7 +1858,7 @@ export class UsersService {
     });
   }
 
-  // 新增：获取可用的员工评级列表
+  // 新增：获取可用的服务者评级列表
   async getAvailableRatings() {
     return this.prisma.staffRating.findMany({
       where: {
@@ -1988,7 +1988,7 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     this.assertActorCanAccessUser(actor, user.userType);
-    this.assertUserButtonPermission(actor, user.userType, 'change-level', '当前角色无权调整员工评级');
+    this.assertUserButtonPermission(actor, user.userType, 'change-level', '当前角色无权调整服务者评级');
 
     // 只有员工才能调整等级
     if (user.userType !== 'STAFF') {
