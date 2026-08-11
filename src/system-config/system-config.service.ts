@@ -45,6 +45,14 @@ export class SystemConfigService implements OnModuleInit {
     return normalized;
   }
 
+  private normalizeMiniappCustomerServiceConfig(config: any) {
+    return {
+      consultText: String(config?.consultText || '详询客服').trim() || '详询客服',
+      qrCodeUrl: String(config?.qrCodeUrl || '').trim(),
+      remark: String(config?.remark || '').trim(),
+    };
+  }
+
   private async filterMiniappHomeProductTargets(config: any) {
     const normalized = this.normalizeMiniappHomeConfig(config);
     const sections = ['banners', 'hotSales', 'limitedBenefits', 'recommendedStaff', 'hotEvents', 'quickEntries', 'esportsGoods'];
@@ -115,6 +123,7 @@ export class SystemConfigService implements OnModuleInit {
     MINIAPP_HOME_CONFIG: 'miniapp_home_config',
     MINIAPP_HOME_CONFIG_DRAFT: 'miniapp_home_config_draft',
     MINIAPP_HOME_CONFIG_PUBLISHED: 'miniapp_home_config_published',
+    MINIAPP_CUSTOMER_SERVICE_CONFIG: 'miniapp_customer_service_config',
     MINIAPP_PROTOCOLS: 'miniapp_protocols',
     GOODS_CATEGORY_TREE: 'goods_category_tree',
     GOODS_TAG_LIST: 'goods_tag_list',
@@ -657,6 +666,16 @@ export class SystemConfigService implements OnModuleInit {
     return this.getJson(SystemConfigService.KEYS.MINIAPP_HOME_CONFIG_DRAFT, fallback);
   }
 
+  async getMiniappCustomerServiceConfig() {
+    const fallback = {
+      consultText: '详询客服',
+      qrCodeUrl: '',
+      remark: '',
+    };
+    const config = await this.getJson(SystemConfigService.KEYS.MINIAPP_CUSTOMER_SERVICE_CONFIG, fallback);
+    return this.normalizeMiniappCustomerServiceConfig(config);
+  }
+
   async getOrderSourceOptions() {
     const fallback = [
       { value: 'TUTU_PLATFORM', label: '突突平台', enabled: true },
@@ -714,6 +733,26 @@ export class SystemConfigService implements OnModuleInit {
         valueType: 'JSON',
         enabled: true,
         remark: '小程序首页配置草稿',
+      },
+    });
+  }
+
+  async upsertMiniappCustomerServiceConfig(config: any) {
+    const normalized = this.normalizeMiniappCustomerServiceConfig(config);
+    return this.prisma.systemConfig.upsert({
+      where: { key: SystemConfigService.KEYS.MINIAPP_CUSTOMER_SERVICE_CONFIG },
+      update: {
+        value: JSON.stringify(normalized || {}),
+        valueType: 'JSON',
+        enabled: true,
+        remark: '小程序/公开菜单客服二维码配置',
+      },
+      create: {
+        key: SystemConfigService.KEYS.MINIAPP_CUSTOMER_SERVICE_CONFIG,
+        value: JSON.stringify(normalized || {}),
+        valueType: 'JSON',
+        enabled: true,
+        remark: '小程序/公开菜单客服二维码配置',
       },
     });
   }

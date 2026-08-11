@@ -61,7 +61,7 @@ export class OrdersController {
     /** 订单列表（管理端） */
     @Post('list')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:list:page')
+    @Permissions('orders:list:page', 'service:online-board:page', 'orders:workbench:page')
     async list(@Body() body: any) {
         const page = Math.max(1, Number(body.page ?? 1));
         const limit = Math.min(100, Math.max(1, Number(body.limit ?? 20)));
@@ -103,6 +103,21 @@ export class OrdersController {
     async playerEvaluationLeaderboard(@Body() body: any) {
         return this.ordersService.getPlayerEvaluationLeaderboard({
             scope: body?.scope,
+            startAt: body?.startAt,
+            endAt: body?.endAt,
+            keyword: body?.keyword,
+            page: Number(body?.page ?? 1),
+            limit: Number(body?.limit ?? 20),
+        });
+    }
+
+    /** 续单榜单 */
+    @Post('renewals/leaderboard')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:list:page')
+    async renewalLeaderboard(@Body() body: any) {
+        return this.ordersService.getRenewalLeaderboard({
+            dimension: body?.dimension,
             startAt: body?.startAt,
             endAt: body?.endAt,
             keyword: body?.keyword,
@@ -447,7 +462,7 @@ export class OrdersController {
         return this.ordersService.rejectDispatch(dispatchId, req.user?.userId, reason);
     }
 
-    /** 我的接单记录 / 工作台（陪玩端） */
+    /** 我的服务记录 / 工作台（服务者端） */
     @Post('my-dispatches')
     @UseGuards(PermissionsGuard)
     @Permissions('staff:my-orders:page')

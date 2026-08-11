@@ -11,6 +11,7 @@ export class CommonUploadController {
         'game-project',
         'goods-category',
         'miniapp-home',
+        'miniapp-customer-service',
         'announcement',
         'miniapp-protocol',
         'penalties',

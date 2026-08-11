@@ -111,4 +111,20 @@ export class WalletWithdrawalsController {
         const reviewerId = req.user?.userId;
         return this.service.reviewWithdrawal({ ...body, reviewerId });
     }
+
+    // ✅ 管理端：废除异常提现申请（历史修复/重新入驻冲抵兜底）
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE)
+    @Post('cancel')
+    async cancel(
+        @Req() req: any,
+        @Body()
+            body: {
+            requestId: number;
+            remark?: string;
+        },
+    ) {
+        const operatorId = req.user?.userId;
+        return this.service.cancelWithdrawal({ ...body, operatorId });
+    }
 }

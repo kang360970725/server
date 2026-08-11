@@ -15,9 +15,21 @@ export class RoleService {
                 id: { in: ids },
                 NOT: { key: { startsWith: 'menu:' } },
             },
-            select: { id: true, parentId: true },
+            select: { id: true, key: true, parentId: true },
         });
         const result = new Set(permissions.map((p) => p.id));
+
+        // 历史兼容：旧“工作台”页面权限被选中时，自动补齐新的“服务者在线看板”页面权限。
+        // 这样线上旧角色保存一次后就会拥有新路由所需权限，不会因为 key 迁移导致入口消失。
+        if (permissions.some((p) => p.key === 'orders:workbench:page')) {
+            const serviceBoardPermission = await this.prisma.permission.findUnique({
+                where: { key: 'service:online-board:page' },
+                select: { id: true },
+            });
+            if (serviceBoardPermission) {
+                result.add(serviceBoardPermission.id);
+            }
+        }
         const pendingParentIds = Array.from(
             new Set(permissions.map((p) => p.parentId).filter((id): id is number => Number.isFinite(Number(id)))),
         );

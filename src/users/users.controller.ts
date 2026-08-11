@@ -263,7 +263,7 @@ export class UsersController {
 
   @Patch('players/:id/work-mode')
   @UseGuards(PermissionsGuard)
-  @Permissions('orders:detail:page', 'users:staff:page')
+  @Permissions('orders:detail:page', 'users:staff:page', 'service:online-board:page', 'orders:workbench:page')
   updatePlayerWorkMode(
       @Param('id', ParseIntPipe) id: number,
       @Body() body: { workMode?: 'ONLINE' | 'OFFLINE' },

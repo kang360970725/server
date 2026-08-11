@@ -10,6 +10,22 @@
 ## 2026-08-07 ｜提现、退店保证金与结算冻结周期规则修正
 
 ### 本次动作
+- 合规文案收敛：后台高频页面优先弱化“员工/在职/入店/退店”等强雇佣表达，改为“服务者/服务状态/入驻/退出平台”等平台撮合口径；底层枚举和字段暂不改名，避免扩大迁移风险。
+- 打手编辑弹窗的服务状态下拉只保留“正常/冻结”，退出平台和限制服务必须走独立退出/清退流程，避免误操作。
+- 重新入驻清理正数提现冻结时，同步将待审/处理中/失败的提现申请置为 `CANCELED`；新增管理端 `POST /wallet/withdrawals/cancel` 和提现记录页“废除”按钮，用于修复历史异常提现单。
+- 移动端普通后台页面保留 ProLayout 菜单入口，仅 `/m/*` 专用移动端路由继续纯内容展示，修复竖屏无菜单问题。
+- 新域名 HTTPS 下“记住登录信息”修复：加密保存后保留本地密钥，避免下次无法解密；跨域旧域名 localStorage 不能自动迁移，需要在新域名重新勾选保存一次。
+- 在线服务管理入口统一命名为“服务者在线看板”；新增页面级权限 `service:online-board:page`，拥有 `orders:workbench:create:button` 时，“快捷发单”按钮前移到“刷新状态”按钮旁。
+- 权限树增加旧结构自动修正：`menu:workbench`、`orders:workbench:page`、`orders:workbench:create:button` 会在读取权限树时修正为“服务者在线看板”口径；旧 `orders:workbench:page` 授权继续兼容前端入口和后端在线看板接口，避免历史角色看不到入口。
+- 修复公开菜单 `/menu`、`/menu/:id` 在权限调整后被登录/权限拦截误伤的问题，并优化公开菜单首屏信息呈现。
+- 公开菜单筛选弹窗避开底部备案栏；商品详情无图片时不再展示空内容，改为弹窗提示“详询客服”并展示后台配置的客服二维码。
+- 小程序功能配置新增“客服二维码配置”页面和权限 `miniapp:customer-service:page`，支持上传二维码，配置会通过公开接口供 `/menu` 使用。
+- 修复公开客服配置接口被全局 JWT 守卫拦截导致 `/menu` 报“公开菜单加载失败”的问题；公开接口使用 `@Public()`，匿名访问不再返回 401。
+- 修复 `/miniapp-config/*` 被 `pathname.startsWith('/m')` 误判为移动端纯内容页的问题；移动端纯内容仅限 `/m` 与 `/m/*`，小程序功能配置页面恢复后台左侧菜单。
+- 左侧菜单“陪玩中心/打手工作台/我的接单记录”收敛为“服务者中心/服务者工作台/我的服务记录”，权限树同步更新展示名。
+- `/users/staff` 命名收敛为“服务者管理”；移动端竖屏下不再横向挤压完整表格，改为保留搜索项 + 单列服务者卡片，展示核心身份、钱包、评级、规则分组和操作按钮。
+- 服务者管理取消“服务状态”搜索下拉，改为顶部 4 个状态 Tab（正常/冻结中/已退出/限制服务）直接切换；移动端服务者卡片模式下搜索区不再使用无效的展开/收起按钮。
+- 补齐续单榜单：新增 `POST /orders/renewals/leaderboard`，按 `OrderRenewalGroup.status = SETTLED` 的续单组合聚合，支持 `dimension=DAY/WEEK/MONTH` 与 `startAt/endAt` 时间筛选；后台订单管理新增“续单榜单”页面。
 - 提现审核驳回分支允许可用余额仍为负：驳回时释放提现冻结到可用余额，用于冲抵线下费用、罚单、设备租赁等欠款；审核通过仍保持严格余额桶校验。
 - 设备租赁费提现限制口径收敛：提前生成的未来账单不限制提现，仅进入缴费日前 1 天窗口的待缴账单或即将出账金额才需要在提现时预留。
 - 普通退店保证金规则落地：入店不足规则押金不退天数、有效接单量少于 50 单、或保证金未缴满规则阈值时，保证金不退；有效接单量只统计已接单、未拒单、派单已完成或已存档的记录。
@@ -48,7 +64,7 @@
 - 侧边栏左下角用户中心改为稳定 `menuFooterRender` 渲染，宽屏和窄屏均保留用户入口，折叠时仅展示头像，避免被消息中心/公告中心挤掉。
 - 公告中心弹窗改为左侧列表 + 右侧详情布局，支持选中公告、查看正文、标记已读；左侧列表宽度已缩窄到 256px。
 - 登录页和后台页备案展示模块已调整：ICP备案固定底部展示，登录页首屏可见，后台 PC 端和移动端避免被内容遮挡，移动端全屏页面自动隐藏。
-- 创建订单共用弹窗 `../system-admin/src/pages/Orders/components/OrderForm.tsx` 已限制视口高度：弹窗顶部固定留白，表单主体内部滚动，底部保存/取消按钮保持可见；订单列表、订单详情、客服工作台三处创建/编辑入口同步生效。
+- 创建订单共用弹窗 `../system-admin/src/pages/Orders/components/OrderForm.tsx` 已限制视口高度：弹窗顶部固定留白，表单主体内部滚动，底部保存/取消按钮保持可见；订单列表、订单详情、服务者在线看板三处创建/编辑入口同步生效。
 - 钱包流水类型展示已补齐：后端 `meta` 字典补充续单分红/冲正、会员充值/消费、线下费用、设备租赁、退店等 `WalletBizType` 文案；前端钱包流水、用户钱包抽屉、单用户预核算页面同步补齐中文展示、标签颜色和续单分红已冲正识别。
 - 订单详情页收益概览和对账详情已纳入续单分红：`结算参考 = OrderSettlement.finalEarnings 汇总 + 已结算未冲正续单分红`；钱包对账同步统计 `ORDER_RENEWAL_BONUS` 与 `ORDER_RENEWAL_BONUS_REVERSAL`，退款/重算冲正后的续单分红不再计入当前成本。
 - 修正续单分红钱包流水关联：新发放的 `ORDER_RENEWAL_BONUS` 钱包流水写入 `orderId/dispatchId`；订单详情对账兼容历史缺 `orderId` 的分红流水，通过 `OrderRenewalBonus.walletTransactionId` 纳入钱包净额和按人对账；新增迁移 `20260806122000_backfill_order_renewal_bonus_wallet_order_id` 回填历史续单分红流水订单关联。
@@ -468,7 +484,7 @@
 - 新增 Prisma migration `20260803033000_fix_super_admin_finance_role`，随发布创建/补齐 `SUPER_ADMIN` 角色，将非超管历史 `FINANCE_ADMIN` 角色用户迁移到 `FINANCE_MANAGER`，并删除旧 `FINANCE_ADMIN` 角色。
 - `SUPER_ADMIN` 是唯一超级管理员角色；`FINANCE_MANAGER` 回归财务管理员，预置财务、钱包和必要订单权限，不再享受全局权限旁路。
 - 后端 `PermissionsGuard`、钱包、订单、用户、会员等按钮/服务权限判断统一支持 `userType=SUPER_ADMIN` 或 `roleName=SUPER_ADMIN`，避免账号身份与角色不通用。
-- `system-admin` 全局 access、订单、客服工作台和奖池页同步改为只把 `SUPER_ADMIN` 识别为超管，不再兼容 `FINANCE_ADMIN`。
+- `system-admin` 全局 access、订单、服务者在线看板和奖池页同步改为只把 `SUPER_ADMIN` 识别为超管，不再兼容 `FINANCE_ADMIN`。
 
 ---
 
@@ -503,7 +519,7 @@
 
 ### 本次动作
 - 新增 Prisma migration `20260803031500_add_order_button_permissions`，随发布写入订单按钮权限树。
-- 客服工作台创建订单按钮挂在 `orders:workbench:page` 下。
+- 服务者在线看板快捷发单按钮迁移到独立页面权限 `service:online-board:page` 下。
 - 订单列表创建/删除按钮挂在 `orders:list:page` 下。
 - 订单详情业务按钮挂在 `orders:detail:page` 下，并同步前端展示和后端接口校验。
 

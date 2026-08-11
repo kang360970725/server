@@ -6192,6 +6192,126 @@ export class OrdersService {
             },
         };
     }
+
+    async getRenewalLeaderboard(params: {
+        dimension?: string;
+        startAt?: string;
+        endAt?: string;
+        keyword?: string;
+        page?: number;
+        limit?: number;
+    }) {
+        const page = Math.max(1, Number(params.page ?? 1));
+        const limit = Math.min(100, Math.max(1, Number(params.limit ?? 20)));
+        const dimension = ['DAY', 'WEEK', 'MONTH'].includes(String(params.dimension || '').toUpperCase())
+            ? String(params.dimension || '').toUpperCase()
+            : 'DAY';
+        const settledAtRange = this.buildEvaluationDateRange('CUSTOM', params.startAt, params.endAt);
+        const where: any = { status: 'SETTLED' };
+        if (Object.keys(settledAtRange).length) {
+            where.settledAt = settledAtRange;
+        }
+
+        const groups = await this.prisma.orderRenewalGroup.findMany({
+            where,
+            include: {
+                order: {
+                    select: {
+                        id: true,
+                        autoSerial: true,
+                        paidAmount: true,
+                        receivableAmount: true,
+                        createdAt: true,
+                    },
+                },
+            },
+            orderBy: [{ settledAt: 'desc' }, { id: 'desc' }],
+        });
+
+        const keyword = String(params.keyword || '').trim();
+        const aggMap = new Map<string, any>();
+
+        for (const group of groups) {
+            const memberNames = Array.isArray(group.memberNamesSnapshot) ? group.memberNamesSnapshot : [];
+            const memberUserIds = Array.isArray(group.memberUserIds) ? group.memberUserIds : [];
+            const groupKey = String(group.groupKey || memberUserIds.join(',') || group.id);
+            const memberNameText = memberNames.map((name: any) => String(name || '').trim()).filter(Boolean).join('、');
+            const memberIdText = memberUserIds.map((id: any) => String(id || '').trim()).filter(Boolean).join(',');
+            if (keyword) {
+                const hit =
+                    groupKey.includes(keyword) ||
+                    memberNameText.includes(keyword) ||
+                    memberIdText.includes(keyword) ||
+                    String(group.order?.autoSerial || '').includes(keyword);
+                if (!hit) continue;
+            }
+
+            const item = aggMap.get(groupKey) || {
+                groupKey,
+                memberUserIds,
+                memberNames,
+                memberNameText: memberNameText || groupKey,
+                renewalOrderCount: 0,
+                renewalAmount: 0,
+                bonusTotalAmount: 0,
+                avgBonusRate: 0,
+                bonusRateSum: 0,
+                lastSettledAt: null,
+                lastOrderId: null,
+                lastOrderAutoSerial: null,
+            };
+
+            const renewalOrderCount = Math.max(1, Number(group.renewalOrderCount || 0));
+            item.renewalOrderCount += renewalOrderCount;
+            item.renewalAmount += Number(group.renewalAmount || group.bonusBaseAmount || 0);
+            item.bonusTotalAmount += Number(group.bonusTotalAmount || 0);
+            item.bonusRateSum += Number(group.bonusRate || 0) * renewalOrderCount;
+
+            const settledAt = group.settledAt || group.updatedAt || group.createdAt;
+            if (!item.lastSettledAt || new Date(settledAt).getTime() > new Date(item.lastSettledAt).getTime()) {
+                item.lastSettledAt = settledAt;
+                item.lastOrderId = group.orderId;
+                item.lastOrderAutoSerial = group.order?.autoSerial || `#${group.orderId}`;
+            }
+
+            aggMap.set(groupKey, item);
+        }
+
+        const list = Array.from(aggMap.values()).map((item) => ({
+            ...item,
+            renewalAmount: round2(item.renewalAmount),
+            bonusTotalAmount: round2(item.bonusTotalAmount),
+            avgBonusRate: item.renewalOrderCount > 0 ? round2((item.bonusRateSum / item.renewalOrderCount) * 100) : 0,
+        })).sort((a, b) => {
+            const countDiff = Number(b.renewalOrderCount || 0) - Number(a.renewalOrderCount || 0);
+            if (countDiff !== 0) return countDiff;
+            const amountDiff = Number(b.renewalAmount || 0) - Number(a.renewalAmount || 0);
+            if (amountDiff !== 0) return amountDiff;
+            return Number(b.bonusTotalAmount || 0) - Number(a.bonusTotalAmount || 0);
+        }).map((item, index) => ({
+            ...item,
+            rank: index + 1,
+        }));
+
+        const total = list.length;
+        const items = list.slice((page - 1) * limit, (page - 1) * limit + limit);
+
+        return {
+            dimension,
+            startAt: params.startAt || null,
+            endAt: params.endAt || null,
+            page,
+            limit,
+            total,
+            items,
+            summary: {
+                totalGroups: total,
+                totalRenewalOrders: round2(list.reduce((sum, item) => sum + Number(item.renewalOrderCount || 0), 0)),
+                totalRenewalAmount: round2(list.reduce((sum, item) => sum + Number(item.renewalAmount || 0), 0)),
+                totalBonusAmount: round2(list.reduce((sum, item) => sum + Number(item.bonusTotalAmount || 0), 0)),
+            },
+        };
+    }
     
     
     /**
@@ -6685,8 +6805,8 @@ export class OrdersService {
     }
 
     /** -----------------------------
-     * 我的接单记录 / 工作台
-     * 我的接单记录（陪玩端/员工端查看自己参与的派单批次）
+     * 我的服务记录 / 工作台
+     * 我的服务记录（服务者端查看自己参与的派单批次）
      * mode: 'WORKBENCH' -> 工作台：只看当前轮 + 自己是有效参与者
      * mode: 'HISTORY'   -> 接单记录：包含拒单/被替换等历史（只要参与过即可）
      * -----------------------------*/

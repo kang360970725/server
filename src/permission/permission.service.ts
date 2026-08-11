@@ -6,6 +6,74 @@ import { PermissionType } from '@prisma/client';
 export class PermissionService {
     constructor(private prisma: PrismaService) {}
 
+    private async ensureServiceOnlineBoardPermissionTree() {
+        const workbenchMenu = await this.prisma.permission.upsert({
+            where: { key: 'menu:workbench' },
+            update: {
+                name: '服务者在线看板',
+                module: 'menu',
+                type: PermissionType.PAGE,
+            },
+            create: {
+                key: 'menu:workbench',
+                name: '服务者在线看板',
+                module: 'menu',
+                type: PermissionType.PAGE,
+            },
+            select: { id: true },
+        });
+
+        const legacyWorkbench = await this.prisma.permission.findUnique({
+            where: { key: 'orders:workbench:page' },
+            select: { id: true },
+        });
+        if (legacyWorkbench) {
+            await this.prisma.permission.update({
+                where: { key: 'orders:workbench:page' },
+                data: {
+                    name: '服务者在线看板兼容权限',
+                    module: 'orders',
+                    type: PermissionType.PAGE,
+                    parentId: workbenchMenu.id,
+                },
+            });
+        }
+
+        const serviceBoard = await this.prisma.permission.upsert({
+            where: { key: 'service:online-board:page' },
+            update: {
+                name: '服务者在线看板',
+                module: 'service',
+                type: PermissionType.PAGE,
+                parentId: workbenchMenu.id,
+            },
+            create: {
+                key: 'service:online-board:page',
+                name: '服务者在线看板',
+                module: 'service',
+                type: PermissionType.PAGE,
+                parentId: workbenchMenu.id,
+            },
+            select: { id: true },
+        });
+
+        const quickOrder = await this.prisma.permission.findUnique({
+            where: { key: 'orders:workbench:create:button' },
+            select: { id: true },
+        });
+        if (quickOrder) {
+            await this.prisma.permission.update({
+                where: { key: 'orders:workbench:create:button' },
+                data: {
+                    name: '服务者在线看板快捷发单',
+                    module: 'orders',
+                    type: PermissionType.BUTTON,
+                    parentId: serviceBoard.id,
+                },
+            });
+        }
+    }
+
     private sanitizePermissionInput(data: {
         key: string;
         name: string;
@@ -30,6 +98,8 @@ export class PermissionService {
     }
 
     async getPermissionTree() {
+        await this.ensureServiceOnlineBoardPermissionTree();
+
         const permissions = await this.prisma.permission.findMany({
             orderBy: { id: 'asc' },
         });
@@ -54,6 +124,36 @@ export class PermissionService {
         parentId?: number;
     }) {
         return this.prisma.permission.create({ data: this.sanitizePermissionInput(data) });
+    }
+
+    async updatePermission(id: number, data: {
+        key?: string;
+        name?: string;
+        module?: string;
+        type?: PermissionType;
+        parentId?: number | null;
+    }) {
+        const current = await this.prisma.permission.findUnique({ where: { id } });
+        if (!current) throw new BadRequestException('权限不存在');
+
+        const next = this.sanitizePermissionInput({
+            key: data.key ?? current.key,
+            name: data.name ?? current.name,
+            module: data.module ?? current.module,
+            type: data.type ?? current.type,
+            parentId: data.parentId === undefined ? current.parentId ?? undefined : data.parentId ?? undefined,
+        });
+
+        return this.prisma.permission.update({
+            where: { id },
+            data: {
+                key: next.key,
+                name: next.name,
+                module: next.module,
+                type: next.type,
+                parentId: data.parentId === undefined ? current.parentId : data.parentId,
+            },
+        });
     }
 
     async deletePermission(id: number) {

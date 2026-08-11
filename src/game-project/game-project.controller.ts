@@ -33,7 +33,7 @@ export class GameProjectController {
     // options 通常被多个页面复用（下拉选择），这里我也按“项目管理页”保护
     @Post('options')
     @UseGuards(PermissionsGuard)
-    @Permissions('system:game-project:page')
+    @Permissions('system:game-project:page', 'service:online-board:page', 'orders:workbench:page')
     options(@Body() body: any) {
         return this.gameProjectService.options(body);
     }

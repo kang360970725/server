@@ -25,6 +25,7 @@
 - 订单生命周期改动会影响 `orders`、`wallet`、`performance`、`finance`、`notifications`、`mini/orders`，通常还会影响 `member`。
 - 结算改动会影响 `OrderSettlement`、`WalletTransaction`、`WalletHold`、`PerformanceRecord`、`OrderFinanceRecord`、`SettlementBatch`。
 - 钱包/提现改动会影响 `wallet`、`wallet-withdrawals`、`offline-fee`、`users` 退店、`system-admin` 钱包页面，可能影响 mini 钱包展示。
+- 已讨论但暂缓实现的中长期方案记录在 `docs/DEVELOPMENT_PLAN.md`；当前自动到账提现方案仅作为后续开发计划，现阶段先继续其他功能和 BUG 修复。
 - 员工状态改动会影响登录 Guard、工作台访问、派单资格、提现、退店/清退、线下费用、罚单。
 - 会员充值/支付改动会影响 `member`、`mini/member`、`wechat-pay`、`wallet`、优惠券、成长值/积分。
 - 小程序内容配置改动会影响 `system-config`、`mini/home`、`game-project`、`miniapp-protocols`、`notifications`。
@@ -37,10 +38,10 @@
 | 业务域 | 后端文件 | 主要模型 | 前端入口 |
 |---|---|---|---|
 | 登录/会话 | `src/auth`、`src/mini/mini-auth.controller.ts` | `User`、`Role`、`Permission`、`UserWechatBinding` | admin 登录/重置，小程序登录/资料 |
-| 用户/员工 | `src/users` | `User`、`StaffRating`、`WalletAccount`、`MemberGameCard` | admin 用户、打手管理、退店、钱包抽屉 |
+| 用户/服务者 | `src/users` | `User`、`StaffRating`、`WalletAccount`、`MemberGameCard` | admin 用户、服务者管理、退出平台、钱包抽屉 |
 | 权限/角色 | `src/permission`、`src/role` | `Role`、`Permission` | admin 角色/权限 |
 | 商品/菜单 | `src/game-project`、`src/system-config` 商品配置 | `GameProject`、`ProductReview`、`SystemConfig` | admin 商品/分类/标签，公开菜单，小程序首页/搜索/详情 |
-| 订单/派单 | `src/orders`、`src/mini/mini-orders.controller.ts` | `Order`、`OrderDispatch`、`OrderParticipant`、`OrderSettlement`、`OrderRenewalGroup`、`OrderRenewalBonus`、`OrderPayment`、`OrderRefund`、`ComplaintWorkOrder` | admin 订单/客服工作台/打手工作台，小程序订单 |
+| 订单/派单 | `src/orders`、`src/mini/mini-orders.controller.ts` | `Order`、`OrderDispatch`、`OrderParticipant`、`OrderSettlement`、`OrderRenewalGroup`、`OrderRenewalBonus`、`OrderPayment`、`OrderRefund`、`ComplaintWorkOrder` | admin 订单/服务者在线看板/服务者工作台，小程序订单 |
 | 结算/批次 | `src/settlements`、订单结算方法 | `OrderSettlement`、`SettlementBatch` | admin 结算、订单详情 |
 | 钱包/提现 | `src/wallet` | `WalletAccount`、`WalletTransaction`、`WalletHold`、`WalletWithdrawalRequest`、`WalletDepositTransaction`、`WalletAnomalyIgnore` | admin 钱包、提现审批、员工钱包 |
 | 会员资产 | `src/member`、`src/mini/mini-member.controller.ts` | `MemberProfile`、`MemberPointAccount`、`MemberPointTransaction`、`MemberRechargePlan`、`MemberRechargeOrder`、`MemberGameCard` | admin 会员等级/充值方案/用户，小程序会员/钱包/充值/积分 |
@@ -90,15 +91,17 @@
 - `prisma/seed.ts` 是权限树基线；`menu:*` 为目录节点，真实授权节点挂在对应菜单父级下。新增页面权限必须写入 seed 并设置 `parentKey`，否则新岗位在角色管理里无法分配，权限管理也看不出页面位置。
 - 生产权限树同步已通过 Prisma migration 执行：`20260803013000_sync_permission_tree`。发布环境需要设置 `PRISMA_MIGRATE_DEPLOY=1`，由 `docker-entrypoint.sh` 在启动时执行 `npx prisma migrate deploy`。
 - 当前已清理的旧页面权限：`users:page`、`dashboard:revenue:page`、`performance:staff:view`。`settlements:*`、`coupons:user-coupons:list` 虽无独立菜单，但后端仍使用，挂在“隐藏入口/接口保护”下保留。
-- 用户管理页入口按 `users:member:page`、`users:staff:page`、`users:internal:page` 精确展示；普通 `ADMIN` 不再自动旁路看到全部用户域。“全部用户”入口默认隐藏。用户管理按钮级权限已经落地为可配置 `PermissionType.BUTTON`，并挂在对应页面节点下：会员页使用 `users:member:*:button`，打手页使用 `users:staff:*:button`，后台人员页使用 `users:internal:*:button`。
-- 页面权限只控制入口；按钮权限控制动作。角色保存时后端会根据按钮权限自动补齐其父级页面权限，避免“只给按钮导致页面入口丢失”。后端 `UsersService` 仍会按目标用户类型做范围校验，角色要操作打手时必须同时拥有 `users:staff:page` 和对应打手按钮权限。打手管理顶部员工资金统计属于敏感汇总，只允许拥有 `users:staff:wallet-stats:button` 或 `SUPER_ADMIN` 展示和加载。
-- 打手管理新增员工使用安全模式：前端默认并锁定 `STAFF`，后端非超管创建员工时固定绑定默认角色 `id=3/name=陪玩/description=俱乐部陪玩`，不接受任意 `roleId`、余额、押金、提现等敏感字段；新增和退店重新入店都必须选择员工规则分组，且新增/编辑保存时最多只能选择一个。打手编辑时余额不可编辑；非超管只允许修改员工在职状态，且仅限“正常/冻结”，退店和黑名单必须走独立退店/清退流程。为兼容历史接口和数据库，当前仍复用 `User.staffTags` 字段保存单个规则分组编码，业务语义不再叫员工标签。
+- 用户管理页入口按 `users:member:page`、`users:staff:page`、`users:internal:page` 精确展示；普通 `ADMIN` 不再自动旁路看到全部用户域。“全部用户”入口默认隐藏。用户管理按钮级权限已经落地为可配置 `PermissionType.BUTTON`，并挂在对应页面节点下：会员页使用 `users:member:*:button`，服务者页使用 `users:staff:*:button`，后台人员页使用 `users:internal:*:button`。
+- 页面权限只控制入口；按钮权限控制动作。角色保存时后端会根据按钮权限自动补齐其父级页面权限，避免“只给按钮导致页面入口丢失”。后端 `UsersService` 仍会按目标用户类型做范围校验，角色要操作服务者时必须同时拥有 `users:staff:page` 和对应服务者按钮权限。服务者管理顶部资金统计属于敏感汇总，只允许拥有 `users:staff:wallet-stats:button` 或 `SUPER_ADMIN` 展示和加载。
+- 服务者管理新增服务者使用安全模式：前端默认并锁定 `STAFF`，后端非超管创建服务者时固定绑定默认角色 `id=3/name=陪玩/description=俱乐部陪玩`，不接受任意 `roleId`、余额、押金、提现等敏感字段；新增和退出平台重新入驻都必须选择服务者规则分组，且新增/编辑保存时最多只能选择一个。服务者编辑时余额不可编辑；非超管只允许修改服务状态，且仅限“正常/冻结”，退出平台和限制服务必须走独立退出/清退流程。为兼容历史接口和数据库，当前仍复用 `User.staffTags` 字段保存单个规则分组编码，业务语义不再叫员工标签。
 - 员工评级候选读取接口 `GET /users/ratings/available` 是打手新增、编辑、升降级弹窗的基础数据依赖，不等同于评级管理 CRUD；路由必须声明在 `GET /users/:id` 前，权限允许用户管理页、打手新增/编辑/升降级按钮或 `staff-ratings:page` 读取。
-- 订单模块按钮级权限已落地：客服工作台创建订单挂在 `orders:workbench:page` 下，订单列表创建/删除挂在 `orders:list:page` 下；订单详情所有业务按钮挂在 `orders:detail:page` 下，包括小票、确认收款、退款、编辑、派单/改派、修改实付、确认结单、客服代接/存单/结单、状态回退、更新参与者、结算调整、存单进度修复、重算订单结算。刷新、返回、纯导航不做按钮权限。
+- 服务者在线看板使用独立页面权限 `service:online-board:page`，快捷发单按钮 `orders:workbench:create:button` 挂在该页面节点下；订单列表创建/删除挂在 `orders:list:page` 下；订单详情所有业务按钮挂在 `orders:detail:page` 下，包括小票、确认收款、退款、编辑、派单/改派、修改实付、确认结单、客服代接/存单/结单、状态回退、更新参与者、结算调整、存单进度修复、重算订单结算。刷新、返回、纯导航不做按钮权限。
 - 超级管理员语义已统一：`User.userType = SUPER_ADMIN` 或 `Role.name = SUPER_ADMIN` 都视为超管；`FINANCE_ADMIN` 已通过 migration `20260803033000_fix_super_admin_finance_role` 拆分/重命名为 `FINANCE_MANAGER`（财务管理员）。`FINANCE_MANAGER` 不再全局放行，必须依赖显式权限。
 - `user-logs` 属于敏感审计数据，必须使用 `system:user-logs:page` 或历史系统管理员权限访问。
 - 钱包域需要区分“本人钱包”和“后台管理钱包”：有效员工可访问自己的钱包概览/流水/提现申请；查询他人钱包流水、提现审批、人工保证金充值和保证金流水必须要求钱包/财务管理权限，避免普通登录用户通过 `userId` 参数越权。保证金全局核查使用 `wallet:deposit-reconciliation:page`，入口在 `system-admin` 的“钱包/保证金对账”；前端入口和后端接口都只认该专用权限，不能用 `wallet:withdrawals:page` 或 `finance:records:list` 兜底。有效保证金口径为员工状态正常/冻结且当前保证金 > 0，无效/需处理包含退店、黑名单或无保证金员工。`MANUAL_DEPOSIT` 表示后台手动录入，业务上按线下收款对账；对账统计需兼容历史旧表 `WalletDepositTransaction` 与当前表 `wallet_deposit_transactions`，避免流水列表可见但对账汇总漏算。
 - 提现申请和提现审核属于资金写链路，必须在事务内通过 `SELECT ... FOR UPDATE` 锁定 `wallet_accounts`；审核还必须先锁定 `wallet_withdrawal_requests`，再检查状态和幂等流水，避免并发重复冻结、重复退回或重复扣除提现冻结余额。提现 `idempotencyKey` 必须非空且不超过 64 字符，重复提交同一 key 返回原提现单，不再次改余额。
+- 重新入驻清理正数提现冻结时，必须同步废除仍处于 `PENDING_REVIEW/APPROVED/PAYING/FAILED` 的提现申请；历史异常单可通过 `POST /wallet/withdrawals/cancel` 废除，若预扣仍冻结且余额足够则释放回可用，否则只修申请单状态。
+- 小程序/公开菜单客服配置存储在系统配置 `miniapp_customer_service_config`，后台页面权限为 `miniapp:customer-service:page`；公开菜单商品详情无图片时通过公开接口展示咨询文案和客服二维码。
 
 ## 环境与域名
 
@@ -154,7 +157,7 @@
 - 续单分红不在创建订单时到账；它依赖客服确认结单。确认结单页面需要展示续单组合、预计分红，并支持确认有效或置为无效。确认有效时写 `OrderRenewalBonus` 和 `WalletTransaction(ORDER_RENEWAL_BONUS)`，置无效时 `OrderRenewalGroup.status=INVALIDATED` 且必须记录原因。
 - 退款均按全额退款处理。退款时续单待结算记录置无效；已结算续单分红生成 `ORDER_RENEWAL_BONUS_REVERSAL` 钱包冲正流水，并将续单组置为 `REVERSED`。
 - 订单重算 `repairWalletForOrderSettlementsV2` 支持 `invalidateRenewal` 与 `renewalInvalidateReason`，应用重算时可将续单置为无效；若已发放分红，必须冲正并记录原因。
-- 后续续单榜只统计 `OrderRenewalGroup.status = SETTLED`，按 `groupKey` 聚合 `renewalOrderCount/renewalAmount/bonusTotalAmount`，不做单人拆分。
+- 续单榜单接口为 `POST /orders/renewals/leaderboard`，后台入口在订单管理/续单榜单；只统计 `OrderRenewalGroup.status = SETTLED`，按 `groupKey` 聚合 `renewalOrderCount/renewalAmount/bonusTotalAmount`，不做单人拆分，支持按日/周/月维度传入 `startAt/endAt` 时间筛选。
 - 订单结算收益冻结周期不走全局配置；`orders.service.ts` 会按每条 `OrderSettlement.userId` 查询员工规则分组（兼容字段 `staffTags`）并匹配 `StaffRuleEngineService` 规则。同一订单不同结算人可以有不同解冻时间。
 - 员工规则字段：`settlementFreezeExperienceDays` 用于体验单/福袋单，兜底 3 天；`settlementFreezeRegularDays` 用于普通单，兜底 7 天。`computeSettlementFreezeTime` 保持纯函数，只接收规则后的天数配置，不直接访问数据库。
 - `applySettlementPlanTx` 返回保留顶层 `freezeDays/freezeStartAt/freezeEndAt` 作为汇总兼容字段，同时返回 `freezeInfoByUser` 记录逐人冻结周期；排查具体员工解冻时间时应看 `freezeInfoByUser`。
@@ -193,6 +196,7 @@
 - 审核通过仍要求钱包余额桶非负，负余额/异常余额不能通过。
 - 审核驳回会释放提现冻结到可用余额，可用余额允许释放后仍为负，用于冲抵线下费用、罚单、设备租赁等造成的欠款。
 - 驳回分支只要求 `frozenBalance` 和 `withdrawFrozenBalance` 不被扣成负数，避免负可用余额阻断正常驳回。
+- `CANCELED` 在后台展示为“已废除”，用于异常提现申请、重新入驻冲抵后的历史单修复；已打款提现不能废除。
 
 SQL 安全注意事项：
 

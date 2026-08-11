@@ -3,7 +3,7 @@ import { PrismaService } from '../prisma.service';
 import {tcbGetTempFileURL} from "../common/cloudbase.storage";
 import { WalletDepositService } from './wallet.deposit.service';
 import { OfflineFeeService } from '../offline-fee/offline-fee.service';
-import { PlayerWorkStatus, StaffEmploymentStatus } from '@prisma/client';
+import { PlayerWorkStatus, StaffEmploymentStatus, WalletTxStatus } from '@prisma/client';
 import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
 import { isDispatchMonitoredStaff } from '../common/utils/staff-role-scope.util';
 import { WalletService } from './wallet.service';
@@ -835,6 +835,103 @@ export class WalletWithdrawalsService {
         });
     }
 
+    /**
+     * 管理端：废除异常提现申请。
+     * - 用于修复重新入驻、历史冲抵等场景下残留的待审/处理中提现单。
+     * - 若预扣流水仍处于冻结且钱包提现冻结足够，则释放回可用余额；否则只修正申请单状态。
+     */
+    async cancelWithdrawal(params: {
+        requestId: number;
+        operatorId: number;
+        remark?: string;
+    }) {
+        const { requestId, operatorId, remark } = params;
+        const cancelRemark = String(remark || '').trim() || '管理员废除异常提现申请';
+
+        return this.prisma.$transaction(async (tx) => {
+            await this.lockWithdrawalRequestTx(tx, requestId);
+            const req = await tx.walletWithdrawalRequest.findUnique({
+                where: { id: Number(requestId) },
+                include: { reserveTx: true },
+            });
+            if (!req) throw new BadRequestException('提现申请不存在');
+            if (req.status === 'PAID') {
+                throw new BadRequestException('已打款提现不能废除');
+            }
+            if (req.status === 'REJECTED' || req.status === 'CANCELED') return req;
+
+            const now = new Date();
+            await this.lockWalletAccountTx(tx, req.userId);
+            await this.walletService.ensureWalletAccountBucketsReady(req.userId, tx as any, {
+                autoRepairOnDeficit: true,
+                repairReason: '提现申请废除前自动修复钱包异常',
+                operatorId,
+                throwOnDeficit: false,
+            });
+
+            const account = await tx.walletAccount.findUnique({ where: { userId: req.userId } });
+            const canReleaseFrozen =
+                String((req as any)?.reserveTx?.status || '') === String(WalletTxStatus.FROZEN) &&
+                round2(Number(account?.withdrawFrozenBalance || 0)) >= round2(Number(req.amount || 0));
+
+            if (canReleaseFrozen) {
+                const accountAfterRelease = await this.walletService.applyWalletAccountDelta(tx as any, req.userId, {
+                    withdrawFrozenDelta: -req.amount,
+                    availableDelta: req.amount,
+                });
+                this.assertWithdrawalFrozenBucketsNonNegative(accountAfterRelease);
+
+                await tx.walletTransaction.update({
+                    where: { id: req.reserveTxId },
+                    data: { status: WalletTxStatus.REVERSED as any },
+                });
+
+                await tx.walletTransaction.upsert({
+                    where: {
+                        sourceType_sourceId: { sourceType: 'WITHDRAWAL_REQUEST_CANCEL_RELEASE', sourceId: req.id },
+                    },
+                    create: {
+                        userId: req.userId,
+                        direction: 'IN',
+                        bizType: 'WITHDRAW_RELEASE',
+                        amount: req.amount,
+                        status: 'AVAILABLE',
+                        sourceType: 'WITHDRAWAL_REQUEST_CANCEL_RELEASE',
+                        sourceId: req.id,
+                        availableAfter: round2(Number((accountAfterRelease as any).availableBalance ?? 0)),
+                        frozenAfter: round2(Number((accountAfterRelease as any).frozenBalance ?? 0)),
+                        remark: cancelRemark,
+                    },
+                    update: {
+                        direction: 'IN',
+                        bizType: 'WITHDRAW_RELEASE',
+                        amount: req.amount,
+                        status: 'AVAILABLE',
+                        availableAfter: round2(Number((accountAfterRelease as any).availableBalance ?? 0)),
+                        frozenAfter: round2(Number((accountAfterRelease as any).frozenBalance ?? 0)),
+                        remark: cancelRemark,
+                    },
+                });
+            } else if (String((req as any)?.reserveTx?.status || '') === String(WalletTxStatus.FROZEN)) {
+                await tx.walletTransaction.update({
+                    where: { id: req.reserveTxId },
+                    data: { status: WalletTxStatus.REVERSED as any },
+                });
+            }
+
+            return tx.walletWithdrawalRequest.update({
+                where: { id: req.id },
+                data: {
+                    status: 'CANCELED',
+                    reviewedBy: operatorId || null,
+                    reviewedAt: now,
+                    reviewRemark: cancelRemark,
+                    failReason: canReleaseFrozen ? null : '废除时未检测到足额提现冻结，仅修正申请单状态',
+                },
+            });
+        });
+    }
+
     /** 打手端：我的提现记录 */
     async listMine(userId: number) {
         const list = await this.prisma.walletWithdrawalRequest.findMany({
@@ -856,7 +953,7 @@ export class WalletWithdrawalsService {
             PAYING: '打款中',
             PAID: '已打款',
             FAILED: '打款失败',
-            CANCELED: '已取消',
+            CANCELED: '已废除',
         };
         return map[String(status || '')] || String(status || '-');
     }

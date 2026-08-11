@@ -2,6 +2,7 @@ import {
     Controller,
     Get,
     Post,
+    Patch,
     Delete,
     Body,
     Param,
@@ -30,6 +31,13 @@ export class PermissionController {
     @Permissions('system:permission:page')
     createPermission(@Body() data: any) {
         return this.permissionService.createPermission(data);
+    }
+
+    @Patch(':id')
+    @UseGuards(PermissionsGuard)
+    @Permissions('system:permission:page')
+    updatePermission(@Param('id', ParseIntPipe) id: string, @Body() data: any) {
+        return this.permissionService.updatePermission(+id, data);
     }
 
     @Delete(':id')

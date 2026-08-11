@@ -843,7 +843,7 @@ export class NotificationsService {
       userIds: input.playerIds,
       type: NotificationType.DISPATCH_ASSIGNED,
       title: `待接单：${input.autoSerial || `#${input.orderId}`}`,
-      content: `订单已派单，请尽快接单处理。点击可直接进入打手工作台。`,
+      content: `订单已派单，请尽快接单处理。点击可直接进入服务者工作台。`,
       route: '/staff/workbench',
       payload: {
         orderId: input.orderId,
@@ -856,7 +856,7 @@ export class NotificationsService {
       userIds: input.playerIds,
       type: NotificationType.DISPATCH_ASSIGNED,
       title: `待接单：${input.autoSerial || `#${input.orderId}`}`,
-      content: `订单已派单，请尽快接单处理。点击可直接进入打手工作台。`,
+      content: `订单已派单，请尽快接单处理。点击可直接进入服务者工作台。`,
       payload: {
         orderId: input.orderId,
         dispatchId: input.dispatchId,

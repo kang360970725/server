@@ -415,7 +415,7 @@ export class UsersService {
     const allowedFields = new Set(['staffEmploymentStatus']);
     const blockedFields = Object.keys(updateUserDto as any).filter((field) => !allowedFields.has(field));
     if (blockedFields.length) {
-      throw new ForbiddenException('当前角色仅允许修改员工在职状态');
+      throw new ForbiddenException('当前角色仅允许修改服务状态');
     }
     const nextStatus = (updateUserDto as any)?.staffEmploymentStatus;
     if (
@@ -638,6 +638,21 @@ export class UsersService {
               where: { userId: existingStaff.id, status: WalletHoldStatus.FROZEN },
               data: { status: WalletHoldStatus.CANCELLED, releasedAt: now },
             });
+            if (clear.clearWithdrawFrozen > 0) {
+              await tx.walletWithdrawalRequest.updateMany({
+                where: {
+                  userId: existingStaff.id,
+                  status: { in: ['PENDING_REVIEW', 'APPROVED', 'PAYING', 'FAILED'] as any },
+                },
+                data: {
+                  status: 'CANCELED' as any,
+                  reviewedBy: operatorId ?? null,
+                  reviewedAt: now,
+                  reviewRemark: '服务者重新入驻时清理历史提现冻结，申请单同步废除',
+                  failReason: '服务者重新入驻时正数提现冻结已清理',
+                },
+              });
+            }
           }
 
           if (clear.clearWalletAmount > 0) {

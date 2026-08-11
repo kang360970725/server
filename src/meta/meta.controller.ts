@@ -122,7 +122,7 @@ export class MetaController {
                 PAYING: '打款中',
                 PAID: '已打款成功',
                 FAILED: '打款失败',
-                CANCELED: '已取消',
+                CANCELED: '已废除',
             },
 
             WalletBizType: {
