@@ -36,6 +36,19 @@ export class GameProjectService {
         return map;
     }
 
+    private isBlankCategoryFilter(value?: string) {
+        const text = String(value || '').trim();
+        return ['__EMPTY__', '__BLANK__', 'EMPTY', 'NULL', 'null'].includes(text);
+    }
+
+    private parseBooleanFilter(value: unknown) {
+        if (value === true || value === false) return value;
+        const text = String(value ?? '').trim().toLowerCase();
+        if (['true', '1', 'yes'].includes(text)) return true;
+        if (['false', '0', 'no'].includes(text)) return false;
+        return undefined;
+    }
+
     async getUploadInfo(params: { filename?: string; scene?: string }) {
         const rawName = String(params?.filename || 'file').trim();
         const safeName = rawName.replace(/[^\w.\-]/g, '_').slice(-80) || 'file';
@@ -78,22 +91,35 @@ export class GameProjectService {
         gameType?: string;
         category?: string;
         status?: string;
+        showInMenuList?: boolean | string;
     }) {
         const page = Math.max(1, Number(params?.page || 1));
         const limit = Math.min(100, Math.max(1, Number(params?.limit || 20)));
         const skip = (page - 1) * limit;
         const where: any = {};
+        const and: any[] = [];
 
         const keyword = String(params?.keyword || '').trim();
         if (keyword) {
-            where.OR = [
+            and.push({ OR: [
                 { name: { contains: keyword } },
                 { description: { contains: keyword } },
-            ];
+            ] });
         }
-        if (params?.gameType) where.gameType = String(params.gameType).trim();
-        if (params?.category) where.category = String(params.category).trim();
+        if (this.isBlankCategoryFilter(params?.gameType)) {
+            and.push({ OR: [{ gameType: null }, { gameType: '' }] });
+        } else if (params?.gameType) {
+            where.gameType = String(params.gameType).trim();
+        }
+        if (this.isBlankCategoryFilter(params?.category)) {
+            and.push({ OR: [{ category: null }, { category: '' }] });
+        } else if (params?.category) {
+            where.category = String(params.category).trim();
+        }
         if (params?.status) where.status = String(params.status).trim();
+        const showInMenuList = this.parseBooleanFilter(params?.showInMenuList);
+        if (showInMenuList !== undefined) where.showInMenuList = showInMenuList;
+        if (and.length) where.AND = and;
 
         const [data, total] = await Promise.all([
             this.prisma.gameProject.findMany({
