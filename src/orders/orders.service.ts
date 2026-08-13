@@ -797,10 +797,14 @@ export class OrdersService {
         }
 
         const hasEligibilitySnapshot = Array.isArray(group.bonusEligibleUserIds);
-        const memberUserIds = hasEligibilitySnapshot
+        const allRenewalMemberUserIds = this.normalizeIdArray(group.memberUserIds);
+        const eligibleUserIds = hasEligibilitySnapshot
             ? this.normalizeIdArray(group.bonusEligibleUserIds)
-            : this.normalizeIdArray(group.memberUserIds);
-        if (!memberUserIds.length) {
+            : allRenewalMemberUserIds;
+        if (!allRenewalMemberUserIds.length) {
+            throw new BadRequestException('续单组缺少续单打手，无法结算');
+        }
+        if (!eligibleUserIds.length) {
             const settledAt = new Date();
             await tx.orderRenewalGroup.update({
                 where: { id: group.id },
@@ -829,10 +833,15 @@ export class OrdersService {
         const rule = await this.resolveRenewalBonusRule(order);
         const bonusBaseAmount = this.toAmount2(Number(rule.baseAmount || 0));
         const bonusRate = Number(rule.rate || 0);
-        const bonusTotalAmount = this.toAmount2(bonusBaseAmount * bonusRate);
+        const theoreticalBonusTotalAmount = this.toAmount2(bonusBaseAmount * bonusRate);
+        const allShares = this.splitAmountByUsers2(theoreticalBonusTotalAmount, allRenewalMemberUserIds);
+        const eligibleSet = new Set(eligibleUserIds);
+        const shares = allShares.filter((share) => eligibleSet.has(Number(share.userId)));
+        const bonusTotalAmount = this.toAmount2(shares.reduce((sum, share) => sum + Number(share.amount || 0), 0));
+        const bonusUnpaidAmount = this.toAmount2(theoreticalBonusTotalAmount - bonusTotalAmount);
         const settledAt = new Date();
 
-        if (bonusBaseAmount <= 0 || bonusRate <= 0 || bonusTotalAmount <= 0) {
+        if (bonusBaseAmount <= 0 || bonusRate <= 0 || theoreticalBonusTotalAmount <= 0 || bonusTotalAmount <= 0) {
             await tx.orderRenewalGroup.update({
                 where: { id: group.id },
                 data: {
@@ -865,7 +874,6 @@ export class OrdersService {
             extraAllowanceAmount: bonusTotalAmount,
         });
 
-        const shares = this.splitAmountByUsers2(bonusTotalAmount, memberUserIds);
         const bonusRows: any[] = [];
         for (const share of shares) {
             const bonus = await tx.orderRenewalBonus.create({
@@ -932,6 +940,8 @@ export class OrdersService {
             bonusBaseAmount,
             bonusRate,
             bonusTotalAmount,
+            theoreticalBonusTotalAmount,
+            bonusUnpaidAmount,
             bonusRows,
             ruleSource: rule.source,
         };
