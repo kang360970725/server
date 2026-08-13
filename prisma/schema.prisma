@@ -108,6 +108,9 @@ model User {
   csDutySubstituteLeaves      CsDutyLeave[]              @relation("CsDutyLeaveSubstitute")
   csDutyLeaveCreated          CsDutyLeave[]              @relation("CsDutyLeaveCreator")
   orderParticipants           OrderParticipant[]
+  excellentStaffRecord        ExcellentStaff?
+  excellentStaffAssigned      ExcellentStaff[]           @relation("ExcellentStaffAssignedBy")
+  excellentStaffRemoved       ExcellentStaff[]           @relation("ExcellentStaffRemovedBy")
   orderSettlements            OrderSettlement[]
   orderRenewalBonuses         OrderRenewalBonus[]
   orderPlayerEvaluations      OrderPlayerEvaluation[]    @relation("OrderPlayerEvaluationPlayer")
@@ -1185,6 +1188,8 @@ model OrderRenewalGroup {
   groupKey            String              @db.VarChar(255)
   memberUserIds       Json
   memberNamesSnapshot Json?
+  bonusEligibleUserIds Json?
+  bonusEligibleSnapshot Json?
   /// PENDING / SETTLED / INVALIDATED / REVERSED
   status              String              @default("PENDING") @db.VarChar(24)
   renewalOrderCount   Decimal             @default(0) @db.Decimal(8, 2)
@@ -1209,6 +1214,25 @@ model OrderRenewalGroup {
   @@index([groupKey, status, settledAt], map: "idx_order_renewal_group_rank")
   @@index([dispatchId], map: "idx_order_renewal_group_dispatch")
   @@map("order_renewal_groups")
+}
+
+model ExcellentStaff {
+  id           Int       @id @default(autoincrement())
+  userId       Int       @unique
+  status       String    @default("ACTIVE") @db.VarChar(24)
+  assignedBy   Int?
+  assignedAt   DateTime  @default(now())
+  removedBy    Int?
+  removedAt    DateTime?
+  remark       String?   @db.VarChar(255)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignedUser User?     @relation("ExcellentStaffAssignedBy", fields: [assignedBy], references: [id], onDelete: SetNull)
+  removedUser  User?     @relation("ExcellentStaffRemovedBy", fields: [removedBy], references: [id], onDelete: SetNull)
+
+  @@index([status, assignedAt], map: "idx_excellent_staff_status_time")
+  @@map("excellent_staff")
 }
 
 model OrderRenewalBonus {

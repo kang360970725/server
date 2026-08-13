@@ -7,6 +7,24 @@
 
 ---
 
+## 2026-08-13 ｜优秀服务者名单与续单分红资格快照
+
+### 本次动作
+- 新增优秀服务者管理模块与权限：`users:excellent-staff:page`、`users:excellent-staff:manage:button`；支持候选服务者搜索、批量选入、批量移出。
+- 新增 `excellent_staff` 表维护当前入围名单，仅允许选择未退出平台的服务者。
+- 续单派单创建续单组时写入 `bonusEligibleUserIds` 与 `bonusEligibleSnapshot`，将“派单当时是否优秀服务者”固化，避免后续每周轮换影响历史订单结算。
+- 续单结算时按派单快照中的优秀服务者发放额外续单分红；非优秀续单成员仍可被记录为续单成员，但不享受额外分红。
+- 续单榜单返回当前入围优秀服务者命中信息，前端仅对当前名单成员做高亮和提示，不回溯改变历史统计。
+
+### 验证
+- `npx prisma validate`
+- `npx prisma generate`
+- `npm run build`
+- `yarn build:dev`
+- `git diff --check`
+
+---
+
 ## 2026-08-12 ｜商品列表筛选与公开菜单客服入口前置优化
 
 ### 本次动作

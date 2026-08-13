@@ -664,6 +664,29 @@ export class OrdersService {
         };
     }
 
+    private async buildRenewalBonusEligibilitySnapshotTx(tx: any, renewalPlayerIds: number[], userMap?: Map<number, any>) {
+        const normalizedIds = this.normalizeIdArray(renewalPlayerIds).sort((a, b) => a - b);
+        if (!normalizedIds.length) return { eligibleUserIds: [], snapshot: [] };
+        const rows = await tx.excellentStaff.findMany({
+            where: { userId: { in: normalizedIds }, status: 'ACTIVE' },
+            select: { userId: true, assignedAt: true },
+        });
+        const rowMap = new Map<number, any>(rows.map((row: any) => [Number(row.userId), row]));
+        const eligibleUserIds = normalizedIds.filter((id) => rowMap.has(id));
+        const snapshot = normalizedIds.map((id) => {
+            const user = userMap?.get(id);
+            const excellent = rowMap.get(id);
+            return {
+                id,
+                name: user?.name || `#${id}`,
+                phone: user?.phone || null,
+                eligible: Boolean(excellent),
+                excellentAssignedAt: excellent?.assignedAt || null,
+            };
+        });
+        return { eligibleUserIds, snapshot };
+    }
+
     private async createRenewalGroupTx(params: {
         tx: any;
         orderId: number;
@@ -700,6 +723,7 @@ export class OrdersService {
                 phone: u?.phone || null,
             };
         });
+        const eligibility = await this.buildRenewalBonusEligibilitySnapshotTx(tx, normalizedRenewalPlayers, userMap);
 
         const group = await tx.orderRenewalGroup.create({
             data: {
@@ -708,6 +732,8 @@ export class OrdersService {
                 groupKey: normalizedRenewalPlayers.join(','),
                 memberUserIds: normalizedRenewalPlayers as any,
                 memberNamesSnapshot: memberNamesSnapshot as any,
+                bonusEligibleUserIds: eligibility.eligibleUserIds as any,
+                bonusEligibleSnapshot: eligibility.snapshot as any,
                 status: 'PENDING',
                 createdBy: operatorId || null,
             },
@@ -770,9 +796,34 @@ export class OrdersService {
             return { action: 'INVALIDATED', groupId: group.id, reason };
         }
 
-        const memberUserIds = this.normalizeIdArray(group.memberUserIds);
+        const hasEligibilitySnapshot = Array.isArray(group.bonusEligibleUserIds);
+        const memberUserIds = hasEligibilitySnapshot
+            ? this.normalizeIdArray(group.bonusEligibleUserIds)
+            : this.normalizeIdArray(group.memberUserIds);
         if (!memberUserIds.length) {
-            throw new BadRequestException('续单组缺少续单打手，无法结算');
+            const settledAt = new Date();
+            await tx.orderRenewalGroup.update({
+                where: { id: group.id },
+                data: {
+                    status: 'SETTLED',
+                    renewalOrderCount: 1,
+                    renewalAmount: 0,
+                    bonusBaseAmount: 0,
+                    bonusRate: 0,
+                    bonusTotalAmount: 0,
+                    settlementBatchId,
+                    settledBy: operatorId,
+                    settledAt,
+                },
+            });
+            await tx.order.update({
+                where: { id: orderId },
+                data: {
+                    renewalAmount: 0,
+                    renewalCount: 1,
+                },
+            });
+            return { action: 'SETTLED_NO_ELIGIBLE_EXCELLENT_STAFF', groupId: group.id };
         }
 
         const rule = await this.resolveRenewalBonusRule(order);
@@ -6227,6 +6278,11 @@ export class OrdersService {
             },
             orderBy: [{ settledAt: 'desc' }, { id: 'desc' }],
         });
+        const currentExcellentRows = await this.prisma.excellentStaff.findMany({
+            where: { status: 'ACTIVE' },
+            select: { userId: true },
+        });
+        const currentExcellentSet = new Set(currentExcellentRows.map((row: any) => Number(row.userId)));
 
         const keyword = String(params.keyword || '').trim();
         const aggMap = new Map<string, any>();
@@ -6263,6 +6319,9 @@ export class OrdersService {
             const memberUserIds = (Array.isArray(group.memberUserIds) ? group.memberUserIds : [])
                 .map(normalizeMemberId)
                 .filter(Boolean);
+            const currentExcellentUserIds = memberUserIds
+                .map((id: any) => Number(id))
+                .filter((id: number) => Number.isFinite(id) && currentExcellentSet.has(id));
             const memberIdText = memberUserIds.join(',');
             const groupKey = String(group.groupKey || memberIdText || group.id);
             const memberNameText = memberNames.join('、');
@@ -6288,6 +6347,8 @@ export class OrdersService {
                 lastSettledAt: null,
                 lastOrderId: null,
                 lastOrderAutoSerial: null,
+                currentExcellentUserIds: [],
+                hasCurrentExcellentStaff: false,
             };
 
             const renewalOrderCount = Math.max(1, Number(group.renewalOrderCount || 0));
@@ -6295,6 +6356,11 @@ export class OrdersService {
             item.renewalAmount += Number(group.renewalAmount || group.bonusBaseAmount || 0);
             item.bonusTotalAmount += Number(group.bonusTotalAmount || 0);
             item.bonusRateSum += Number(group.bonusRate || 0) * renewalOrderCount;
+            item.currentExcellentUserIds = Array.from(new Set([
+                ...(item.currentExcellentUserIds || []),
+                ...currentExcellentUserIds,
+            ]));
+            item.hasCurrentExcellentStaff = item.currentExcellentUserIds.length > 0;
 
             const settledAt = group.settledAt || group.updatedAt || group.createdAt;
             if (!item.lastSettledAt || new Date(settledAt).getTime() > new Date(item.lastSettledAt).getTime()) {

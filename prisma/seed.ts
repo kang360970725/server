@@ -119,6 +119,8 @@ async function main() {
         { key: 'users:staff:clear:button', name: '服务者清退', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:staff:page' },
         { key: 'users:staff:wallet-stats:button', name: '服务者资金统计', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:staff:page' },
         { key: 'users:staff:withdraw-qr-reset:button', name: '重置收款码', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:staff:page' },
+        { key: 'users:excellent-staff:page', name: '优秀服务者管理', module: 'users', type: PermissionType.PAGE, parentKey: 'menu:users' },
+        { key: 'users:excellent-staff:manage:button', name: '维护优秀服务者', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:excellent-staff:page' },
         { key: 'users:internal:create:button', name: '新增后台人员', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:internal:page' },
         { key: 'users:internal:edit:button', name: '编辑后台人员资料', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:internal:page' },
         { key: 'users:internal:assign-role:button', name: '后台人员分配角色', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:internal:page' },

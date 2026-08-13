@@ -412,10 +412,17 @@ export class UsersService {
   }
 
   private assertNonSuperStaffUpdatePayload(updateUserDto: UpdateUserDto) {
-    const allowedFields = new Set(['staffEmploymentStatus']);
+    const allowedFields = new Set(['status', 'staffEmploymentStatus', 'staffTags']);
     const blockedFields = Object.keys(updateUserDto as any).filter((field) => !allowedFields.has(field));
     if (blockedFields.length) {
-      throw new ForbiddenException('当前角色仅允许修改服务状态');
+      throw new ForbiddenException('当前角色仅允许修改账号状态、服务状态和服务者规则分组');
+    }
+    const nextAccountStatus = (updateUserDto as any)?.status;
+    if (
+      nextAccountStatus &&
+      ![UserStatus.ACTIVE, UserStatus.FROZEN].includes(nextAccountStatus)
+    ) {
+      throw new ForbiddenException('当前角色仅允许冻结或解冻账号');
     }
     const nextStatus = (updateUserDto as any)?.staffEmploymentStatus;
     if (
