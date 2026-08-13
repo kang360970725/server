@@ -20,15 +20,15 @@ CREATE TABLE `excellent_staff` (
 
 ALTER TABLE `excellent_staff`
   ADD CONSTRAINT `excellent_staff_userId_fkey`
-  FOREIGN KEY (`userId`) REFERENCES `User`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;
+  FOREIGN KEY (`userId`) REFERENCES `users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE;
 
 ALTER TABLE `excellent_staff`
   ADD CONSTRAINT `excellent_staff_assignedBy_fkey`
-  FOREIGN KEY (`assignedBy`) REFERENCES `User`(`id`) ON DELETE SET NULL ON UPDATE CASCADE;
+  FOREIGN KEY (`assignedBy`) REFERENCES `users`(`id`) ON DELETE SET NULL ON UPDATE CASCADE;
 
 ALTER TABLE `excellent_staff`
   ADD CONSTRAINT `excellent_staff_removedBy_fkey`
-  FOREIGN KEY (`removedBy`) REFERENCES `User`(`id`) ON DELETE SET NULL ON UPDATE CASCADE;
+  FOREIGN KEY (`removedBy`) REFERENCES `users`(`id`) ON DELETE SET NULL ON UPDATE CASCADE;
 
 ALTER TABLE `order_renewal_groups`
   ADD COLUMN `bonusEligibleUserIds` JSON NULL,
