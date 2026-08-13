@@ -74,6 +74,59 @@ export class PermissionService {
         }
     }
 
+    private async ensureExcellentStaffPermissionTree() {
+        const usersMenu = await this.prisma.permission.upsert({
+            where: { key: 'menu:users' },
+            update: {
+                name: '用户管理',
+                module: 'menu',
+                type: PermissionType.PAGE,
+            },
+            create: {
+                key: 'menu:users',
+                name: '用户管理',
+                module: 'menu',
+                type: PermissionType.PAGE,
+            },
+            select: { id: true },
+        });
+
+        const excellentPage = await this.prisma.permission.upsert({
+            where: { key: 'users:excellent-staff:page' },
+            update: {
+                name: '优秀服务者管理',
+                module: 'users',
+                type: PermissionType.PAGE,
+                parentId: usersMenu.id,
+            },
+            create: {
+                key: 'users:excellent-staff:page',
+                name: '优秀服务者管理',
+                module: 'users',
+                type: PermissionType.PAGE,
+                parentId: usersMenu.id,
+            },
+            select: { id: true },
+        });
+
+        await this.prisma.permission.upsert({
+            where: { key: 'users:excellent-staff:manage:button' },
+            update: {
+                name: '维护优秀服务者',
+                module: 'users',
+                type: PermissionType.BUTTON,
+                parentId: excellentPage.id,
+            },
+            create: {
+                key: 'users:excellent-staff:manage:button',
+                name: '维护优秀服务者',
+                module: 'users',
+                type: PermissionType.BUTTON,
+                parentId: excellentPage.id,
+            },
+        });
+    }
+
     private sanitizePermissionInput(data: {
         key: string;
         name: string;
@@ -99,6 +152,7 @@ export class PermissionService {
 
     async getPermissionTree() {
         await this.ensureServiceOnlineBoardPermissionTree();
+        await this.ensureExcellentStaffPermissionTree();
 
         const permissions = await this.prisma.permission.findMany({
             orderBy: { id: 'asc' },

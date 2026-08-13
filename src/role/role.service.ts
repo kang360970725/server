@@ -30,6 +30,15 @@ export class RoleService {
                 result.add(serviceBoardPermission.id);
             }
         }
+        if (permissions.some((p) => p.key === 'users:excellent-staff:manage:button')) {
+            const excellentStaffPagePermission = await this.prisma.permission.findUnique({
+                where: { key: 'users:excellent-staff:page' },
+                select: { id: true },
+            });
+            if (excellentStaffPagePermission) {
+                result.add(excellentStaffPagePermission.id);
+            }
+        }
         const pendingParentIds = Array.from(
             new Set(permissions.map((p) => p.parentId).filter((id): id is number => Number.isFinite(Number(id)))),
         );
