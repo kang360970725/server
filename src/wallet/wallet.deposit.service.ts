@@ -417,7 +417,12 @@ export class WalletDepositService {
                 : [],
         ]);
 
-        const userMap = new Map<number, any>(users.map((user) => [user.id, user] as [number, any]));
+        const activeUsers = users.filter(
+            (user) => !['EXITED', 'BLACKLISTED'].includes(String(user.staffEmploymentStatus || '').toUpperCase()),
+        );
+        const userMap = new Map<number, any>(activeUsers.map((user) => [user.id, user] as [number, any]));
+        const activeUserIdSet = new Set(activeUsers.map((user) => user.id));
+        const activeRows = allRows.filter((row) => activeUserIdSet.has(row.userId));
         const operatorMap = new Map<number, any>(operators.map((operator) => [operator.id, operator] as [number, any]));
 
         const matchesSearch = (...values: any[]) => {
@@ -429,7 +434,7 @@ export class WalletDepositService {
             user?.realName || user?.name || user?.phone || '';
 
         if (operatorKey) {
-            const detailRows = allRows.filter((row) => {
+            const detailRows = activeRows.filter((row) => {
                 if (operatorKey === 'SYSTEM') return !row.operatorId;
                 const operatorId = Number(operatorKey.replace(/^OPERATOR_/, ''));
                 return operatorId > 0 && row.operatorId === operatorId;
@@ -473,7 +478,7 @@ export class WalletDepositService {
         }
 
         const groupMap = new Map<string, any>();
-        for (const row of allRows) {
+        for (const row of activeRows) {
             const key = row.operatorId ? `OPERATOR_${row.operatorId}` : 'SYSTEM';
             const operator = row.operatorId ? operatorMap.get(row.operatorId) : null;
             const current = groupMap.get(key) || {
@@ -513,7 +518,7 @@ export class WalletDepositService {
             total: rows.length,
             summary: {
                 groupCount: rows.length,
-                staffCount: new Set(allRows.map((row) => row.userId)).size,
+                staffCount: new Set(activeRows.map((row) => row.userId)).size,
                 transactionCount: rows.reduce((sum, row) => sum + Number(row.transactionCount || 0), 0),
                 totalAmount: this.round2(rows.reduce((sum, row) => sum + Number(row.totalAmount || 0), 0)),
                 manualOperatorAmount: this.round2(rows
