@@ -186,6 +186,7 @@ export class WalletController {
             page,
             limit,
             search: query.search,
+            operatorKey: query.operatorKey,
             employmentStatus: query.employmentStatus,
             depositState: query.depositState,
             manualOnly: String(query.manualOnly || '').trim().toLowerCase() === 'true',

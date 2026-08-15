@@ -1,13 +1,10 @@
 import {BadRequestException, Injectable} from '@nestjs/common';
 import {PrismaService} from '../prisma.service';
-import { StaffEmploymentStatus, UserType } from '@prisma/client';
-import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
 
 @Injectable()
 export class WalletDepositService {
     constructor(
         private readonly prisma: PrismaService,
-        private readonly staffRuleEngineService: StaffRuleEngineService,
     ) {}
 
     private async tableExists(tableName: string) {
@@ -26,18 +23,6 @@ export class WalletDepositService {
 
     private round2(v: any) {
         return Math.round((Number(v) || 0) * 100) / 100;
-    }
-
-    private normalizeDepositState(value?: string) {
-        const v = String(value || 'ALL').trim().toUpperCase();
-        return ['ALL', 'EFFECTIVE', 'INVALID', 'EXITED_OR_BLACKLISTED', 'ZERO'].includes(v) ? v : 'ALL';
-    }
-
-    private normalizeEmploymentStatus(value?: string) {
-        const v = String(value || '').trim().toUpperCase();
-        return Object.values(StaffEmploymentStatus).includes(v as StaffEmploymentStatus)
-            ? (v as StaffEmploymentStatus)
-            : undefined;
     }
 
     private async attachOperators<T extends { operatorId?: number | null }>(rows: T[]) {
@@ -369,6 +354,7 @@ export class WalletDepositService {
         page: number;
         limit: number;
         search?: string;
+        operatorKey?: string;
         employmentStatus?: string;
         depositState?: string;
         manualOnly?: boolean;
@@ -376,277 +362,168 @@ export class WalletDepositService {
         const page = Math.max(1, Number(params.page || 1));
         const limit = Math.min(100, Math.max(1, Number(params.limit || 20)));
         const search = String(params.search || '').trim();
-        const employmentStatus = this.normalizeEmploymentStatus(params.employmentStatus);
-        const depositState = this.normalizeDepositState(params.depositState);
+        const operatorKey = String(params.operatorKey || '').trim();
 
-        const where: any = {
-            OR: [
-                { userType: UserType.STAFF },
-                { walletAccount: { is: { depositBalance: { not: 0 } } } },
-                { depositTransactions: { some: {} } },
-            ],
-        };
-        if (employmentStatus) where.staffEmploymentStatus = employmentStatus;
-        if (search) {
-            const searchNumber = Number(search);
-            const searchOr = [
-                Number.isFinite(searchNumber) ? { id: searchNumber } : undefined,
-                { phone: { contains: search } },
-                { name: { contains: search } },
-                { realName: { contains: search } },
-                { idCard: { contains: search } },
-            ].filter(Boolean);
-            where.AND = [{ OR: searchOr }];
-        }
-
-        const users = await this.prisma.user.findMany({
-            where,
-            select: {
-                id: true,
-                phone: true,
-                name: true,
-                realName: true,
-                userType: true,
-                staffEmploymentStatus: true,
-                staffTags: true,
-                depositLimit: true,
-                createdAt: true,
-                staffExitedAt: true,
-                walletAccount: {
-                    select: {
-                        depositBalance: true,
-                        availableBalance: true,
-                        frozenBalance: true,
-                    },
-                },
-                staffRating: {
-                    select: {
-                        name: true,
-                    },
-                },
-                Role: {
-                    select: {
-                        name: true,
-                    },
-                },
-            },
-            orderBy: { id: 'desc' },
-        });
-
-        const userIds = users.map((u) => u.id);
         const legacyTableExists = await this.tableExists('WalletDepositTransaction');
-        let manualGroups: any[] = [];
-        let totalGroups: any[] = [];
-        let latestRows: any[] = [];
-        let latestManualRows: any[] = [];
+        const transactionRows = legacyTableExists
+            ? await this.prisma.$queryRawUnsafe<any[]>(
+                `
+                    SELECT userId, amount, bizType, operatorId, createdAt
+                    FROM wallet_deposit_transactions
+                    UNION ALL
+                    SELECT userId, amount, bizType, operatorId, createdAt
+                    FROM WalletDepositTransaction
+                `,
+            )
+            : await this.prisma.walletDepositTransaction.findMany({
+                select: {
+                    userId: true,
+                    amount: true,
+                    bizType: true,
+                    operatorId: true,
+                    createdAt: true,
+                },
+            });
 
-        if (userIds.length && legacyTableExists) {
-            const placeholders = userIds.map(() => '?').join(',');
-            [manualGroups, totalGroups, latestRows, latestManualRows] = await Promise.all([
-                this.prisma.$queryRawUnsafe<any[]>(
-                    `
-                        SELECT userId, SUM(amount) AS totalAmount, COUNT(*) AS transactionCount
-                        FROM (
-                            SELECT userId, amount
-                            FROM wallet_deposit_transactions
-                            WHERE userId IN (${placeholders}) AND bizType = 'MANUAL_DEPOSIT'
-                            UNION ALL
-                            SELECT userId, amount
-                            FROM WalletDepositTransaction
-                            WHERE userId IN (${placeholders}) AND bizType = 'MANUAL_DEPOSIT'
-                        ) t
-                        GROUP BY userId
-                    `,
-                    ...userIds,
-                    ...userIds,
-                ),
-                this.prisma.$queryRawUnsafe<any[]>(
-                    `
-                        SELECT userId, SUM(amount) AS totalAmount, COUNT(*) AS transactionCount
-                        FROM (
-                            SELECT userId, amount
-                            FROM wallet_deposit_transactions
-                            WHERE userId IN (${placeholders})
-                            UNION ALL
-                            SELECT userId, amount
-                            FROM WalletDepositTransaction
-                            WHERE userId IN (${placeholders})
-                        ) t
-                        GROUP BY userId
-                    `,
-                    ...userIds,
-                    ...userIds,
-                ),
-                this.prisma.$queryRawUnsafe<any[]>(
-                    `
-                        SELECT userId, createdAt
-                        FROM (
-                            SELECT userId, createdAt, id
-                            FROM wallet_deposit_transactions
-                            WHERE userId IN (${placeholders})
-                            UNION ALL
-                            SELECT userId, createdAt, id
-                            FROM WalletDepositTransaction
-                            WHERE userId IN (${placeholders})
-                        ) t
-                        ORDER BY createdAt DESC, id DESC
-                    `,
-                    ...userIds,
-                    ...userIds,
-                ),
-                this.prisma.$queryRawUnsafe<any[]>(
-                    `
-                        SELECT userId, operatorId, createdAt
-                        FROM (
-                            SELECT userId, operatorId, createdAt, id
-                            FROM wallet_deposit_transactions
-                            WHERE userId IN (${placeholders}) AND bizType = 'MANUAL_DEPOSIT'
-                            UNION ALL
-                            SELECT userId, operatorId, createdAt, id
-                            FROM WalletDepositTransaction
-                            WHERE userId IN (${placeholders}) AND bizType = 'MANUAL_DEPOSIT'
-                        ) t
-                        ORDER BY createdAt DESC, id DESC
-                    `,
-                    ...userIds,
-                    ...userIds,
-                ),
-            ]);
-        } else if (userIds.length) {
-            [manualGroups, totalGroups, latestRows, latestManualRows] = await Promise.all([
-                this.prisma.walletDepositTransaction.groupBy({
-                    by: ['userId'],
-                    where: { userId: { in: userIds }, bizType: 'MANUAL_DEPOSIT' as any },
-                    _sum: { amount: true },
-                    _count: { _all: true },
-                }),
-                this.prisma.walletDepositTransaction.groupBy({
-                    by: ['userId'],
-                    where: { userId: { in: userIds } },
-                    _sum: { amount: true },
-                    _count: { _all: true },
-                }),
-                this.prisma.walletDepositTransaction.findMany({
-                    where: { userId: { in: userIds } },
-                    select: { userId: true, createdAt: true },
-                    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-                }),
-                this.prisma.walletDepositTransaction.findMany({
-                    where: { userId: { in: userIds }, bizType: 'MANUAL_DEPOSIT' as any },
-                    select: { userId: true, operatorId: true, createdAt: true },
-                    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-                }),
-            ]);
-        }
+        const allRows = (transactionRows || []).map((row) => ({
+            userId: Number(row.userId),
+            amount: this.round2(row.amount),
+            bizType: String(row.bizType || ''),
+            operatorId: row.operatorId === null || row.operatorId === undefined ? null : Number(row.operatorId),
+            createdAt: row.createdAt,
+        }));
 
-        const config = await this.staffRuleEngineService.getConfig();
+        const userIds = Array.from(new Set(allRows.map((row) => row.userId).filter((id) => id > 0)));
+        const operatorIds = Array.from(new Set(allRows.map((row) => row.operatorId || 0).filter((id) => id > 0)));
 
-        const readGroupAmount = (row: any) => row?._sum?.amount ?? row?.totalAmount ?? 0;
-        const readGroupCount = (row: any) => row?._count?._all ?? row?.transactionCount ?? 0;
-        const manualMap = new Map<number, any>((manualGroups as any[]).map((row: any) => [Number(row.userId), row] as [number, any]));
-        const totalMap = new Map<number, any>((totalGroups as any[]).map((row: any) => [Number(row.userId), row] as [number, any]));
-        const latestMap = new Map<number, Date>();
-        for (const row of latestRows as any[]) {
-            if (!latestMap.has(row.userId)) latestMap.set(row.userId, row.createdAt);
-        }
-        const latestManualMap = new Map<number, any>();
-        for (const row of latestManualRows as any[]) {
-            if (!latestManualMap.has(row.userId)) latestManualMap.set(row.userId, row);
-        }
-        const operatorIds = Array.from(
-            new Set((latestManualRows as any[]).map((row) => Number(row.operatorId || 0)).filter((id) => id > 0)),
-        );
-        const operators = operatorIds.length
-            ? await this.prisma.user.findMany({
-                where: { id: { in: operatorIds } },
-                select: { id: true, name: true, realName: true, phone: true },
-            })
-            : [];
-        const operatorMap = new Map(operators.map((operator) => [operator.id, operator]));
+        const [users, operators] = await Promise.all([
+            userIds.length
+                ? this.prisma.user.findMany({
+                    where: { id: { in: userIds } },
+                    select: {
+                        id: true,
+                        phone: true,
+                        name: true,
+                        realName: true,
+                        staffEmploymentStatus: true,
+                    },
+                })
+                : [],
+            operatorIds.length
+                ? this.prisma.user.findMany({
+                    where: { id: { in: operatorIds } },
+                    select: { id: true, name: true, realName: true, phone: true },
+                })
+                : [],
+        ]);
 
-        const rows = users.map((user: any) => {
-            const depositBalance = this.round2(user.walletAccount?.depositBalance ?? 0);
-            const manual = manualMap.get(user.id) as any;
-            const total = totalMap.get(user.id) as any;
-            const manualDepositAmount = this.round2(readGroupAmount(manual));
-            const latestManual = latestManualMap.get(user.id);
-            const latestManualOperator = operatorMap.get(Number(latestManual?.operatorId || 0));
-            const depositNetAmount = this.round2(readGroupAmount(total));
-            const deductionAmount = this.round2(Math.abs(Math.min(0, depositNetAmount - manualDepositAmount)));
-            const matchedRule = user.userType === UserType.STAFF
-                ? this.staffRuleEngineService.resolveMatchedRule(config, user.staffTags)
-                : null;
-            const requiredDeposit = user.userType === UserType.STAFF
-                ? this.round2(matchedRule?.depositAmount ?? user.depositLimit ?? 500)
-                : null;
-            const activeLike = [StaffEmploymentStatus.ACTIVE, StaffEmploymentStatus.FROZEN].includes(user.staffEmploymentStatus);
-            const exitedOrBlacklisted = [StaffEmploymentStatus.EXITED, StaffEmploymentStatus.BLACKLISTED].includes(user.staffEmploymentStatus);
-            const state = activeLike && depositBalance > 0
-                ? 'EFFECTIVE'
-                : exitedOrBlacklisted
-                    ? 'EXITED_OR_BLACKLISTED'
-                    : 'ZERO';
-            const statusLabel = state === 'EFFECTIVE'
-                ? '有效'
-                : state === 'EXITED_OR_BLACKLISTED'
-                    ? '退店/黑名单'
-                    : '无保证金';
-            const gapToRule = activeLike && requiredDeposit !== null ? this.round2(depositBalance - requiredDeposit) : null;
+        const userMap = new Map<number, any>(users.map((user) => [user.id, user] as [number, any]));
+        const operatorMap = new Map<number, any>(operators.map((operator) => [operator.id, operator] as [number, any]));
+
+        const matchesSearch = (...values: any[]) => {
+            if (!search) return true;
+            const lowerSearch = search.toLowerCase();
+            return values.some((value) => String(value || '').toLowerCase().includes(lowerSearch));
+        };
+        const formatName = (user?: { name?: string | null; realName?: string | null; phone?: string | null }) =>
+            user?.realName || user?.name || user?.phone || '';
+
+        if (operatorKey) {
+            const detailRows = allRows.filter((row) => {
+                if (operatorKey === 'SYSTEM') return !row.operatorId;
+                const operatorId = Number(operatorKey.replace(/^OPERATOR_/, ''));
+                return operatorId > 0 && row.operatorId === operatorId;
+            });
+            const staffMap = new Map<number, any>();
+            for (const row of detailRows) {
+                const user = userMap.get(row.userId);
+                if (!user) continue;
+                const current = staffMap.get(row.userId) || {
+                    userId: row.userId,
+                    name: user.name,
+                    realName: user.realName,
+                    phone: user.phone,
+                    staffEmploymentStatus: user.staffEmploymentStatus,
+                    depositAmount: 0,
+                    transactionCount: 0,
+                    latestAt: null,
+                };
+                current.depositAmount = this.round2(current.depositAmount + row.amount);
+                current.transactionCount += 1;
+                if (!current.latestAt || new Date(row.createdAt).getTime() > new Date(current.latestAt).getTime()) {
+                    current.latestAt = row.createdAt;
+                }
+                staffMap.set(row.userId, current);
+            }
+            const rows = Array.from(staffMap.values())
+                .filter((row) => matchesSearch(row.userId, row.phone, row.name, row.realName))
+                .sort((a, b) => Math.abs(Number(b.depositAmount || 0)) - Math.abs(Number(a.depositAmount || 0)));
+            const start = (page - 1) * limit;
 
             return {
-                userId: user.id,
-                phone: user.phone,
-                name: user.name,
-                realName: user.realName,
-                userType: user.userType,
-                roleName: user.Role?.name || '',
-                ratingName: user.staffRating?.name || '',
-                staffEmploymentStatus: user.staffEmploymentStatus,
-                staffTags: Array.isArray(user.staffTags) ? user.staffTags : [],
-                depositBalance,
-                requiredDeposit,
-                gapToRule,
-                manualDepositAmount,
-                latestManualDepositAt: latestManual?.createdAt || null,
-                latestManualOperatorId: latestManual?.operatorId || null,
-                latestManualOperatorName: latestManualOperator?.realName || latestManualOperator?.name || '',
-                latestManualOperatorPhone: latestManualOperator?.phone || '',
-                depositNetAmount,
-                deductionAmount,
-                transactionCount: Number(readGroupCount(total) || 0),
-                manualTransactionCount: Number(readGroupCount(manual) || 0),
-                latestDepositAt: latestMap.get(user.id) || null,
-                staffExitedAt: user.staffExitedAt,
-                createdAt: user.createdAt,
-                depositState: state,
-                depositStateLabel: statusLabel,
+                mode: 'DETAIL',
+                data: rows.slice(start, start + limit),
+                total: rows.length,
+                summary: {
+                    staffCount: rows.length,
+                    totalAmount: this.round2(rows.reduce((sum, row) => sum + Number(row.depositAmount || 0), 0)),
+                    transactionCount: rows.reduce((sum, row) => sum + Number(row.transactionCount || 0), 0),
+                },
             };
-        }).filter((row) => {
-            if (params.manualOnly && row.manualTransactionCount <= 0) return false;
-            if (depositState === 'ALL') return true;
-            if (depositState === 'INVALID') return row.depositState !== 'EFFECTIVE';
-            return row.depositState === depositState;
-        });
+        }
 
-        const totalDepositBalance = this.round2(rows.reduce((sum, row) => sum + row.depositBalance, 0));
-        const totalManualDepositAmount = this.round2(rows.reduce((sum, row) => sum + row.manualDepositAmount, 0));
-        const effectiveDepositBalance = this.round2(rows.filter((row) => row.depositState === 'EFFECTIVE').reduce((sum, row) => sum + row.depositBalance, 0));
-        const invalidDepositBalance = this.round2(rows.filter((row) => row.depositState !== 'EFFECTIVE').reduce((sum, row) => sum + row.depositBalance, 0));
+        const groupMap = new Map<string, any>();
+        for (const row of allRows) {
+            const key = row.operatorId ? `OPERATOR_${row.operatorId}` : 'SYSTEM';
+            const operator = row.operatorId ? operatorMap.get(row.operatorId) : null;
+            const current = groupMap.get(key) || {
+                groupKey: key,
+                operatorId: row.operatorId,
+                operatorName: operator ? formatName(operator) : '系统扣费/系统处理',
+                operatorPhone: operator?.phone || '',
+                sourceType: row.operatorId ? 'MANUAL_OPERATOR' : 'SYSTEM',
+                totalAmount: 0,
+                transactionCount: 0,
+                staffIds: new Set<number>(),
+                latestAt: null,
+            };
+            current.totalAmount = this.round2(current.totalAmount + row.amount);
+            current.transactionCount += 1;
+            current.staffIds.add(row.userId);
+            if (!current.latestAt || new Date(row.createdAt).getTime() > new Date(current.latestAt).getTime()) {
+                current.latestAt = row.createdAt;
+            }
+            groupMap.set(key, current);
+        }
+
+        const rows = Array.from(groupMap.values())
+            .map((row) => ({
+                ...row,
+                staffCount: row.staffIds.size,
+                staffIds: undefined,
+            }))
+            .filter((row) => matchesSearch(row.operatorId, row.operatorName, row.operatorPhone, row.sourceType === 'SYSTEM' ? '系统' : '录入人'))
+            .sort((a, b) => Math.abs(Number(b.totalAmount || 0)) - Math.abs(Number(a.totalAmount || 0)));
+
         const start = (page - 1) * limit;
 
         return {
+            mode: 'GROUP',
             data: rows.slice(start, start + limit),
             total: rows.length,
             summary: {
-                staffCount: rows.length,
-                totalDepositBalance,
-                totalManualDepositAmount,
-                effectiveDepositBalance,
-                invalidDepositBalance,
-                effectiveCount: rows.filter((row) => row.depositState === 'EFFECTIVE').length,
-                invalidCount: rows.filter((row) => row.depositState !== 'EFFECTIVE').length,
-                exitedOrBlacklistedCount: rows.filter((row) => row.depositState === 'EXITED_OR_BLACKLISTED').length,
+                groupCount: rows.length,
+                staffCount: new Set(allRows.map((row) => row.userId)).size,
+                transactionCount: rows.reduce((sum, row) => sum + Number(row.transactionCount || 0), 0),
+                totalAmount: this.round2(rows.reduce((sum, row) => sum + Number(row.totalAmount || 0), 0)),
+                manualOperatorAmount: this.round2(rows
+                    .filter((row) => row.sourceType === 'MANUAL_OPERATOR')
+                    .reduce((sum, row) => sum + Number(row.totalAmount || 0), 0)),
+                systemAmount: this.round2(rows
+                    .filter((row) => row.sourceType === 'SYSTEM')
+                    .reduce((sum, row) => sum + Number(row.totalAmount || 0), 0)),
             },
         };
     }
+
 }
