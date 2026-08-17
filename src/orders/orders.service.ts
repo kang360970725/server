@@ -6357,6 +6357,7 @@ export class OrdersService {
                 lastSettledAt: null,
                 lastOrderId: null,
                 lastOrderAutoSerial: null,
+                orders: [],
                 currentExcellentUserIds: [],
                 hasCurrentExcellentStaff: false,
             };
@@ -6378,6 +6379,15 @@ export class OrdersService {
                 item.lastOrderId = group.orderId;
                 item.lastOrderAutoSerial = group.order?.autoSerial || `#${group.orderId}`;
             }
+            if (!item.orders.some((order: any) => Number(order.orderId) === Number(group.orderId))) {
+                item.orders.push({
+                    orderId: group.orderId,
+                    autoSerial: group.order?.autoSerial || `#${group.orderId}`,
+                    settledAt,
+                    renewalAmount: Number(group.renewalAmount || group.bonusBaseAmount || 0),
+                    bonusTotalAmount: Number(group.bonusTotalAmount || 0),
+                });
+            }
 
             aggMap.set(groupKey, item);
         }
@@ -6387,6 +6397,13 @@ export class OrdersService {
             renewalAmount: round2(item.renewalAmount),
             bonusTotalAmount: round2(item.bonusTotalAmount),
             avgBonusRate: item.renewalOrderCount > 0 ? round2((item.bonusRateSum / item.renewalOrderCount) * 100) : 0,
+            orders: (Array.isArray(item.orders) ? item.orders : [])
+                .map((order: any) => ({
+                    ...order,
+                    renewalAmount: round2(order.renewalAmount),
+                    bonusTotalAmount: round2(order.bonusTotalAmount),
+                }))
+                .sort((a: any, b: any) => new Date(b.settledAt || 0).getTime() - new Date(a.settledAt || 0).getTime()),
         })).sort((a, b) => {
             const countDiff = Number(b.renewalOrderCount || 0) - Number(a.renewalOrderCount || 0);
             if (countDiff !== 0) return countDiff;
