@@ -11,6 +11,7 @@ const LEGACY_ADMIN_PAGE = 'system:role:page';
 const ORDERS_PAGE = 'orders:list:page';
 const USER_COUPONS_LIST = 'coupons:user-coupons:list';
 const COUPONS_PAGE = 'coupons:page';
+const MEMBER_COUPON_GRANT = 'users:member:coupon-grant:button';
 
 @Controller('coupons')
 @UseGuards(JwtAuthGuard, PermissionsGuard)
@@ -37,7 +38,7 @@ export class CouponsController {
   }
 
   @Post('grant')
-  @Permissions(COUPONS_PAGE, LEGACY_ADMIN_PAGE)
+  @Permissions(MEMBER_COUPON_GRANT, LEGACY_ADMIN_PAGE)
   grant(@Body() dto: GrantUserCouponDto, @Req() req: any) {
     const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
     return this.couponsService.grantUserCoupon(dto, operatorId);

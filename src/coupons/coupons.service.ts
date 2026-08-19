@@ -9,6 +9,7 @@ import {
   CouponTemplateType,
   Prisma,
   UserCouponStatus,
+  UserType,
 } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { CreateCouponTemplateDto } from './dto/create-coupon-template.dto';
@@ -151,10 +152,10 @@ export class CouponsService {
     if (userIds.length > 200) throw new BadRequestException('单次发券用户数量不能超过200');
 
     const [users, template] = await Promise.all([
-      this.prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true } }),
+      this.prisma.user.findMany({ where: { id: { in: userIds }, userType: UserType.REGISTERED_USER }, select: { id: true } }),
       this.prisma.couponTemplate.findUnique({ where: { id: templateId } }),
     ]);
-    if (users.length !== userIds.length) throw new NotFoundException('存在无效用户，无法发券');
+    if (users.length !== userIds.length) throw new NotFoundException('存在非会员或无效会员，无法发券');
     if (!template) throw new NotFoundException('券模板不存在');
     if (template.status !== CouponTemplateStatus.ACTIVE) {
       throw new BadRequestException('券模板未生效，不能发券');

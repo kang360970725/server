@@ -791,6 +791,7 @@ export class UsersService {
     staffEmploymentStatus?: string;
     anonymousOnly?: string | boolean;
     includeStaffMembers?: string | boolean;
+    memberState?: string;
     scene?: string;
     actor?: { userType?: UserType; permissions?: string[]; id?: number; userId?: number };
 
@@ -805,6 +806,7 @@ export class UsersService {
       staffEmploymentStatus,
       anonymousOnly,
       includeStaffMembers,
+      memberState,
       scene,
       actor,
       loginInactiveDays,
@@ -864,7 +866,8 @@ export class UsersService {
     }
 
     /**
-     * 1️⃣ 搜索：支持 ID / 手机号 / name / realName
+     * 1️⃣ 搜索：支持会员编码 / 手机号 / name / realName
+     * - 纯数字仍兼容后台用户ID精确查询，但前端会员场景不再提示用户ID。
      */
     if (search) {
       const keyword = String(search).trim();
@@ -872,7 +875,8 @@ export class UsersService {
       const OR: any[] = [
         { phone: { contains: keyword } },
         { name: { contains: keyword } },
-        { realName: { contains: keyword } }
+        { realName: { contains: keyword } },
+        { memberProfile: { is: { memberCode: { contains: keyword } } } },
       ];
 
       if (/^\d+$/.test(keyword)) {
@@ -910,6 +914,36 @@ export class UsersService {
           { name: { startsWith: '访客' } },
         ],
       });
+    }
+
+    if (sceneKey === 'MEMBER') {
+      const normalizedMemberState = String(memberState || 'ALL').trim().toUpperCase();
+      const activeMemberWhere = {
+        OR: [
+          { walletAccount: { is: { availableBalance: { gt: 0 } } } },
+          { memberPointAccount: { is: { availablePoints: { gt: 0 } } } },
+          { memberProfile: { is: { totalRechargeAmount: { gt: 0 } } } },
+          { memberProfile: { is: { totalConsumeAmount: { gt: 0 } } } },
+          { memberProfile: { is: { annualContribution: { gt: 0 } } } },
+          {
+            userCoupons: {
+              some: {
+                status: 'UNUSED',
+                OR: [
+                  { expiresAt: null },
+                  { expiresAt: { gt: new Date() } },
+                ],
+              },
+            },
+          },
+        ],
+      };
+
+      if (normalizedMemberState === 'ACTIVE') {
+        AND.push(activeMemberWhere);
+      } else if (normalizedMemberState === 'INACTIVE') {
+        AND.push({ NOT: activeMemberWhere });
+      }
     }
 
     /**

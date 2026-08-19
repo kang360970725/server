@@ -127,6 +127,59 @@ export class PermissionService {
         });
     }
 
+    private async ensureMemberCouponPermissionTree() {
+        const usersMenu = await this.prisma.permission.upsert({
+            where: { key: 'menu:users' },
+            update: {
+                name: '用户管理',
+                module: 'menu',
+                type: PermissionType.PAGE,
+            },
+            create: {
+                key: 'menu:users',
+                name: '用户管理',
+                module: 'menu',
+                type: PermissionType.PAGE,
+            },
+            select: { id: true },
+        });
+
+        const memberPage = await this.prisma.permission.upsert({
+            where: { key: 'users:member:page' },
+            update: {
+                name: '会员管理',
+                module: 'users',
+                type: PermissionType.PAGE,
+                parentId: usersMenu.id,
+            },
+            create: {
+                key: 'users:member:page',
+                name: '会员管理',
+                module: 'users',
+                type: PermissionType.PAGE,
+                parentId: usersMenu.id,
+            },
+            select: { id: true },
+        });
+
+        await this.prisma.permission.upsert({
+            where: { key: 'users:member:coupon-grant:button' },
+            update: {
+                name: '会员手动发券',
+                module: 'users',
+                type: PermissionType.BUTTON,
+                parentId: memberPage.id,
+            },
+            create: {
+                key: 'users:member:coupon-grant:button',
+                name: '会员手动发券',
+                module: 'users',
+                type: PermissionType.BUTTON,
+                parentId: memberPage.id,
+            },
+        });
+    }
+
     private sanitizePermissionInput(data: {
         key: string;
         name: string;
@@ -153,6 +206,7 @@ export class PermissionService {
     async getPermissionTree() {
         await this.ensureServiceOnlineBoardPermissionTree();
         await this.ensureExcellentStaffPermissionTree();
+        await this.ensureMemberCouponPermissionTree();
 
         const permissions = await this.prisma.permission.findMany({
             orderBy: { id: 'asc' },

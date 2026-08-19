@@ -197,7 +197,7 @@ export class GameProjectService {
         }
         return this.prisma.gameProject.findMany({
             where,
-            select: { id: true, name: true, type: true, price: true, baseAmount: true, billingMode: true },
+            select: { id: true, name: true, type: true, price: true, baseAmount: true, billingMode: true, category: true },
             orderBy: { id: 'desc' },
             take: 50,
         });

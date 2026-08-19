@@ -764,11 +764,13 @@ model MemberRechargePlan {
   badgeText       String?               @db.VarChar(32)
   sortOrder       Int                   @default(100)
   enabled         Boolean               @default(true)
+  effectiveFrom   DateTime?
+  effectiveTo     DateTime?
   createdAt       DateTime              @default(now())
   updatedAt       DateTime              @updatedAt
   rechargeOrders  MemberRechargeOrder[]
 
-  @@index([enabled, sortOrder], map: "idx_member_recharge_plan_enabled_sort")
+  @@index([enabled, effectiveFrom, effectiveTo, sortOrder], map: "idx_member_recharge_plan_effective")
   @@map("member_recharge_plans")
 }
 

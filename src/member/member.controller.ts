@@ -22,6 +22,30 @@ export class MemberController {
     return this.memberService.listRechargePlans(false);
   }
 
+  @Get('recharge-orders')
+  @Permissions('wallet:member-recharges:page')
+  listRechargeOrders(
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+    @Query('keyword') keyword?: string,
+    @Query('status') status?: string,
+    @Query('channel') channel?: string,
+    @Query('startAt') startAt?: string,
+    @Query('endAt') endAt?: string,
+    @Query('userId') userId?: number,
+  ) {
+    return this.memberService.listRechargeOrders({
+      page,
+      limit,
+      keyword,
+      status,
+      channel,
+      startAt,
+      endAt,
+      userId,
+    });
+  }
+
   @Get('levels')
   listLevelConfigs() {
     return this.memberService.listLevelConfigs();

@@ -38,8 +38,37 @@ export class MemberService {
     return Math.round(Number(value || 0) * 100) / 100;
   }
 
-  private buildMemberCode(userId: number) {
-    return `BM${String(userId).padStart(8, '0')}`;
+  private isPremiumMemberCode(code: string) {
+    return /(\d)\1{2,}/.test(String(code || ''));
+  }
+
+  private async generateMemberCode(tx?: PrismaTx) {
+    const db = this.getDb(tx);
+    const rows = await db.memberProfile.findMany({
+      where: {
+        memberCode: {
+          gte: '15000000',
+          lte: '99999999',
+        },
+      },
+      select: { memberCode: true },
+      orderBy: { memberCode: 'desc' },
+      take: 200,
+    });
+    const existing = new Set(rows.map((row: any) => String(row.memberCode || '')));
+    const maxCode = rows
+      .map((row: any) => Number(row.memberCode))
+      .filter((value: number) => Number.isFinite(value))
+      .reduce((max: number, value: number) => Math.max(max, value), 14999999);
+
+    for (let next = Math.max(15000000, maxCode + 1); next <= 99999999; next += 1) {
+      const code = String(next).padStart(8, '0');
+      if (this.isPremiumMemberCode(code) || existing.has(code)) continue;
+      const conflict = await db.memberProfile.findUnique({ where: { memberCode: code } });
+      if (!conflict) return code;
+    }
+
+    throw new BadRequestException('会员码号段已用尽，请调整会员码生成规则');
   }
 
   private normalizeLevelCode(code: string) {
@@ -78,6 +107,31 @@ export class MemberService {
       uniq.set(item.templateId, item);
     }
     return Array.from(uniq.values());
+  }
+
+  private normalizeOptionalDate(input: any) {
+    if (input === undefined) return undefined;
+    if (input === null || input === '') return null;
+    const date = new Date(input);
+    if (Number.isNaN(date.getTime())) throw new BadRequestException('充值方案有效期格式错误');
+    return date;
+  }
+
+  private assertRechargePlanPeriod(effectiveFrom?: Date | null, effectiveTo?: Date | null) {
+    if (effectiveFrom && effectiveTo && effectiveFrom.getTime() > effectiveTo.getTime()) {
+      throw new BadRequestException('充值方案生效时间不能晚于截止时间');
+    }
+  }
+
+  private assertRechargePlanUsable(plan: any) {
+    if (!plan || !plan.enabled) throw new BadRequestException('充值方案不存在或已停用');
+    const now = new Date();
+    if (plan.effectiveFrom && new Date(plan.effectiveFrom).getTime() > now.getTime()) {
+      throw new BadRequestException('充值方案尚未生效');
+    }
+    if (plan.effectiveTo && new Date(plan.effectiveTo).getTime() < now.getTime()) {
+      throw new BadRequestException('充值方案已截止');
+    }
   }
 
   private async grantRechargeCouponBenefits(
@@ -441,7 +495,7 @@ export class MemberService {
     return db.memberProfile.create({
       data: {
         userId,
-        memberCode: this.buildMemberCode(userId),
+        memberCode: await this.generateMemberCode(tx),
         levelCode: String(defaultLevel?.code || 'NONE'),
       },
     });
@@ -657,10 +711,76 @@ export class MemberService {
   }
 
   async listRechargePlans(enabledOnly = false) {
+    const now = new Date();
     return this.prisma.memberRechargePlan.findMany({
-      where: enabledOnly ? { enabled: true } : undefined,
+      where: enabledOnly
+        ? {
+            enabled: true,
+            AND: [
+              { OR: [{ effectiveFrom: null }, { effectiveFrom: { lte: now } }] },
+              { OR: [{ effectiveTo: null }, { effectiveTo: { gte: now } }] },
+            ],
+          }
+        : undefined,
       orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
     });
+  }
+
+  async listRechargeOrders(query: {
+    page?: number;
+    limit?: number;
+    keyword?: string;
+    status?: string;
+    channel?: string;
+    startAt?: string;
+    endAt?: string;
+    userId?: number;
+  } = {}) {
+    const page = Math.max(1, Number(query?.page || 1));
+    const limit = Math.min(100, Math.max(1, Number(query?.limit || 20)));
+    const where: Prisma.MemberRechargeOrderWhereInput = {};
+    const keyword = String(query?.keyword || '').trim();
+    if (keyword) {
+      where.OR = [
+        { rechargeNo: { contains: keyword } },
+        { transactionId: { contains: keyword } },
+        { remark: { contains: keyword } },
+        { user: { is: { name: { contains: keyword } } } },
+        { user: { is: { phone: { contains: keyword } } } },
+        { user: { is: { memberProfile: { is: { memberCode: { contains: keyword } } } } } },
+      ];
+    }
+    if (query?.status) where.status = String(query.status).toUpperCase() as any;
+    if (query?.channel) where.channel = String(query.channel).toUpperCase();
+    if (Number(query?.userId || 0) > 0) where.userId = Number(query.userId);
+    const createdAt: Prisma.DateTimeFilter = {};
+    if (query?.startAt) createdAt.gte = new Date(query.startAt);
+    if (query?.endAt) createdAt.lte = new Date(query.endAt);
+    if (createdAt.gte || createdAt.lte) where.createdAt = createdAt;
+
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.memberRechargeOrder.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              phone: true,
+              memberProfile: { select: { memberCode: true } },
+              walletAccount: { select: { availableBalance: true } },
+            },
+          },
+          plan: { select: { id: true, title: true } },
+        },
+      }),
+      this.prisma.memberRechargeOrder.count({ where }),
+    ]);
+
+    return { data, total, page, limit };
   }
 
   async listLevelConfigs() {
@@ -797,6 +917,9 @@ export class MemberService {
     const amount = this.round2(Number(data?.amount || 0));
     if (amount <= 0) throw new BadRequestException('充值金额必须大于 0');
     const couponBenefits = this.normalizeRechargeCouponBenefits(data?.couponBenefits);
+    const effectiveFrom = this.normalizeOptionalDate(data?.effectiveFrom);
+    const effectiveTo = this.normalizeOptionalDate(data?.effectiveTo);
+    this.assertRechargePlanPeriod(effectiveFrom, effectiveTo);
     return this.prisma.memberRechargePlan.create({
       data: {
         title: String(data?.title || `充${amount}元`).trim().slice(0, 64),
@@ -809,6 +932,8 @@ export class MemberService {
         badgeText: data?.badgeText ? String(data.badgeText).trim().slice(0, 32) : null,
         sortOrder: Math.floor(Number(data?.sortOrder ?? 100)),
         enabled: data?.enabled !== false,
+        effectiveFrom,
+        effectiveTo,
       },
     });
   }
@@ -819,6 +944,9 @@ export class MemberService {
     const couponBenefits = data?.couponBenefits !== undefined
       ? this.normalizeRechargeCouponBenefits(data?.couponBenefits)
       : undefined;
+    const effectiveFrom = data?.effectiveFrom !== undefined ? this.normalizeOptionalDate(data.effectiveFrom) : (exists as any).effectiveFrom;
+    const effectiveTo = data?.effectiveTo !== undefined ? this.normalizeOptionalDate(data.effectiveTo) : (exists as any).effectiveTo;
+    this.assertRechargePlanPeriod(effectiveFrom, effectiveTo);
     return this.prisma.memberRechargePlan.update({
       where: { id },
       data: {
@@ -832,6 +960,8 @@ export class MemberService {
         badgeText: data?.badgeText !== undefined ? (data.badgeText ? String(data.badgeText).trim().slice(0, 32) : null) : undefined,
         sortOrder: data?.sortOrder !== undefined ? Math.floor(Number(data.sortOrder || 100)) : undefined,
         enabled: data?.enabled !== undefined ? !!data.enabled : undefined,
+        effectiveFrom: data?.effectiveFrom !== undefined ? effectiveFrom : undefined,
+        effectiveTo: data?.effectiveTo !== undefined ? effectiveTo : undefined,
       },
     });
   }
@@ -847,7 +977,7 @@ export class MemberService {
     let plan: any = null;
     if (body?.planId) {
       plan = await this.prisma.memberRechargePlan.findUnique({ where: { id: Number(body.planId) } });
-      if (!plan || !plan.enabled) throw new BadRequestException('充值方案不存在或已停用');
+      this.assertRechargePlanUsable(plan);
     }
 
     const amount = this.round2(plan ? this.toAmount(plan.amount) : Number(body?.amount || 0));
@@ -1016,7 +1146,7 @@ export class MemberService {
     let plan: any = null;
     if (input?.planId) {
       plan = await this.prisma.memberRechargePlan.findUnique({ where: { id: Number(input.planId) } });
-      if (!plan || !plan.enabled) throw new BadRequestException('充值方案不存在或已停用');
+      this.assertRechargePlanUsable(plan);
     }
 
     const amount = this.round2(input?.amount !== undefined ? Number(input.amount) : this.toAmount(plan?.amount));

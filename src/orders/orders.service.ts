@@ -89,8 +89,36 @@ export class OrdersService {
         return remark;
     }
 
-    private buildMemberCode(userId: number) {
-        return `BM${String(userId).padStart(8, '0')}`;
+    private isPremiumMemberCode(code: string) {
+        return /(\d)\1{2,}/.test(String(code || ''));
+    }
+
+    private async generateMemberCodeTx(tx: any) {
+        const rows = await tx.memberProfile.findMany({
+            where: {
+                memberCode: {
+                    gte: '15000000',
+                    lte: '99999999',
+                },
+            },
+            select: { memberCode: true },
+            orderBy: { memberCode: 'desc' },
+            take: 200,
+        });
+        const existing = new Set(rows.map((row: any) => String(row.memberCode || '')));
+        const maxCode = rows
+            .map((row: any) => Number(row.memberCode))
+            .filter((value: number) => Number.isFinite(value))
+            .reduce((max: number, value: number) => Math.max(max, value), 14999999);
+
+        for (let next = Math.max(15000000, maxCode + 1); next <= 99999999; next += 1) {
+            const code = String(next).padStart(8, '0');
+            if (this.isPremiumMemberCode(code) || existing.has(code)) continue;
+            const conflict = await tx.memberProfile.findUnique({ where: { memberCode: code } });
+            if (!conflict) return code;
+        }
+
+        throw new BadRequestException('会员码号段已用尽，请调整会员码生成规则');
     }
 
     private getOrderRewardPointsByPaidAmount(paidAmount: number) {
@@ -192,7 +220,7 @@ export class OrdersService {
             await tx.memberProfile.create({
                 data: {
                     userId,
-                    memberCode: this.buildMemberCode(userId),
+                    memberCode: await this.generateMemberCodeTx(tx),
                     levelCode: nextLevelCode,
                     totalConsumeAmount: nextTotalConsumeAmount,
                     annualContribution: nextAnnualContribution,
@@ -1913,7 +1941,15 @@ export class OrdersService {
         const settlementAmount = this.toAmount2(settlementAmountInput);
         const effectiveSettlementAmount = settlementAmount > 0 ? settlementAmount : originalAmount;
         const giftedAmount = isGifted ? originalAmount : 0;
-        const isPaid = dto.isGifted ? false : Boolean(dto.isPaid);
+        const requestedPaymentChannel = String((dto as any)?.paymentChannel || '').trim().toUpperCase();
+        const useMemberBalancePayment =
+            scene === 'ADMIN' &&
+            !isGifted &&
+            requestedPaymentChannel === 'BALANCE';
+        if (useMemberBalancePayment && !customerUserId) {
+            throw new BadRequestException('使用会员储值支付时必须选择会员用户');
+        }
+        const isPaid = dto.isGifted ? false : (useMemberBalancePayment ? true : Boolean(dto.isPaid));
 
         // 统一优惠汇总（先接基础口径，便于后续无缝接优惠券/活动）
         const couponDiscountAmount = selectedUserCoupon
@@ -1930,15 +1966,12 @@ export class OrdersService {
             couponDiscountAmount + activityDiscountAmount + giftDiscountAmount + manualAdjustAmount,
         );
         const finalPayableAmount = this.toAmount2(Math.max(0, originalAmount - discountAmount));
-        const requestedPaymentChannel = String((dto as any)?.paymentChannel || '').trim().toUpperCase();
-        const useMemberBalancePayment =
-            scene === 'ADMIN' &&
-            !isGifted &&
-            isPaid &&
-            requestedPaymentChannel === 'BALANCE';
-        if (useMemberBalancePayment && !customerUserId) {
-            throw new BadRequestException('使用会员储值支付时必须选择会员用户');
-        }
+        const effectivePaidAmount = selectedUserCoupon
+            ? finalPayableAmount
+            : this.toAmount2(Number(dto.paidAmount ?? finalPayableAmount));
+        const effectiveSettlementAmountForCreate = selectedUserCoupon
+            ? finalPayableAmount
+            : effectiveSettlementAmount;
         const discountType = this.resolveDiscountType({
             couponDiscountAmount,
             activityDiscountAmount,
@@ -2003,8 +2036,8 @@ export class OrdersService {
                     autoSerial: serial,
                     // ✅ 赠送单不可强制清零金额，清零后结算会产生错误
                     receivableAmount: dto.receivableAmount,
-                    paidAmount: dto.paidAmount,
-                    settlementBaseAmount: effectiveSettlementAmount,
+                    paidAmount: effectivePaidAmount,
+                    settlementBaseAmount: effectiveSettlementAmountForCreate,
                     paymentTime: paidAt,
                     isPaid,
                     payStatus: isPaid ? 'SUCCESS' : 'PENDING',
@@ -2067,7 +2100,7 @@ export class OrdersService {
                         },
                     });
                     const availableBalance = this.toAmount2(Number(account?.availableBalance ?? 0));
-                    const consumeAmount = this.toAmount2(Number(dto.paidAmount ?? 0));
+                    const consumeAmount = this.toAmount2(Number(effectivePaidAmount ?? 0));
                     if (availableBalance < consumeAmount) {
                         throw new BadRequestException('会员储值余额不足');
                     }
@@ -2125,6 +2158,8 @@ export class OrdersService {
                             frozenAfter: Number(accountAfter?.frozenBalance ?? 0),
                         } as any,
                     });
+
+                    await this.applyOrderMemberBenefitsTx(tx, createdOrder);
                 } else {
                     payment = await tx.orderPayment.create({
                         data: {
@@ -2132,7 +2167,7 @@ export class OrdersService {
                             paymentNo: this.buildOrderPaymentNo(String(paymentChannel), Number(createdOrder.id)),
                             channel: String(paymentChannel),
                             status: OrderPayStatus.SUCCESS,
-                            amount: Number(dto.paidAmount ?? 0),
+                            amount: Number(effectivePaidAmount ?? 0),
                             currency: 'CNY',
                             paidAt: paidAt || new Date(),
                         },
@@ -2664,10 +2699,21 @@ export class OrdersService {
         // 6️⃣ 返回
         // ===========================
         const orderSourceLabel = await this.resolveOrderSourceLabel((order as any)?.orderSource);
+        const paymentChannel = String((order as any)?.latestPayment?.channel || '').trim().toUpperCase() || null;
+        const paymentChannelLabelMap: Record<string, string> = {
+            BALANCE: '会员储值',
+            MANUAL_SHOUQIANBA: '线下收款',
+            MINIAPP_WECHAT: '微信支付',
+            WECHAT: '微信支付',
+            TUTU_PLATFORM: '兔兔平台',
+            THIRD_PARTY_CHANNEL: '第三方渠道',
+        };
 
         return {
             ...order,
             orderSourceLabel,
+            paymentChannel,
+            paymentChannelLabel: paymentChannel ? (paymentChannelLabelMap[paymentChannel] || paymentChannel) : null,
 
             // ✅ 钱包真实收益概览（增强：IN/OUT/净额）
             walletEarningsSummary: {
