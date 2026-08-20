@@ -671,6 +671,7 @@ export class SystemConfigService implements OnModuleInit {
     const fallback = {
       consultText: '详询客服',
       qrCodeUrl: '',
+      wechatReviewMode: false,
       remark: '',
     };
     const config = await this.getJson(SystemConfigService.KEYS.MINIAPP_CUSTOMER_SERVICE_CONFIG, fallback);
