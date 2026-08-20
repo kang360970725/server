@@ -18,6 +18,7 @@ import { StaffRuleEngineService } from '../system-config/staff-rule-engine.servi
 export class AuthService {
   static readonly DEFAULT_ACCESS_TOKEN_EXPIRES_IN = '2h';
   static readonly MINI_ACCESS_TOKEN_EXPIRES_IN = '30d';
+  private static readonly STAFF_EXIT_DISABLE_AFTER_MS = 72 * 60 * 60 * 1000;
 
   constructor(
       private prisma: PrismaService,
@@ -31,6 +32,58 @@ export class AuthService {
       code,
       message,
     };
+  }
+
+  private getStaffExitBaseAt(user: any) {
+    const candidates = [user?.staffExitedAt, user?.updatedAt, user?.createdAt];
+    for (const item of candidates) {
+      const date = item ? new Date(item) : null;
+      if (date && !Number.isNaN(date.getTime())) return date;
+    }
+    return null;
+  }
+
+  private async enforceStaffExitLoginLock(user: any) {
+    if (!isStaffUser(user)) return { user, failure: null as any };
+    const employmentStatus = String(user?.staffEmploymentStatus || StaffEmploymentStatus.ACTIVE);
+    if (employmentStatus === StaffEmploymentStatus.BLACKLISTED) {
+      if (user.status !== UserStatus.DISABLED) {
+        await this.prisma.user.update({
+          where: { id: Number(user.id) },
+          data: {
+            status: UserStatus.DISABLED,
+            canWithdraw: false,
+            workStatus: PlayerWorkStatus.IDLE,
+            workOnlineExpiresAt: null,
+          },
+        });
+      }
+      return {
+        user: { ...user, status: UserStatus.DISABLED, canWithdraw: false, workStatus: PlayerWorkStatus.IDLE, workOnlineExpiresAt: null },
+        failure: this.buildLoginFailure('ACCOUNT_BLACKLISTED', '账号已被限制登录，请联系管理员'),
+      };
+    }
+    if (employmentStatus === StaffEmploymentStatus.EXITED) {
+      const baseAt = this.getStaffExitBaseAt(user);
+      const shouldDisable = !!baseAt && Date.now() - baseAt.getTime() >= AuthService.STAFF_EXIT_DISABLE_AFTER_MS;
+      if (shouldDisable && user.status !== UserStatus.DISABLED) {
+        await this.prisma.user.update({
+          where: { id: Number(user.id) },
+          data: {
+            status: UserStatus.DISABLED,
+            canWithdraw: false,
+            workStatus: PlayerWorkStatus.IDLE,
+            workOnlineExpiresAt: null,
+          },
+        });
+        return {
+          user: { ...user, status: UserStatus.DISABLED, canWithdraw: false, workStatus: PlayerWorkStatus.IDLE, workOnlineExpiresAt: null },
+          failure: this.buildLoginFailure('ACCOUNT_DISABLED', '账号已退店并超过72小时，已自动禁用，请联系管理员'),
+        };
+      }
+      return { user, failure: null as any };
+    }
+    return { user, failure: null as any };
   }
 
   private signAccessToken(
@@ -214,6 +267,9 @@ export class AuthService {
     if (user.status === UserStatus.DISABLED) {
       return this.buildLoginFailure('ACCOUNT_DISABLED', '账号已禁用，请联系管理员');
     }
+    const loginLock = await this.enforceStaffExitLoginLock(user);
+    user = loginLock.user;
+    if (loginLock.failure) return loginLock.failure;
     user = await this.autoFreezeDormantStaffIfNeeded(user);
     if (!options?.mini && isDispatchMonitoredStaff(user) && String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {
       const staffRuleConfig = await this.staffRuleEngineService.getConfig();

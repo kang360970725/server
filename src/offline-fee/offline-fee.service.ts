@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { Prisma, PrismaClient, StaffEmploymentStatus, UserType } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { SystemConfigService } from '../system-config/system-config.service';
@@ -36,6 +37,175 @@ export class OfflineFeeService {
     const start = new Date(Date.UTC(year, mon - 1, 1, 0, 0, 0));
     const end = new Date(Date.UTC(year, mon, 0, 0, 0, 0));
     return { start, end };
+  }
+
+  private parseDateTime(value: any, fieldName = '扣费时间') {
+    if (!value) return null;
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) throw new BadRequestException(`${fieldName}格式不正确`);
+    return date;
+  }
+
+  private normalizeManualAmount(value: any) {
+    const amount = this.toFixed2(Number(value || 0));
+    if (!Number.isFinite(amount) || amount <= 0) throw new BadRequestException('扣费金额必须大于 0');
+    return amount;
+  }
+
+  private normalizeMonth(month: any) {
+    const value = String(month || '').trim();
+    if (!/^\d{4}-\d{2}$/.test(value)) throw new BadRequestException('月份格式必须为 YYYY-MM');
+    const [, m] = value.split('-').map(Number);
+    if (m < 1 || m > 12) throw new BadRequestException('月份格式必须为 YYYY-MM');
+    return value;
+  }
+
+  private formatMonth(date: Date) {
+    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+  }
+
+  private getCurrentMonth(ref = new Date()) {
+    return this.formatMonth(ref);
+  }
+
+  private getMonthlyDueAt(monthInput: string) {
+    const [year, mon] = this.normalizeMonth(monthInput).split('-').map(Number);
+    return new Date(Date.UTC(year, mon - 1, 20, 0, 0, 0));
+  }
+
+  private isContractEffectiveForMonth(contract: any, month: string) {
+    if (String(contract?.status || '') !== 'ACTIVE') return false;
+    const normalizedMonth = this.normalizeMonth(month);
+    if (String(contract?.startMonth || '') > normalizedMonth) return false;
+    if (contract?.endMonth && String(contract.endMonth) < normalizedMonth) return false;
+    return true;
+  }
+
+  private async writeLogTx(db: PrismaTx, params: {
+    operatorId?: number;
+    action: string;
+    targetId?: number | null;
+    oldData?: any;
+    newData?: any;
+    remark?: string | null;
+  }) {
+    if (!params.operatorId) return;
+    await (db as any).userLog.create({
+      data: {
+        userId: params.operatorId,
+        action: params.action,
+        targetType: 'OFFLINE_FEE_BILL',
+        targetId: params.targetId ?? null,
+        oldData: params.oldData ?? undefined,
+        newData: params.newData ?? undefined,
+        remark: params.remark ?? null,
+      },
+    });
+  }
+
+  async listContracts(query: any) {
+    const page = Math.max(1, Number(query?.page ?? 1));
+    const limit = Math.min(100, Math.max(1, Number(query?.limit ?? 20)));
+    const where: any = {};
+    if (query?.status) where.status = String(query.status);
+    if (query?.userId) where.userId = Number(query.userId);
+    const [list, total] = await this.prisma.$transaction([
+      (this.prisma as any).offlineFeeContract.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: [{ id: 'desc' }],
+        include: { user: { select: { id: true, name: true, realName: true, phone: true, workMode: true, staffEmploymentStatus: true } } },
+      }),
+      (this.prisma as any).offlineFeeContract.count({ where }),
+    ]);
+    return { list, total, page, limit };
+  }
+
+  async createContract(dto: any, operatorId?: number) {
+    const userId = Number(dto?.userId);
+    const monthlyAmount = this.normalizeManualAmount(dto?.monthlyAmount);
+    const startMonth = this.normalizeMonth(dto?.startMonth);
+    const endMonth = dto?.endMonth ? this.normalizeMonth(dto.endMonth) : null;
+    if (!userId) throw new BadRequestException('请选择线下服务者');
+    if (endMonth && endMonth < startMonth) throw new BadRequestException('结束月份不能早于开始月份');
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, userType: true, workMode: true, staffEmploymentStatus: true },
+    });
+    if (!user) throw new NotFoundException('服务者不存在');
+    if (
+      user.userType !== UserType.STAFF ||
+      user.workMode !== 'OFFLINE' ||
+      !BILLABLE_STAFF_EMPLOYMENT_STATUSES.map(String).includes(String(user.staffEmploymentStatus))
+    ) {
+      throw new BadRequestException('仅支持为未退店、未拉黑的线下服务者配置线下管理费');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const contract = await (tx as any).offlineFeeContract.create({
+        data: {
+          userId,
+          monthlyAmount,
+          startMonth,
+          endMonth,
+          status: String(dto?.status || 'ACTIVE') === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE',
+          remark: String(dto?.remark || '').trim() || null,
+          createdBy: operatorId ?? null,
+        },
+        include: { user: { select: { id: true, name: true, realName: true, phone: true, workMode: true, staffEmploymentStatus: true } } },
+      });
+      if (operatorId) {
+        await (tx as any).userLog.create({
+          data: {
+            userId: operatorId,
+            action: 'OFFLINE_FEE_CONTRACT_CREATE',
+            targetType: 'OFFLINE_FEE_CONTRACT',
+            targetId: contract.id,
+            newData: contract,
+            remark: '新增线下管理费配置',
+          },
+        });
+      }
+      return contract;
+    });
+  }
+
+  async updateContract(dto: any, operatorId?: number) {
+    const id = Number(dto?.id);
+    if (!id) throw new BadRequestException('id 必填');
+    const existing = await (this.prisma as any).offlineFeeContract.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('线下管理费配置不存在');
+    const data: any = {};
+    if (dto?.monthlyAmount !== undefined) data.monthlyAmount = this.normalizeManualAmount(dto.monthlyAmount);
+    if (dto?.startMonth !== undefined) data.startMonth = this.normalizeMonth(dto.startMonth);
+    if (dto?.endMonth !== undefined) data.endMonth = dto.endMonth ? this.normalizeMonth(dto.endMonth) : null;
+    if (dto?.status !== undefined) data.status = String(dto.status) === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE';
+    if (dto?.remark !== undefined) data.remark = String(dto.remark || '').trim() || null;
+    const nextStart = data.startMonth ?? existing.startMonth;
+    const nextEnd = data.endMonth !== undefined ? data.endMonth : existing.endMonth;
+    if (nextEnd && nextEnd < nextStart) throw new BadRequestException('结束月份不能早于开始月份');
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await (tx as any).offlineFeeContract.update({
+        where: { id },
+        data,
+        include: { user: { select: { id: true, name: true, realName: true, phone: true, workMode: true, staffEmploymentStatus: true } } },
+      });
+      if (operatorId) {
+        await (tx as any).userLog.create({
+          data: {
+            userId: operatorId,
+            action: 'OFFLINE_FEE_CONTRACT_UPDATE',
+            targetType: 'OFFLINE_FEE_CONTRACT',
+            targetId: id,
+            oldData: existing,
+            newData: updated,
+            remark: '编辑线下管理费配置',
+          },
+        });
+      }
+      return updated;
+    });
   }
 
   private getPreviousMonth(refDate = new Date()) {
@@ -105,14 +275,97 @@ export class OfflineFeeService {
     return existing.generatedAt.getTime() - existing.createdAt.getTime() > 1000;
   }
 
-  async generateBillsForMonth(month: string) {
-    return this.prisma.$transaction(async (tx) => this.generateBillsForMonthTx(tx as any, month));
+  async generateBillsForMonth(month: string, operatorId?: number) {
+    return this.prisma.$transaction(async (tx) => this.generateBillsForMonthTx(tx as any, month, operatorId));
   }
 
-  private async generateBillsForMonthTx(db: PrismaTx, month: string) {
+  private async generateBillsForMonthTx(db: PrismaTx, month: string, operatorId?: number) {
+    const { start, end } = this.getMonthRange(month);
+    const dueAt = this.getMonthlyDueAt(month);
+    const contracts = await (db as any).offlineFeeContract.findMany({
+      where: {
+        status: 'ACTIVE',
+        user: {
+          userType: UserType.STAFF,
+          workMode: 'OFFLINE',
+          staffEmploymentStatus: { in: [...BILLABLE_STAFF_EMPLOYMENT_STATUSES] },
+        },
+      },
+    });
+
+    let affected = 0;
+
+    for (const contract of contracts) {
+      if (!this.isContractEffectiveForMonth(contract, month)) continue;
+      const amount = this.normalizeManualAmount(contract.monthlyAmount);
+      const existing = await (db as any).offlineFeeBill.findUnique({
+        where: { userId_billMonth: { userId: contract.userId, billMonth: month } },
+        select: { id: true, paidAmount: true, status: true },
+      });
+      if (existing && !['UNPAID', 'PARTIAL'].includes(String(existing.status || ''))) continue;
+      const paid = Number(existing?.paidAmount || 0);
+      const finalRemaining = this.toFixed2(Math.max(0, amount - paid));
+      const finalStatus = finalRemaining <= 0 ? 'PAID' : paid > 0 ? 'PARTIAL' : 'UNPAID';
+      const bill = existing
+        ? await (db as any).offlineFeeBill.update({
+          where: { id: existing.id },
+          data: {
+            periodStart: start,
+            periodEnd: end,
+            performanceBaseAmount: amount,
+            rate: 1,
+            minAmount: 0,
+            capAmount: amount,
+            shouldPayAmount: amount,
+            remainingAmount: finalRemaining,
+            status: finalStatus,
+            dueAt,
+            remark: String(contract.remark || '').trim() || '线下管理费',
+            generatedAt: new Date(),
+          },
+        })
+        : await (db as any).offlineFeeBill.create({
+          data: {
+            userId: contract.userId,
+            billMonth: month,
+            periodStart: start,
+            periodEnd: end,
+            performanceBaseAmount: amount,
+            rate: 1,
+            minAmount: 0,
+            capAmount: amount,
+            shouldPayAmount: amount,
+            paidAmount: 0,
+            remainingAmount: amount,
+            status: 'UNPAID',
+            dueAt,
+            remark: String(contract.remark || '').trim() || '线下管理费',
+            createdBy: operatorId ?? null,
+            generatedAt: new Date(),
+          },
+        });
+      await this.writeLogTx(db, {
+        operatorId,
+        action: existing ? 'OFFLINE_FEE_BILL_GENERATE_UPDATE' : 'OFFLINE_FEE_BILL_GENERATE_CREATE',
+        targetId: bill.id,
+        oldData: existing,
+        newData: bill,
+        remark: `按配置生成线下管理费账单 ${month}`,
+      });
+      affected += 1;
+    }
+
+    return { month, affected };
+  }
+
+  @Cron('0 0 20 * * *', { timeZone: 'Asia/Shanghai' })
+  async cronGenerateCurrentMonthBills() {
+    await this.generateBillsForMonth(this.getCurrentMonth());
+  }
+
+  private async legacyGenerateBillsForMonthTx(db: PrismaTx, month: string) {
     const { start, end } = this.getMonthRange(month);
     const cfg = await this.getFeeConfig(db);
-
     const offlineUsers = await (db as any).user.findMany({
       where: {
         userType: UserType.STAFF,
@@ -122,70 +375,35 @@ export class OfflineFeeService {
       },
       select: { id: true, offlineJoinedAt: true },
     });
-
     let affected = 0;
-
     for (const user of offlineUsers) {
       const perfAgg = await (db as any).performanceRecord.aggregate({
-        where: {
-          ownerUserId: user.id,
-          ownerRoleType: 'PLAYER',
-          status: 'EFFECTIVE',
-          statsDate: { gte: start, lte: end },
-        },
+        where: { ownerUserId: user.id, ownerRoleType: 'PLAYER', status: 'EFFECTIVE', statsDate: { gte: start, lte: end } },
         _sum: { grossPerformanceAmount: true },
       });
-
       const gross = Number(perfAgg?._sum?.grossPerformanceAmount || 0);
       const ratio = this.calcJoinedRatio(user.offlineJoinedAt, start, end);
       const baseAmount = this.toFixed2(gross * ratio);
-
-      const existing = await (db as any).offlineFeeBill.findUnique({
-        where: { userId_billMonth: { userId: user.id, billMonth: month } },
-        select: {
-          id: true,
-          paidAmount: true,
-          performanceBaseAmount: true,
-          rate: true,
-          minAmount: true,
-          capAmount: true,
-          enforceFullPayment: true,
-          lastRemindAt: true,
-          createdAt: true,
-          generatedAt: true,
-        },
-      });
-
-      const existingBaseAmount = this.toFixed2(Number(existing?.performanceBaseAmount || 0));
-      const keepManualBase = this.isManualAdjustedBill(existing) && existingBaseAmount > baseAmount;
-      const finalBaseAmount = keepManualBase ? existingBaseAmount : baseAmount;
-      const finalRate = this.toFixed2(Number(existing?.rate ?? cfg.rate));
-      const finalMinAmount = this.toFixed2(Number(existing?.minAmount ?? cfg.minAmount));
-      const finalCapAmount = this.toFixed2(Number(existing?.capAmount ?? cfg.capAmount));
-      const paid = Number(existing?.paidAmount || 0);
-      const finalShouldPay = this.calcShouldPay(finalBaseAmount, finalRate, finalMinAmount, finalCapAmount);
-      const finalRemaining = this.toFixed2(Math.max(0, finalShouldPay - paid));
-      const finalStatus = finalRemaining <= 0 ? 'PAID' : paid > 0 ? 'PARTIAL' : 'UNPAID';
-
+      const finalShouldPay = this.calcShouldPay(baseAmount, cfg.rate, cfg.minAmount, cfg.capAmount);
       await (db as any).offlineFeeBill.upsert({
         where: { userId_billMonth: { userId: user.id, billMonth: month } },
         update: {
           periodStart: start,
           periodEnd: end,
-          performanceBaseAmount: finalBaseAmount,
-          rate: finalRate,
-          minAmount: finalMinAmount,
-          capAmount: finalCapAmount,
+          performanceBaseAmount: baseAmount,
+          rate: cfg.rate,
+          minAmount: cfg.minAmount,
+          capAmount: cfg.capAmount,
           shouldPayAmount: finalShouldPay,
-          remainingAmount: finalRemaining,
-          status: finalStatus,
+          remainingAmount: finalShouldPay,
+          status: finalShouldPay > 0 ? 'UNPAID' : 'PAID',
         },
         create: {
           userId: user.id,
           billMonth: month,
           periodStart: start,
           periodEnd: end,
-          performanceBaseAmount: finalBaseAmount,
+          performanceBaseAmount: baseAmount,
           rate: cfg.rate,
           minAmount: cfg.minAmount,
           capAmount: cfg.capAmount,
@@ -196,10 +414,8 @@ export class OfflineFeeService {
           generatedAt: new Date(),
         },
       });
-
       affected += 1;
     }
-
     return { month, affected };
   }
 
@@ -213,8 +429,8 @@ export class OfflineFeeService {
     if (query.userId) where.userId = Number(query.userId);
     if (query.onlyOutstanding) where.remainingAmount = { gt: 0 };
 
-    const [list, total] = await this.prisma.$transaction([
-      this.prisma.offlineFeeBill.findMany({
+    const { rows, total, stats } = await this.prisma.$transaction(async (tx) => {
+      const scopedRows = await (tx as any).offlineFeeBill.findMany({
         where,
         skip: (page - 1) * limit,
         take: limit,
@@ -223,12 +439,58 @@ export class OfflineFeeService {
           user: {
             select: { id: true, name: true, phone: true, workMode: true, offlineJoinedAt: true },
           },
+          payments: {
+            select: { amount: true, source: true },
+          },
         },
-      }),
-      this.prisma.offlineFeeBill.count({ where }),
-    ]);
+      });
+      const scopedTotal = await (tx as any).offlineFeeBill.count({ where });
+      const scopedStats = await this.getBillStatsTx(tx as any, where);
+      return { rows: scopedRows, total: scopedTotal, stats: scopedStats };
+    });
 
-    return { list, total, page, limit };
+    const list = rows.map((row: any) => this.attachPaymentStats(row));
+    return { list, total, page, limit, stats };
+  }
+
+  private attachPaymentStats(row: any) {
+    const payments = Array.isArray(row?.payments) ? row.payments : [];
+    const manualPaidAmount = this.toFixed2(payments
+      .filter((p: any) => ['MANUAL', 'WITHDRAWAL'].includes(String(p.source || '')))
+      .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0));
+    const externalPaidAmount = this.toFixed2(payments
+      .filter((p: any) => String(p.source || '') === 'EXTERNAL')
+      .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0));
+    const waivedAmount = this.toFixed2(payments
+      .filter((p: any) => String(p.source || '') === 'WAIVER')
+      .reduce((sum: number, p: any) => sum + Number(p.amount || 0), 0));
+    return {
+      ...row,
+      manualPaidAmount,
+      externalPaidAmount,
+      waivedAmount,
+      payments: undefined,
+    };
+  }
+
+  private async getBillStatsTx(db: PrismaTx, where: any) {
+    const rows = await (db as any).offlineFeeBill.findMany({
+      where,
+      select: { id: true, shouldPayAmount: true, remainingAmount: true, payments: { select: { amount: true, source: true } } },
+    });
+    const initial = { billAmount: 0, remainingAmount: 0, chargedAmount: 0, externalPaidAmount: 0, waivedAmount: 0 };
+    return rows.reduce((acc: any, row: any) => {
+      acc.billAmount = this.toFixed2(acc.billAmount + Number(row.shouldPayAmount || 0));
+      acc.remainingAmount = this.toFixed2(acc.remainingAmount + Number(row.remainingAmount || 0));
+      for (const p of Array.isArray(row.payments) ? row.payments : []) {
+        const source = String(p.source || '');
+        const amount = Number(p.amount || 0);
+        if (source === 'EXTERNAL') acc.externalPaidAmount = this.toFixed2(acc.externalPaidAmount + amount);
+        else if (source === 'WAIVER') acc.waivedAmount = this.toFixed2(acc.waivedAmount + amount);
+        else acc.chargedAmount = this.toFixed2(acc.chargedAmount + amount);
+      }
+      return acc;
+    }, initial);
   }
 
   async listOfflineStaffOptions(keyword?: string) {
@@ -275,11 +537,13 @@ export class OfflineFeeService {
     }));
   }
 
-  async manualCreateBill(dto: ManualCreateOfflineFeeBillDto) {
+  async manualCreateBill(dto: ManualCreateOfflineFeeBillDto, operatorId?: number) {
     const userId = Number(dto.userId);
     const month = String(dto.month || '').trim();
-    const performanceBaseAmount = this.toFixed2(Math.max(0, Number(dto.performanceBaseAmount || 0)));
+    const amount = this.normalizeManualAmount(dto.amount ?? dto.performanceBaseAmount);
     const { start, end } = this.getMonthRange(month);
+    const dueAt = this.parseDateTime(dto.dueAt) || end;
+    const remark = String(dto.remark || '').trim() || null;
 
     return this.prisma.$transaction(async (tx) => {
       const user = await (tx as any).user.findUnique({
@@ -314,16 +578,13 @@ export class OfflineFeeService {
         }
       }
 
-      const cfg = await this.getFeeConfig(tx as any);
-      const shouldPay = this.calcShouldPay(performanceBaseAmount, cfg.rate, cfg.minAmount, cfg.capAmount);
-
       const existing = await (tx as any).offlineFeeBill.findUnique({
         where: { userId_billMonth: { userId, billMonth: month } },
-        select: { id: true, paidAmount: true },
+        select: { id: true, paidAmount: true, shouldPayAmount: true, remainingAmount: true, status: true, dueAt: true, remark: true },
       });
 
       const paid = Number(existing?.paidAmount || 0);
-      const remaining = this.toFixed2(Math.max(0, shouldPay - paid));
+      const remaining = this.toFixed2(Math.max(0, amount - paid));
       const status = remaining <= 0 ? 'PAID' : paid > 0 ? 'PARTIAL' : 'UNPAID';
 
       const bill = await (tx as any).offlineFeeBill.upsert({
@@ -331,13 +592,15 @@ export class OfflineFeeService {
         update: {
           periodStart: start,
           periodEnd: end,
-          performanceBaseAmount,
-          rate: cfg.rate,
-          minAmount: cfg.minAmount,
-          capAmount: cfg.capAmount,
-          shouldPayAmount: shouldPay,
+          performanceBaseAmount: amount,
+          rate: 1,
+          minAmount: 0,
+          capAmount: amount,
+          shouldPayAmount: amount,
           remainingAmount: remaining,
           status,
+          dueAt,
+          remark,
           generatedAt: new Date(),
         },
         create: {
@@ -345,76 +608,113 @@ export class OfflineFeeService {
           billMonth: month,
           periodStart: start,
           periodEnd: end,
-          performanceBaseAmount,
-          rate: cfg.rate,
-          minAmount: cfg.minAmount,
-          capAmount: cfg.capAmount,
-          shouldPayAmount: shouldPay,
+          performanceBaseAmount: amount,
+          rate: 1,
+          minAmount: 0,
+          capAmount: amount,
+          shouldPayAmount: amount,
           paidAmount: 0,
-          remainingAmount: shouldPay,
-          status: shouldPay > 0 ? 'UNPAID' : 'PAID',
+          remainingAmount: amount,
+          status: 'UNPAID',
+          dueAt,
+          remark,
+          createdBy: operatorId ?? null,
           generatedAt: new Date(),
         },
       });
 
+      await this.writeLogTx(tx as any, {
+        operatorId,
+        action: existing ? 'OFFLINE_FEE_BILL_UPDATE' : 'OFFLINE_FEE_BILL_CREATE',
+        targetId: bill.id,
+        oldData: existing,
+        newData: bill,
+        remark: existing ? '更新线下费用账单配置' : '手动录入线下费用账单',
+      });
       return bill;
     });
   }
 
-  async setEnforceFullPayment(billId: number, enforceFullPayment: boolean) {
+  async setEnforceFullPayment(billId: number, enforceFullPayment: boolean, operatorId?: number) {
     const bill = await this.prisma.offlineFeeBill.findUnique({ where: { id: billId } });
     if (!bill) throw new NotFoundException('线下费用账单不存在');
 
-    return this.prisma.offlineFeeBill.update({
-      where: { id: billId },
-      data: { enforceFullPayment },
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await (tx as any).offlineFeeBill.update({
+        where: { id: billId },
+        data: { enforceFullPayment },
+      });
+      await this.writeLogTx(tx as any, {
+        operatorId,
+        action: 'OFFLINE_FEE_BILL_ENFORCE_UPDATE',
+        targetId: billId,
+        oldData: { enforceFullPayment: bill.enforceFullPayment },
+        newData: { enforceFullPayment },
+        remark: '更新线下费用账单强制全额状态',
+      });
+      return updated;
     });
   }
 
-  async remindBill(billId: number) {
+  async remindBill(billId: number, operatorId?: number) {
     const bill = await this.prisma.offlineFeeBill.findUnique({ where: { id: billId } });
     if (!bill) throw new NotFoundException('线下费用账单不存在');
 
-    return this.prisma.offlineFeeBill.update({
-      where: { id: billId },
-      data: { lastRemindAt: new Date() },
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await (tx as any).offlineFeeBill.update({
+        where: { id: billId },
+        data: { lastRemindAt: new Date() },
+      });
+      await this.writeLogTx(tx as any, {
+        operatorId,
+        action: 'OFFLINE_FEE_BILL_REMIND',
+        targetId: billId,
+        oldData: { lastRemindAt: bill.lastRemindAt },
+        newData: { lastRemindAt: updated.lastRemindAt },
+        remark: '记录线下费用账单催收',
+      });
+      return updated;
     });
   }
 
-  async updateBill(dto: UpdateOfflineFeeBillDto) {
+  async updateBill(dto: UpdateOfflineFeeBillDto, operatorId?: number) {
     const billId = Number(dto.billId);
-    const performanceBaseAmount = this.toFixed2(Math.max(0, Number(dto.performanceBaseAmount || 0)));
+    const amount = this.normalizeManualAmount(dto.amount ?? dto.performanceBaseAmount);
+    const dueAt = dto.dueAt !== undefined ? this.parseDateTime(dto.dueAt) : undefined;
+    const remark = dto.remark !== undefined ? (String(dto.remark || '').trim() || null) : undefined;
 
     return this.prisma.$transaction(async (tx) => {
       const bill = await (tx as any).offlineFeeBill.findUnique({ where: { id: billId } });
       if (!bill) throw new NotFoundException('线下费用账单不存在');
 
-      // 手动编辑业绩时，按“最新基础配置”重算（满足运营口径调整诉求）
-      const cfg = await this.getFeeConfig(tx as any);
-      const shouldPay = this.calcShouldPay(
-        performanceBaseAmount,
-        cfg.rate,
-        cfg.minAmount,
-        cfg.capAmount,
-      );
-
       const paid = this.toFixed2(Number(bill.paidAmount || 0));
-      const remaining = this.toFixed2(Math.max(0, shouldPay - paid));
+      const remaining = this.toFixed2(Math.max(0, amount - paid));
       const status = remaining <= 0 ? 'PAID' : paid > 0 ? 'PARTIAL' : 'UNPAID';
 
-      return (tx as any).offlineFeeBill.update({
+      const updated = await (tx as any).offlineFeeBill.update({
         where: { id: billId },
         data: {
-          performanceBaseAmount,
-          rate: cfg.rate,
-          minAmount: cfg.minAmount,
-          capAmount: cfg.capAmount,
-          shouldPayAmount: shouldPay,
+          performanceBaseAmount: amount,
+          rate: 1,
+          minAmount: 0,
+          capAmount: amount,
+          shouldPayAmount: amount,
           remainingAmount: remaining,
           status,
+          ...(dueAt !== undefined ? { dueAt } : {}),
+          ...(remark !== undefined ? { remark } : {}),
           generatedAt: new Date(),
         },
       });
+      await this.writeLogTx(tx as any, {
+        operatorId,
+        action: 'OFFLINE_FEE_BILL_UPDATE',
+        targetId: billId,
+        oldData: bill,
+        newData: updated,
+        remark: '编辑线下费用账单配置',
+      });
+      return updated;
     });
   }
 
@@ -425,21 +725,42 @@ export class OfflineFeeService {
       const bill = await (tx as any).offlineFeeBill.findUnique({ where: { id: billId } });
       if (!bill) throw new NotFoundException('线下费用账单不存在');
 
-      const paidAmount = this.toFixed2(Number(bill.paidAmount || 0));
-      if (paidAmount > 0) {
-        throw new BadRequestException('账单存在已缴金额，请先回退已缴金额后再废除');
+      const remain = this.toFixed2(Number(bill.remainingAmount || 0));
+      const remark = String(params.remark || '').trim() || '管理员减免线下费用';
+      if (remain > 0) {
+        await (tx as any).offlineFeeBillPayment.create({
+          data: {
+            billId: bill.id,
+            userId: bill.userId,
+            amount: remain,
+            source: 'WAIVER',
+            operatorId: params.operatorId ?? null,
+            remark,
+          },
+        });
       }
 
-      return (tx as any).offlineFeeBill.update({
+      const updated = await (tx as any).offlineFeeBill.update({
         where: { id: billId },
         data: {
+          paidAmount: this.toFixed2(Number(bill.paidAmount || 0) + remain),
           remainingAmount: 0,
           status: 'WAIVED',
           enforceFullPayment: false,
           lastRemindAt: null,
           generatedAt: new Date(),
+          remark,
         },
       });
+      await this.writeLogTx(tx as any, {
+        operatorId: params.operatorId,
+        action: 'OFFLINE_FEE_BILL_WAIVE',
+        targetId: billId,
+        oldData: bill,
+        newData: updated,
+        remark,
+      });
+      return updated;
     });
   }
 
@@ -467,78 +788,76 @@ export class OfflineFeeService {
       }
 
       await (tx as any).offlineFeeBill.delete({ where: { id: billId } });
+      await this.writeLogTx(tx as any, {
+        operatorId: params.operatorId,
+        action: 'OFFLINE_FEE_BILL_DELETE',
+        targetId: billId,
+        oldData: bill,
+        remark: '删除已废除线下费用账单',
+      });
       return { success: true, billId };
     });
   }
 
-  async refundBillPayments(params: { billId: number; operatorId?: number; remark?: string }) {
-    const billId = Number(params.billId);
-    const remark = String(params.remark || '').trim() || '线下费用误扣回退';
+  async batchDeleteBills(params: { billIds: number[]; operatorId?: number }) {
+    const billIds = Array.from(new Set(
+      (Array.isArray(params.billIds) ? params.billIds : [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isInteger(id) && id > 0),
+    ));
+
+    if (billIds.length === 0) {
+      throw new BadRequestException('请选择需要删除的线下费用账单');
+    }
+    if (billIds.length > 200) {
+      throw new BadRequestException('单次最多删除 200 条线下费用账单');
+    }
 
     return this.prisma.$transaction(async (tx) => {
-      const bill = await (tx as any).offlineFeeBill.findUnique({
-        where: { id: billId },
+      const bills = await (tx as any).offlineFeeBill.findMany({
+        where: { id: { in: billIds } },
         include: {
-          payments: {
-            select: { id: true, amount: true },
-          },
+          user: { select: { id: true, name: true, phone: true } },
+          payments: { select: { id: true } },
         },
       });
-      if (!bill) throw new NotFoundException('线下费用账单不存在');
 
-      const refundAmount = this.toFixed2(
-        (Array.isArray(bill.payments) ? bill.payments : []).reduce(
-          (sum: number, item: any) => sum + Number(item.amount || 0),
-          0,
-        ),
-      );
-      if (refundAmount <= 0) {
-        throw new BadRequestException('当前账单不存在可回退的已缴金额');
+      const foundIds = new Set<number>(bills.map((bill: any) => Number(bill.id)));
+      const notFoundBillIds = billIds.filter((id) => !foundIds.has(id));
+      const blockedBills = bills.filter((bill: any) => Array.isArray(bill.payments) && bill.payments.length > 0);
+      const blockedBillIds = blockedBills.map((bill: any) => Number(bill.id));
+      const deletableBills = bills.filter((bill: any) => !(Array.isArray(bill.payments) && bill.payments.length > 0));
+      const deletableIds = deletableBills.map((bill: any) => Number(bill.id));
+
+      if (deletableIds.length > 0) {
+        await (tx as any).offlineFeeBill.deleteMany({
+          where: { id: { in: deletableIds } },
+        });
+
+        for (const bill of deletableBills) {
+          await this.writeLogTx(tx as any, {
+            operatorId: params.operatorId,
+            action: 'OFFLINE_FEE_BILL_BATCH_DELETE',
+            targetId: Number(bill.id),
+            oldData: bill,
+            remark: '批量删除历史错误线下费用账单',
+          });
+        }
       }
 
-      const account = await (tx as any).walletAccount.upsert({
-        where: { userId: bill.userId },
-        create: {
-          userId: bill.userId,
-          availableBalance: refundAmount,
-          frozenBalance: 0,
-          earningFrozenBalance: 0,
-          withdrawFrozenBalance: 0,
-          depositBalance: 0,
-        },
-        update: {
-          availableBalance: { increment: refundAmount },
-        },
-        select: {
-          availableBalance: true,
-          frozenBalance: true,
-        },
-      });
-
-      await (tx as any).walletTransaction.create({
-        data: {
-          userId: bill.userId,
-          direction: 'IN',
-          bizType: 'OFFLINE_FEE_PAYMENT',
-          amount: refundAmount,
-          status: 'AVAILABLE',
-          sourceType: 'OFFLINE_FEE_REFUND',
-          sourceId: bill.id,
-          availableAfter: this.toFixed2(Number(account.availableBalance || 0)),
-          frozenAfter: this.toFixed2(Number(account.frozenBalance || 0)),
-        },
-      });
-
-      await (tx as any).offlineFeeBillPayment.deleteMany({
-        where: { billId: bill.id },
-      });
-
-      return this.refreshBillPaymentStatusTx(tx as any, bill.id);
+      return {
+        success: true,
+        requested: billIds.length,
+        deleted: deletableIds.length,
+        skipped: blockedBillIds.length + notFoundBillIds.length,
+        deletedBillIds: deletableIds,
+        blockedBillIds,
+        notFoundBillIds,
+      };
     });
   }
 
   private async getLastMonthOutstandingBillTx(db: PrismaTx, userId: number, now = new Date()) {
-    const billMonth = this.getPreviousMonth(now);
     const user = await (db as any).user.findUnique({
       where: { id: userId },
       select: {
@@ -555,9 +874,19 @@ export class OfflineFeeService {
       return null;
     }
 
-    // 线下费用账单改为管理员手动生成；提现前只检查已存在账单，不再自动补生成。
-    return (db as any).offlineFeeBill.findUnique({
-      where: { userId_billMonth: { userId, billMonth } },
+    // 与设备租赁一致：已有未结清账单且进入到期前 24 小时，才影响提现。
+    const withdrawalGuardAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    return (db as any).offlineFeeBill.findFirst({
+      where: {
+        userId,
+        remainingAmount: { gt: 0 },
+        status: { in: ['UNPAID', 'PARTIAL'] },
+        OR: [
+          { dueAt: { lte: withdrawalGuardAt } },
+          { dueAt: null },
+        ],
+      },
+      orderBy: [{ dueAt: 'asc' }, { id: 'asc' }],
     });
   }
 
@@ -661,7 +990,55 @@ export class OfflineFeeService {
         },
       });
 
-      return this.refreshBillPaymentStatusTx(tx as any, bill.id);
+      const updated = await this.refreshBillPaymentStatusTx(tx as any, bill.id);
+      await this.writeLogTx(tx as any, {
+        operatorId,
+        action: 'OFFLINE_FEE_BILL_MANUAL_PAY',
+        targetId: bill.id,
+        oldData: bill,
+        newData: { payment, bill: updated },
+        remark: remark || '手动缴纳线下费用',
+      });
+      return updated;
+    });
+  }
+
+  async confirmPaidByOtherChannel(params: {
+    billId: number;
+    amount?: number;
+    operatorId?: number;
+    remark?: string;
+  }) {
+    const billId = Number(params.billId);
+    const normalizedRemark = String(params.remark || '').trim();
+    if (!normalizedRemark) throw new BadRequestException('请填写其他渠道收款说明');
+    return this.prisma.$transaction(async (tx) => {
+      const bill = await (tx as any).offlineFeeBill.findUnique({ where: { id: billId } });
+      if (!bill) throw new NotFoundException('线下费用账单不存在');
+      const remain = Number(bill.remainingAmount || 0);
+      if (remain <= 0) throw new BadRequestException('该账单已结清');
+      const payAmount = this.toFixed2(Math.min(remain, Number(params.amount || remain)));
+      if (payAmount <= 0) throw new BadRequestException('收款金额必须大于 0');
+      const payment = await (tx as any).offlineFeeBillPayment.create({
+        data: {
+          billId: bill.id,
+          userId: bill.userId,
+          amount: payAmount,
+          source: 'EXTERNAL',
+          operatorId: params.operatorId ?? null,
+          remark: normalizedRemark,
+        },
+      });
+      const updated = await this.refreshBillPaymentStatusTx(tx as any, bill.id);
+      await this.writeLogTx(tx as any, {
+        operatorId: params.operatorId,
+        action: 'OFFLINE_FEE_BILL_EXTERNAL_PAY',
+        targetId: bill.id,
+        oldData: bill,
+        newData: { payment, bill: updated },
+        remark: normalizedRemark,
+      });
+      return updated;
     });
   }
 

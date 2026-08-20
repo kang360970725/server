@@ -30,8 +30,9 @@ export class EquipmentRentalFeeController {
   @Post('contracts/update')
   @UseGuards(PermissionsGuard)
   @Permissions(FINANCE_EQUIPMENT_RENTAL_FEES_PAGE, FINANCE_RECORDS_PAGE)
-  updateContract(@Body() body: any) {
-    return this.service.updateContract(body);
+  updateContract(@Body() body: any, @Req() req: any) {
+    const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.updateContract(body, Number.isFinite(operatorId) ? operatorId : undefined);
   }
 
   @Post('bills/list')
@@ -44,15 +45,17 @@ export class EquipmentRentalFeeController {
   @Post('bills/generate')
   @UseGuards(PermissionsGuard)
   @Permissions(FINANCE_EQUIPMENT_RENTAL_FEES_PAGE, FINANCE_RECORDS_PAGE)
-  generateBills(@Body() body: any) {
-    return this.service.generateBillsForMonth(body?.month);
+  generateBills(@Body() body: any, @Req() req: any) {
+    const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.generateBillsForMonth(body?.month, Number.isFinite(operatorId) ? operatorId : undefined);
   }
 
   @Post('bills/waive')
   @UseGuards(PermissionsGuard)
   @Permissions(FINANCE_EQUIPMENT_RENTAL_FEES_PAGE, FINANCE_RECORDS_PAGE)
-  waiveBill(@Body() body: any) {
-    return this.service.waiveBill(Number(body?.billId), body?.remark);
+  waiveBill(@Body() body: any, @Req() req: any) {
+    const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.waiveBill(Number(body?.billId), body?.remark, Number.isFinite(operatorId) ? operatorId : undefined);
   }
 
   @Post('bills/pay')

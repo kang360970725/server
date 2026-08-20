@@ -1,12 +1,25 @@
-import { IsNumber, Min } from 'class-validator';
+import { IsNumber, IsOptional, IsString, Min } from 'class-validator';
 
 export class UpdateOfflineFeeBillDto {
   @IsNumber()
   billId: number;
 
-  // 仅允许调整业绩基数，其他金额字段由系统自动重算，避免数据口径不一致
+  // 兼容旧字段；新线下费用账单按 amount 直接作为扣费金额。
+  @IsOptional()
   @IsNumber()
   @Min(0)
-  performanceBaseAmount: number;
-}
+  performanceBaseAmount?: number;
 
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  amount?: number;
+
+  @IsOptional()
+  @IsString()
+  dueAt?: string;
+
+  @IsOptional()
+  @IsString()
+  remark?: string;
+}

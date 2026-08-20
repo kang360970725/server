@@ -1,4 +1,4 @@
-import { IsNumber, IsString, Min } from 'class-validator';
+import { IsNumber, IsOptional, IsString, Min } from 'class-validator';
 
 export class ManualCreateOfflineFeeBillDto {
   @IsNumber()
@@ -9,6 +9,18 @@ export class ManualCreateOfflineFeeBillDto {
 
   @IsNumber()
   @Min(0)
-  performanceBaseAmount: number;
-}
+  performanceBaseAmount?: number;
 
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  amount?: number;
+
+  @IsOptional()
+  @IsString()
+  dueAt?: string;
+
+  @IsOptional()
+  @IsString()
+  remark?: string;
+}

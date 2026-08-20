@@ -1351,6 +1351,7 @@ export class UsersService {
         where: { id },
         data: {
           staffEmploymentStatus: nextEmploymentStatus,
+          ...(addToBlacklist ? { status: UserStatus.DISABLED } : {}),
           staffCooldownUntil: addToBlacklist ? null : this.buildStaffCooldownUntil(now, Number(preview.quitCoolingDays || this.staffExitCooldownDays)),
           staffExitedAt: now,
           workMode: 'ONLINE',
@@ -1524,6 +1525,7 @@ export class UsersService {
         where: { id },
         data: {
           staffEmploymentStatus: nextEmploymentStatus,
+          ...(addToBlacklist ? { status: UserStatus.DISABLED } : {}),
           staffCooldownUntil: addToBlacklist ? null : this.buildStaffCooldownUntil(now),
           staffExitedAt: now,
           workMode: 'ONLINE',

@@ -2,7 +2,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
 import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
-import { PlayerWorkStatus, StaffEmploymentStatus } from '@prisma/client';
+import { PlayerWorkStatus, StaffEmploymentStatus, UserStatus } from '@prisma/client';
 import { isDispatchMonitoredStaff, isStaffUser } from '../common/utils/staff-role-scope.util';
 import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
 
@@ -10,6 +10,7 @@ import { StaffRuleEngineService } from '../system-config/staff-rule-engine.servi
 export class JwtStrategy extends PassportStrategy(Strategy) {
   // 临时策略：仅保留手动离线/登录上线，不再因租约过期自动离线。
   private readonly autoOfflineDisabled = true;
+  private readonly staffExitDisableAfterMs = 72 * 60 * 60 * 1000;
 
   constructor(
     private prisma: PrismaService,
@@ -25,6 +26,52 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       // ✅ 统一从 env 取，避免写死
       secretOrKey: process.env.JWT_SECRET || 'your-secret-key',
     });
+  }
+
+  private getStaffExitBaseAt(user: any) {
+    const candidates = [user?.staffExitedAt, user?.updatedAt, user?.createdAt];
+    for (const item of candidates) {
+      const date = item ? new Date(item) : null;
+      if (date && !Number.isNaN(date.getTime())) return date;
+    }
+    return null;
+  }
+
+  private async enforceStaffExitAccessLock(user: any) {
+    if (!isStaffUser(user)) return user;
+    const employmentStatus = String(user?.staffEmploymentStatus || StaffEmploymentStatus.ACTIVE);
+    if (employmentStatus === StaffEmploymentStatus.BLACKLISTED) {
+      if (user.status !== UserStatus.DISABLED) {
+        await this.prisma.user.update({
+          where: { id: Number(user.id) },
+          data: {
+            status: UserStatus.DISABLED,
+            canWithdraw: false,
+            workStatus: PlayerWorkStatus.IDLE,
+            workOnlineExpiresAt: null,
+          },
+        });
+      }
+      throw new ForbiddenException('账号已被限制登录，请联系管理员');
+    }
+    if (employmentStatus === StaffEmploymentStatus.EXITED) {
+      const baseAt = this.getStaffExitBaseAt(user);
+      const shouldDisable = !!baseAt && Date.now() - baseAt.getTime() >= this.staffExitDisableAfterMs;
+      if (shouldDisable && user.status !== UserStatus.DISABLED) {
+        await this.prisma.user.update({
+          where: { id: Number(user.id) },
+          data: {
+            status: UserStatus.DISABLED,
+            canWithdraw: false,
+            workStatus: PlayerWorkStatus.IDLE,
+            workOnlineExpiresAt: null,
+          },
+        });
+        throw new ForbiddenException('账号已退店并超过72小时，已自动禁用，请联系管理员');
+      }
+      return user;
+    }
+    return user;
   }
 
   private async autoFreezeDormantStaffIfNeeded(user: any) {
@@ -105,8 +152,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         roleId: true,
         userType: true,
         createdAt: true,
+        updatedAt: true,
         staffEmploymentStatus: true,
         staffDormantFreezeBaseAt: true,
+        staffExitedAt: true,
         staffTags: true,
         name: true,
         workStatus: true,
@@ -123,6 +172,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
 
     if (!user) throw new UnauthorizedException('用户不存在');
+    if (user.status === UserStatus.DISABLED) throw new ForbiddenException('账号已禁用，请联系管理员');
+    user = await this.enforceStaffExitAccessLock(user);
     user = await this.autoFreezeDormantStaffIfNeeded(user);
     if (!payload?.mini && isDispatchMonitoredStaff(user) && String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {
       const staffRuleConfig = await this.staffRuleEngineService.getConfig();

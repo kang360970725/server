@@ -113,6 +113,29 @@ export class EquipmentRentalFeeService {
     return amount;
   }
 
+  private async writeLogTx(db: PrismaTx, params: {
+    operatorId?: number;
+    action: string;
+    targetType?: string;
+    targetId?: number | null;
+    oldData?: any;
+    newData?: any;
+    remark?: string | null;
+  }) {
+    if (!params.operatorId) return;
+    await (db as any).userLog.create({
+      data: {
+        userId: params.operatorId,
+        action: params.action,
+        targetType: params.targetType || 'EQUIPMENT_RENTAL_BILL',
+        targetId: params.targetId ?? null,
+        oldData: params.oldData ?? undefined,
+        newData: params.newData ?? undefined,
+        remark: params.remark ?? null,
+      },
+    });
+  }
+
   private isContractEffectiveForMonth(contract: any, month: string) {
     if (String(contract?.status || '') !== 'ACTIVE') return false;
     const { startDate, periodStart } = this.getBillingSchedule(contract, month);
@@ -149,22 +172,33 @@ export class EquipmentRentalFeeService {
       throw new BadRequestException('仅支持为未退店、未拉黑陪玩配置设备租赁费');
     }
 
-    return (this.prisma as any).equipmentRentalContract.create({
-      data: {
-        userId,
-        monthlyAmount,
-        startMonth,
-        endMonth,
-        startDate,
-        endDate,
-        remark: String(dto?.remark || '').trim() || null,
-        createdBy: operatorId || null,
-      },
-      include: { user: { select: { id: true, name: true, phone: true, workMode: true } } },
+    return this.prisma.$transaction(async (tx) => {
+      const contract = await (tx as any).equipmentRentalContract.create({
+        data: {
+          userId,
+          monthlyAmount,
+          startMonth,
+          endMonth,
+          startDate,
+          endDate,
+          remark: String(dto?.remark || '').trim() || null,
+          createdBy: operatorId || null,
+        },
+        include: { user: { select: { id: true, name: true, phone: true, workMode: true } } },
+      });
+      await this.writeLogTx(tx as any, {
+        operatorId,
+        action: 'EQUIPMENT_RENTAL_CONTRACT_CREATE',
+        targetType: 'EQUIPMENT_RENTAL_CONTRACT',
+        targetId: contract.id,
+        newData: contract,
+        remark: '新增设备租赁配置',
+      });
+      return contract;
     });
   }
 
-  async updateContract(dto: any) {
+  async updateContract(dto: any, operatorId?: number) {
     const id = Number(dto?.id);
     if (!id) throw new BadRequestException('id 必填');
     const existing = await (this.prisma as any).equipmentRentalContract.findUnique({ where: { id } });
@@ -194,10 +228,22 @@ export class EquipmentRentalFeeService {
     const nextEnd = data.endDate !== undefined ? data.endDate : this.getContractEndDate(existing);
     if (nextEnd && nextEnd.getTime() < nextStart.getTime()) throw new BadRequestException('结束日不能早于起租日');
 
-    return (this.prisma as any).equipmentRentalContract.update({
-      where: { id },
-      data,
-      include: { user: { select: { id: true, name: true, phone: true, workMode: true } } },
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await (tx as any).equipmentRentalContract.update({
+        where: { id },
+        data,
+        include: { user: { select: { id: true, name: true, phone: true, workMode: true } } },
+      });
+      await this.writeLogTx(tx as any, {
+        operatorId,
+        action: 'EQUIPMENT_RENTAL_CONTRACT_UPDATE',
+        targetType: 'EQUIPMENT_RENTAL_CONTRACT',
+        targetId: id,
+        oldData: existing,
+        newData: updated,
+        remark: '编辑设备租赁配置',
+      });
+      return updated;
     });
   }
 
@@ -220,7 +266,7 @@ export class EquipmentRentalFeeService {
     return { list, total, page, limit };
   }
 
-  async generateBillsForMonth(monthInput: string) {
+  async generateBillsForMonth(monthInput: string, operatorId?: number) {
     const month = this.normalizeMonth(monthInput);
     const contracts = await (this.prisma as any).equipmentRentalContract.findMany({
       where: {
@@ -243,7 +289,7 @@ export class EquipmentRentalFeeService {
       });
       if (existing && existing.status !== 'PENDING') continue;
       if (existing) {
-        await (this.prisma as any).equipmentRentalBill.update({
+        const updated = await (this.prisma as any).equipmentRentalBill.update({
           where: { id: existing.id },
           data: {
             contractId: contract.id,
@@ -255,21 +301,36 @@ export class EquipmentRentalFeeService {
             generatedAt: new Date(),
           },
         });
+        await this.writeLogTx(this.prisma as any, {
+          operatorId,
+          action: 'EQUIPMENT_RENTAL_BILL_GENERATE_UPDATE',
+          targetId: existing.id,
+          oldData: existing,
+          newData: updated,
+          remark: `生成/更新设备租赁账单 ${month}`,
+        });
       } else {
-        await (this.prisma as any).equipmentRentalBill.create({
+        const created = await (this.prisma as any).equipmentRentalBill.create({
           data: {
-          contractId: contract.id,
-          userId: contract.userId,
-          billMonth: month,
-          periodStart,
-          periodEnd,
-          amount,
-          paidAmount: 0,
-          remainingAmount: amount,
-          status: amount > 0 ? 'PENDING' : 'PAID',
-          dueAt,
-          generatedAt: new Date(),
-        },
+            contractId: contract.id,
+            userId: contract.userId,
+            billMonth: month,
+            periodStart,
+            periodEnd,
+            amount,
+            paidAmount: 0,
+            remainingAmount: amount,
+            status: amount > 0 ? 'PENDING' : 'PAID',
+            dueAt,
+            generatedAt: new Date(),
+          },
+        });
+        await this.writeLogTx(this.prisma as any, {
+          operatorId,
+          action: 'EQUIPMENT_RENTAL_BILL_GENERATE_CREATE',
+          targetId: created.id,
+          newData: created,
+          remark: `生成设备租赁账单 ${month}`,
         });
       }
       affected += 1;
@@ -291,8 +352,8 @@ export class EquipmentRentalFeeService {
     if (query?.userId) where.userId = Number(query.userId);
     if (query?.onlyRisk) where.status = 'PENDING';
 
-    const [rows, total] = await this.prisma.$transaction([
-      (this.prisma as any).equipmentRentalBill.findMany({
+    const { rows, total, stats } = await this.prisma.$transaction(async (tx) => {
+      const scopedRows = await (tx as any).equipmentRentalBill.findMany({
         where,
         skip: (page - 1) * limit,
         take: limit,
@@ -308,9 +369,11 @@ export class EquipmentRentalFeeService {
             },
           },
         },
-      }),
-      (this.prisma as any).equipmentRentalBill.count({ where }),
-    ]);
+      });
+      const scopedTotal = await (tx as any).equipmentRentalBill.count({ where });
+      const scopedStats = await this.getBillStatsTx(tx as any, where);
+      return { rows: scopedRows, total: scopedTotal, stats: scopedStats };
+    });
 
     const list = rows.map((row: any) => {
       const available = Number(row?.user?.walletAccount?.availableBalance || 0);
@@ -323,7 +386,25 @@ export class EquipmentRentalFeeService {
         insufficient: row.status === 'PENDING' && totalAssets < remaining,
       };
     });
-    return { list, total, page, limit };
+    return { list, total, page, limit, stats };
+  }
+
+  private async getBillStatsTx(db: PrismaTx, where: any) {
+    const rows = await (db as any).equipmentRentalBill.findMany({
+      where,
+      select: { amount: true, remainingAmount: true, status: true, walletTxId: true, remark: true },
+    });
+    return rows.reduce((acc: any, row: any) => {
+      const amount = Number(row.amount || 0);
+      const remaining = Number(row.remainingAmount || 0);
+      const settled = round2(Math.max(0, amount - remaining));
+      acc.billAmount = round2(acc.billAmount + amount);
+      acc.remainingAmount = round2(acc.remainingAmount + remaining);
+      if (String(row.status || '') === 'WAIVED') acc.waivedAmount = round2(acc.waivedAmount + settled);
+      else if (row.walletTxId) acc.chargedAmount = round2(acc.chargedAmount + settled);
+      else if (settled > 0) acc.externalPaidAmount = round2(acc.externalPaidAmount + settled);
+      return acc;
+    }, { billAmount: 0, remainingAmount: 0, chargedAmount: 0, externalPaidAmount: 0, waivedAmount: 0 });
   }
 
   async listMyBills(userId: number) {
@@ -366,7 +447,7 @@ export class EquipmentRentalFeeService {
         remark: String(remark || '').trim() || `设备租赁费 ${bill.billMonth}`,
       },
     });
-    return (tx as any).equipmentRentalBill.update({
+    const updated = await (tx as any).equipmentRentalBill.update({
       where: { id: bill.id },
       data: {
         paidAmount: amount,
@@ -377,6 +458,15 @@ export class EquipmentRentalFeeService {
         remark: operatorId ? `管理员手动缴费，操作人：${operatorId}` : bill.remark,
       },
     });
+    await this.writeLogTx(tx, {
+      operatorId,
+      action: operatorId ? 'EQUIPMENT_RENTAL_BILL_ADMIN_PAY' : 'EQUIPMENT_RENTAL_BILL_SELF_PAY',
+      targetId: bill.id,
+      oldData: bill,
+      newData: updated,
+      remark: String(remark || '').trim() || (operatorId ? '管理员手动缴纳设备租赁费' : '服务者自行缴纳设备租赁费'),
+    });
+    return updated;
   }
 
   async confirmMyBill(userId: number, billId: number) {
@@ -414,7 +504,7 @@ export class EquipmentRentalFeeService {
       if (bill.status !== 'PENDING') throw new BadRequestException('该账单无需重复确认');
 
       const amount = this.toAmount(bill.remainingAmount);
-      return (tx as any).equipmentRentalBill.update({
+      const updated = await (tx as any).equipmentRentalBill.update({
         where: { id },
         data: {
           paidAmount: amount,
@@ -425,19 +515,42 @@ export class EquipmentRentalFeeService {
           remark: `其他渠道已缴费，操作人：${operatorId || '-'}；${normalizedRemark}`,
         },
       });
+      await this.writeLogTx(tx, {
+        operatorId,
+        action: 'EQUIPMENT_RENTAL_BILL_EXTERNAL_PAY',
+        targetId: id,
+        oldData: bill,
+        newData: updated,
+        remark: normalizedRemark,
+      });
+      return updated;
     });
   }
 
-  async waiveBill(billId: number, remark?: string) {
+  async waiveBill(billId: number, remark?: string, operatorId?: number) {
     const id = Number(billId);
     if (!id) throw new BadRequestException('billId 必填');
-    return (this.prisma as any).equipmentRentalBill.update({
-      where: { id },
-      data: {
-        status: 'WAIVED',
-        remainingAmount: 0,
+    return this.prisma.$transaction(async (tx) => {
+      const bill = await (tx as any).equipmentRentalBill.findUnique({ where: { id } });
+      if (!bill) throw new NotFoundException('设备租赁账单不存在');
+      const updated = await (tx as any).equipmentRentalBill.update({
+        where: { id },
+        data: {
+          paidAmount: Number(bill.amount || 0),
+          status: 'WAIVED',
+          remainingAmount: 0,
+          remark: String(remark || '').trim() || '管理员减免设备租赁费',
+        },
+      });
+      await this.writeLogTx(tx, {
+        operatorId,
+        action: 'EQUIPMENT_RENTAL_BILL_WAIVE',
+        targetId: id,
+        oldData: bill,
+        newData: updated,
         remark: String(remark || '').trim() || '管理员减免设备租赁费',
-      },
+      });
+      return updated;
     });
   }
 
