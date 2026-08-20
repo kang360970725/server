@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { UserType } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
 import { SystemConfigService } from './system-config.service';
 
@@ -203,23 +204,75 @@ export class StaffRuleEngineService {
   }
 
   async upsertConfig(input: any) {
+    const previous = await this.getConfig().catch(() => this.getDefaultConfig());
     const normalized = this.normalizeConfig(input);
-    return this.prisma.systemConfig.upsert({
-      where: { key: SystemConfigService.KEYS.STAFF_RULE_ENGINE_V1 },
-      create: {
-        key: SystemConfigService.KEYS.STAFF_RULE_ENGINE_V1,
-        value: JSON.stringify(normalized, null, 2),
-        valueType: 'JSON',
-        remark: '服务者规则分组与提现/退店规则配置',
-        enabled: true,
-      },
-      update: {
-        value: JSON.stringify(normalized, null, 2),
-        valueType: 'JSON',
-        remark: '服务者规则分组与提现/退店规则配置',
-        enabled: true,
-      },
+
+    return this.prisma.$transaction(async (tx) => {
+      const row = await tx.systemConfig.upsert({
+        where: { key: SystemConfigService.KEYS.STAFF_RULE_ENGINE_V1 },
+        create: {
+          key: SystemConfigService.KEYS.STAFF_RULE_ENGINE_V1,
+          value: JSON.stringify(normalized, null, 2),
+          valueType: 'JSON',
+          remark: '服务者规则分组与提现/退店规则配置',
+          enabled: true,
+        },
+        update: {
+          value: JSON.stringify(normalized, null, 2),
+          valueType: 'JSON',
+          remark: '服务者规则分组与提现/退店规则配置',
+          enabled: true,
+        },
+      });
+
+      await this.syncRenamedRuleGroupCodes(tx, previous, normalized);
+      return row;
     });
+  }
+
+  private buildRuleCodeMapById(config: StaffRuleEngineConfig) {
+    const map = new Map<string, string>();
+    for (const rule of Array.isArray(config?.rules) ? config.rules : []) {
+      const id = String(rule?.id || '').trim();
+      const code = Array.isArray(rule?.tagCodes) ? this.normalizeTagCode(rule.tagCodes[0]) : '';
+      if (id && code) map.set(id, code);
+    }
+    return map;
+  }
+
+  private async syncRenamedRuleGroupCodes(tx: any, previous: StaffRuleEngineConfig, next: StaffRuleEngineConfig) {
+    const previousById = this.buildRuleCodeMapById(previous);
+    const nextById = this.buildRuleCodeMapById(next);
+    const renameMap = new Map<string, string>();
+
+    previousById.forEach((oldCode, ruleId) => {
+      const newCode = nextById.get(ruleId);
+      if (newCode && oldCode && newCode !== oldCode) {
+        renameMap.set(oldCode, newCode);
+      }
+    });
+
+    if (!renameMap.size) return;
+
+    const users = await tx.user.findMany({
+      where: {
+        userType: UserType.STAFF,
+      },
+      select: { id: true, staffTags: true },
+    });
+
+    for (const user of users) {
+      const oldTags = this.normalizeUserTags(user.staffTags);
+      if (!oldTags.length) continue;
+
+      const nextTags = Array.from(new Set(oldTags.map((tag) => renameMap.get(tag) || tag)));
+      if (nextTags.join('|') === oldTags.join('|')) continue;
+
+      await tx.user.update({
+        where: { id: user.id },
+        data: { staffTags: nextTags },
+      });
+    }
   }
 
   normalizeUserTags(input: any): string[] {
