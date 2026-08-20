@@ -162,9 +162,18 @@ export class StaffRuleEngineService {
       tagCodeSet.add(item.code);
     });
 
+    const tagNameByCode = new Map(normalizedTags.map((item) => [item.code, item.name]));
     const normalizedRules = rules.map((item: any, index: number) =>
       this.normalizeRuleItem(item, index, tagCodeSet, { allowMultipleTags: Boolean(options?.allowLegacyMultipleTags) }),
-    );
+    ).map((rule) => {
+      const tagCode = Array.isArray(rule.tagCodes) ? this.normalizeTagCode(rule.tagCodes[0]) : '';
+      const tagName = tagNameByCode.get(tagCode);
+      if (!tagName) return rule;
+      return {
+        ...rule,
+        name: `${tagName}规则`,
+      };
+    });
     const normalizedDefaultRule = this.normalizeRuleItem(
       raw.defaultRule && typeof raw.defaultRule === 'object' ? raw.defaultRule : this.getDefaultRule(),
       0,
