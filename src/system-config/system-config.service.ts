@@ -49,6 +49,7 @@ export class SystemConfigService implements OnModuleInit {
     return {
       consultText: String(config?.consultText || '详询客服').trim() || '详询客服',
       qrCodeUrl: String(config?.qrCodeUrl || '').trim(),
+      wechatReviewMode: config?.wechatReviewMode === true || String(config?.wechatReviewMode || '').toLowerCase() === 'true',
       remark: String(config?.remark || '').trim(),
     };
   }
