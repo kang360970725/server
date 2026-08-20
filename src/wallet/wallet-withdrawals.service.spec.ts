@@ -12,8 +12,7 @@ describe('WalletWithdrawalsService.applyWithdrawal', () => {
       }),
     } as any;
     const offlineFeeService = {
-      attachWithdrawalToPayment: jest.fn().mockResolvedValue(undefined),
-      validateAndCollectForWithdrawalTx: jest.fn(),
+      getWithdrawalObligationTx: jest.fn().mockResolvedValue({ outstanding: 0 }),
     } as any;
 
     return {
@@ -189,8 +188,7 @@ describe('WalletWithdrawalsService.reviewWithdrawal', () => {
       applyWalletAccountDelta: jest.fn(),
     } as any;
     const offlineFeeService = {
-      attachWithdrawalToPayment: jest.fn().mockResolvedValue(undefined),
-      validateAndCollectForWithdrawalTx: jest.fn(),
+      getWithdrawalObligationTx: jest.fn().mockResolvedValue({ outstanding: 0 }),
     } as any;
 
     return {

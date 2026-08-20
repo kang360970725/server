@@ -23,7 +23,6 @@ export class WalletWithdrawalsController {
             idempotencyKey: string;
             remark?: string;
             channel?: 'MANUAL' | 'WECHAT';
-            payOfflineFeeAmount?: number;
         },
     ) {
         const userId = req.user?.userId; // 以你 jwt 注入结构为准

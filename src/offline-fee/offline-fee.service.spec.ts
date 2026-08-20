@@ -2,37 +2,35 @@ import { StaffEmploymentStatus, UserType } from '@prisma/client';
 import { OfflineFeeService } from './offline-fee.service';
 
 describe('OfflineFeeService', () => {
-  const systemConfigService = {
-    ensureDefaults: jest.fn().mockResolvedValue(undefined),
-  } as any;
-
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
   it('excludes exited and blacklisted staff when generating offline fee bills', async () => {
     const tx: any = {
-      systemConfig: {
+      offlineFeeContract: {
         findMany: jest.fn().mockResolvedValue([]),
       },
-      user: {
-        findMany: jest.fn().mockResolvedValue([]),
+      userLog: {
+        create: jest.fn(),
       },
     };
     const prisma = {
       $transaction: jest.fn((callback) => callback(tx)),
     } as any;
-    const service = new OfflineFeeService(prisma, systemConfigService);
+    const service = new OfflineFeeService(prisma);
 
     await service.generateBillsForMonth('2026-07');
 
-    expect(tx.user.findMany).toHaveBeenCalledWith(
+    expect(tx.offlineFeeContract.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          userType: UserType.STAFF,
-          workMode: 'OFFLINE',
-          staffEmploymentStatus: {
-            in: [StaffEmploymentStatus.ACTIVE, StaffEmploymentStatus.FROZEN],
+          status: 'ACTIVE',
+          user: {
+            userType: UserType.STAFF,
+            staffEmploymentStatus: {
+              in: [StaffEmploymentStatus.ACTIVE, StaffEmploymentStatus.FROZEN],
+            },
           },
         }),
       }),
@@ -55,17 +53,17 @@ describe('OfflineFeeService', () => {
         }),
       },
       offlineFeeBill: {
-        findUnique: jest.fn(),
+        findFirst: jest.fn(),
       },
     };
     const prisma = {
       $transaction: jest.fn((callback) => callback(tx)),
     } as any;
-    const service = new OfflineFeeService(prisma, systemConfigService);
+    const service = new OfflineFeeService(prisma);
 
     const result = await service.getWithdrawalGuardInfo(7);
 
-    expect(tx.offlineFeeBill.findUnique).not.toHaveBeenCalled();
+    expect(tx.offlineFeeBill.findFirst).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       hasOutstanding: false,
       bill: null,
@@ -80,7 +78,6 @@ describe('OfflineFeeService', () => {
       user: {
         findUnique: jest.fn().mockResolvedValue({
           userType: UserType.STAFF,
-          workMode: 'OFFLINE',
           staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
         }),
         findMany: jest.fn(),
@@ -92,21 +89,17 @@ describe('OfflineFeeService', () => {
         }),
       },
       offlineFeeBill: {
-        findUnique: jest.fn().mockResolvedValue(null),
-      },
-      systemConfig: {
-        findMany: jest.fn(),
+        findFirst: jest.fn().mockResolvedValue(null),
       },
     };
     const prisma = {
       $transaction: jest.fn((callback) => callback(tx)),
     } as any;
-    const service = new OfflineFeeService(prisma, systemConfigService);
+    const service = new OfflineFeeService(prisma);
 
     const result = await service.getWithdrawalGuardInfo(8);
 
     expect(tx.user.findMany).not.toHaveBeenCalled();
-    expect(tx.systemConfig.findMany).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       hasOutstanding: false,
       bill: null,
@@ -130,7 +123,7 @@ describe('OfflineFeeService', () => {
     const prisma = {
       $transaction: jest.fn((callback) => callback(tx)),
     } as any;
-    const service = new OfflineFeeService(prisma, systemConfigService);
+    const service = new OfflineFeeService(prisma);
 
     await expect(service.deleteWaivedBill({ billId: 11 })).rejects.toThrow('仅已废除的线下费用账单可以删除');
     expect(tx.offlineFeeBill.delete).not.toHaveBeenCalled();
@@ -150,7 +143,7 @@ describe('OfflineFeeService', () => {
     const prisma = {
       $transaction: jest.fn((callback) => callback(tx)),
     } as any;
-    const service = new OfflineFeeService(prisma, systemConfigService);
+    const service = new OfflineFeeService(prisma);
 
     await expect(service.deleteWaivedBill({ billId: 12 })).resolves.toEqual({ success: true, billId: 12 });
     expect(tx.offlineFeeBill.delete).toHaveBeenCalledWith({ where: { id: 12 } });

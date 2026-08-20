@@ -2,12 +2,11 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { Cron } from '@nestjs/schedule';
 import { Prisma, PrismaClient, StaffEmploymentStatus, UserType } from '@prisma/client';
 import { PrismaService } from '../prisma.service';
-import { SystemConfigService } from '../system-config/system-config.service';
 import { QueryOfflineFeeBillsDto } from './dto/query-offline-fee-bills.dto';
 import { ManualCreateOfflineFeeBillDto } from './dto/manual-create-offline-fee-bill.dto';
 import { UpdateOfflineFeeBillDto } from './dto/update-offline-fee-bill.dto';
 
-const WITHDRAWAL_PARTIAL_MIN_PAY = 100;
+const WITHDRAWAL_GUARD_WINDOW_DAYS = 3;
 const BILLABLE_STAFF_EMPLOYMENT_STATUSES = [
   StaffEmploymentStatus.ACTIVE,
   StaffEmploymentStatus.FROZEN,
@@ -19,7 +18,6 @@ type PrismaTx = PrismaClient | Prisma.TransactionClient;
 export class OfflineFeeService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly systemConfigService: SystemConfigService,
   ) {}
 
   private toFixed2(value: number) {
@@ -46,6 +44,24 @@ export class OfflineFeeService {
     return date;
   }
 
+  private parseDateOnly(value: any, fieldName = '日期') {
+    if (!value) return null;
+    const raw = value instanceof Date
+      ? `${value.getUTCFullYear()}-${String(value.getUTCMonth() + 1).padStart(2, '0')}-${String(value.getUTCDate()).padStart(2, '0')}`
+      : String(value).trim().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) throw new BadRequestException(`${fieldName}格式应为 YYYY-MM-DD`);
+    const [year, month, day] = raw.split('-').map(Number);
+    const date = new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
+    if (
+      date.getUTCFullYear() !== year ||
+      date.getUTCMonth() !== month - 1 ||
+      date.getUTCDate() !== day
+    ) {
+      throw new BadRequestException(`${fieldName}格式不正确`);
+    }
+    return date;
+  }
+
   private normalizeManualAmount(value: any) {
     const amount = this.toFixed2(Number(value || 0));
     if (!Number.isFinite(amount) || amount <= 0) throw new BadRequestException('扣费金额必须大于 0');
@@ -68,16 +84,47 @@ export class OfflineFeeService {
     return this.formatMonth(ref);
   }
 
-  private getMonthlyDueAt(monthInput: string) {
+  private getChinaDateAtUtcMidnight(ref = new Date(), offsetDays = 0) {
+    const chinaRef = new Date(ref.getTime() + 8 * 60 * 60 * 1000);
+    return new Date(Date.UTC(
+      chinaRef.getUTCFullYear(),
+      chinaRef.getUTCMonth(),
+      chinaRef.getUTCDate() + offsetDays,
+      0,
+      0,
+      0,
+    ));
+  }
+
+  private getContractStartDate(contract: any) {
+    return this.parseDateOnly(
+      contract?.startDate || (contract?.startMonth ? `${contract.startMonth}-20` : null),
+      '开始时间',
+    );
+  }
+
+  private getContractEndDate(contract: any) {
+    return this.parseDateOnly(
+      contract?.endDate || (contract?.endMonth ? `${contract.endMonth}-20` : null),
+      '结束时间',
+    );
+  }
+
+  private getContractDueAtForMonth(contract: any, monthInput: string) {
     const [year, mon] = this.normalizeMonth(monthInput).split('-').map(Number);
-    return new Date(Date.UTC(year, mon - 1, 20, 0, 0, 0));
+    const startDate = this.getContractStartDate(contract);
+    const billingDay = Math.max(1, Math.min(31, Number(startDate?.getUTCDate() || 20)));
+    const monthLastDay = new Date(Date.UTC(year, mon, 0)).getUTCDate();
+    return new Date(Date.UTC(year, mon - 1, Math.min(billingDay, monthLastDay), 0, 0, 0));
   }
 
   private isContractEffectiveForMonth(contract: any, month: string) {
     if (String(contract?.status || '') !== 'ACTIVE') return false;
-    const normalizedMonth = this.normalizeMonth(month);
-    if (String(contract?.startMonth || '') > normalizedMonth) return false;
-    if (contract?.endMonth && String(contract.endMonth) < normalizedMonth) return false;
+    const dueAt = this.getContractDueAtForMonth(contract, month);
+    const startDate = this.getContractStartDate(contract);
+    const endDate = this.getContractEndDate(contract);
+    if (startDate && dueAt < startDate) return false;
+    if (endDate && dueAt > endDate) return false;
     return true;
   }
 
@@ -103,6 +150,19 @@ export class OfflineFeeService {
     });
   }
 
+  private rethrowOfflineFeeContractDateMigrationError(error: any) {
+    const message = String(error?.message || '');
+    const column = String(error?.meta?.column || error?.meta?.field_name || '');
+    if (
+      error?.code === 'P2022' ||
+      /Unknown column/i.test(message) ||
+      ['startDate', 'endDate'].some((field) => column.includes(field) || message.includes(field))
+    ) {
+      throw new BadRequestException('线下费用收费配置日期字段未迁移，请先执行最新数据库迁移后再创建配置');
+    }
+    throw error;
+  }
+
   async listContracts(query: any) {
     const page = Math.max(1, Number(query?.page ?? 1));
     const limit = Math.min(100, Math.max(1, Number(query?.limit ?? 20)));
@@ -125,50 +185,60 @@ export class OfflineFeeService {
   async createContract(dto: any, operatorId?: number) {
     const userId = Number(dto?.userId);
     const monthlyAmount = this.normalizeManualAmount(dto?.monthlyAmount);
-    const startMonth = this.normalizeMonth(dto?.startMonth);
-    const endMonth = dto?.endMonth ? this.normalizeMonth(dto.endMonth) : null;
-    if (!userId) throw new BadRequestException('请选择线下服务者');
-    if (endMonth && endMonth < startMonth) throw new BadRequestException('结束月份不能早于开始月份');
+    const startDate = this.parseDateOnly(dto?.startDate ?? (dto?.startMonth ? `${dto.startMonth}-20` : null), '开始时间');
+    const endDate = dto?.endDate || dto?.endMonth
+      ? this.parseDateOnly(dto?.endDate ?? `${dto.endMonth}-20`, '结束时间')
+      : null;
+    if (!startDate) throw new BadRequestException('请选择开始时间');
+    const startMonth = this.formatMonth(startDate);
+    const endMonth = endDate ? this.formatMonth(endDate) : null;
+    if (!userId) throw new BadRequestException('请选择服务者');
+    if (endDate && endDate < startDate) throw new BadRequestException('结束时间不能早于开始时间');
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { id: true, userType: true, workMode: true, staffEmploymentStatus: true },
+      select: { id: true, userType: true, staffEmploymentStatus: true },
     });
     if (!user) throw new NotFoundException('服务者不存在');
     if (
       user.userType !== UserType.STAFF ||
-      user.workMode !== 'OFFLINE' ||
       !BILLABLE_STAFF_EMPLOYMENT_STATUSES.map(String).includes(String(user.staffEmploymentStatus))
     ) {
-      throw new BadRequestException('仅支持为未退店、未拉黑的线下服务者配置线下管理费');
+      throw new BadRequestException('仅支持为未退店、未拉黑的服务者配置线下管理费');
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const contract = await (tx as any).offlineFeeContract.create({
-        data: {
-          userId,
-          monthlyAmount,
-          startMonth,
-          endMonth,
-          status: String(dto?.status || 'ACTIVE') === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE',
-          remark: String(dto?.remark || '').trim() || null,
-          createdBy: operatorId ?? null,
-        },
-        include: { user: { select: { id: true, name: true, realName: true, phone: true, workMode: true, staffEmploymentStatus: true } } },
-      });
-      if (operatorId) {
-        await (tx as any).userLog.create({
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const contract = await (tx as any).offlineFeeContract.create({
           data: {
-            userId: operatorId,
-            action: 'OFFLINE_FEE_CONTRACT_CREATE',
-            targetType: 'OFFLINE_FEE_CONTRACT',
-            targetId: contract.id,
-            newData: contract,
-            remark: '新增线下管理费配置',
+            userId,
+            monthlyAmount,
+            startMonth,
+            endMonth,
+            startDate,
+            endDate,
+            status: String(dto?.status || 'ACTIVE') === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE',
+            remark: String(dto?.remark || '').trim() || null,
+            createdBy: operatorId ?? null,
           },
+          include: { user: { select: { id: true, name: true, realName: true, phone: true, workMode: true, staffEmploymentStatus: true } } },
         });
-      }
-      return contract;
-    });
+        if (operatorId) {
+          await (tx as any).userLog.create({
+            data: {
+              userId: operatorId,
+              action: 'OFFLINE_FEE_CONTRACT_CREATE',
+              targetType: 'OFFLINE_FEE_CONTRACT',
+              targetId: contract.id,
+              newData: contract,
+              remark: '新增线下管理费配置',
+            },
+          });
+        }
+        return contract;
+      });
+    } catch (error: any) {
+      this.rethrowOfflineFeeContractDateMigrationError(error);
+    }
   }
 
   async updateContract(dto: any, operatorId?: number) {
@@ -178,91 +248,49 @@ export class OfflineFeeService {
     if (!existing) throw new NotFoundException('线下管理费配置不存在');
     const data: any = {};
     if (dto?.monthlyAmount !== undefined) data.monthlyAmount = this.normalizeManualAmount(dto.monthlyAmount);
-    if (dto?.startMonth !== undefined) data.startMonth = this.normalizeMonth(dto.startMonth);
-    if (dto?.endMonth !== undefined) data.endMonth = dto.endMonth ? this.normalizeMonth(dto.endMonth) : null;
+    if (dto?.startDate !== undefined || dto?.startMonth !== undefined) {
+      const startDate = this.parseDateOnly(dto?.startDate ?? `${dto.startMonth}-20`, '开始时间');
+      if (!startDate) throw new BadRequestException('请选择开始时间');
+      data.startDate = startDate;
+      data.startMonth = this.formatMonth(startDate);
+    }
+    if (dto?.endDate !== undefined || dto?.endMonth !== undefined) {
+      const endDate = dto?.endDate || dto?.endMonth
+        ? this.parseDateOnly(dto?.endDate ?? `${dto.endMonth}-20`, '结束时间')
+        : null;
+      data.endDate = endDate;
+      data.endMonth = endDate ? this.formatMonth(endDate) : null;
+    }
     if (dto?.status !== undefined) data.status = String(dto.status) === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE';
     if (dto?.remark !== undefined) data.remark = String(dto.remark || '').trim() || null;
-    const nextStart = data.startMonth ?? existing.startMonth;
-    const nextEnd = data.endMonth !== undefined ? data.endMonth : existing.endMonth;
-    if (nextEnd && nextEnd < nextStart) throw new BadRequestException('结束月份不能早于开始月份');
-    return this.prisma.$transaction(async (tx) => {
-      const updated = await (tx as any).offlineFeeContract.update({
-        where: { id },
-        data,
-        include: { user: { select: { id: true, name: true, realName: true, phone: true, workMode: true, staffEmploymentStatus: true } } },
-      });
-      if (operatorId) {
-        await (tx as any).userLog.create({
-          data: {
-            userId: operatorId,
-            action: 'OFFLINE_FEE_CONTRACT_UPDATE',
-            targetType: 'OFFLINE_FEE_CONTRACT',
-            targetId: id,
-            oldData: existing,
-            newData: updated,
-            remark: '编辑线下管理费配置',
-          },
+    const nextStart = data.startDate ?? this.getContractStartDate(existing);
+    const nextEnd = data.endDate !== undefined ? data.endDate : this.getContractEndDate(existing);
+    if (nextEnd && nextStart && nextEnd < nextStart) throw new BadRequestException('结束时间不能早于开始时间');
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const updated = await (tx as any).offlineFeeContract.update({
+          where: { id },
+          data,
+          include: { user: { select: { id: true, name: true, realName: true, phone: true, workMode: true, staffEmploymentStatus: true } } },
         });
-      }
-      return updated;
-    });
-  }
-
-  private getPreviousMonth(refDate = new Date()) {
-    const year = refDate.getUTCFullYear();
-    const month = refDate.getUTCMonth();
-    const target = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0));
-    const y = target.getUTCFullYear();
-    const m = `${target.getUTCMonth() + 1}`.padStart(2, '0');
-    return `${y}-${m}`;
-  }
-
-  private async getFeeConfig(db: PrismaTx) {
-    await this.systemConfigService.ensureDefaults();
-
-    const keys = [
-      SystemConfigService.KEYS.OFFLINE_FEE_RATE,
-      SystemConfigService.KEYS.OFFLINE_FEE_MIN,
-      SystemConfigService.KEYS.OFFLINE_FEE_CAP,
-      SystemConfigService.KEYS.OFFLINE_FEE_PARTIAL_MIN_PAY,
-    ];
-
-    const rows = await (db as any).systemConfig.findMany({ where: { key: { in: keys } } });
-    const map = new Map<string, any>(rows.map((r: any) => [r.key, r]));
-
-    const rate = Number(map.get(SystemConfigService.KEYS.OFFLINE_FEE_RATE)?.value ?? '0.1');
-    const minAmount = Number(map.get(SystemConfigService.KEYS.OFFLINE_FEE_MIN)?.value ?? '100');
-    const capAmount = Number(map.get(SystemConfigService.KEYS.OFFLINE_FEE_CAP)?.value ?? '3000');
-    const partialMinPay = Number(map.get(SystemConfigService.KEYS.OFFLINE_FEE_PARTIAL_MIN_PAY)?.value ?? '100');
-
-    return {
-      rate: Number.isFinite(rate) ? rate : 0.1,
-      minAmount: Number.isFinite(minAmount) ? minAmount : 100,
-      capAmount: Number.isFinite(capAmount) ? capAmount : 3000,
-      partialMinPay: Number.isFinite(partialMinPay) ? partialMinPay : 100,
-    };
-  }
-
-  private calcJoinedRatio(offlineJoinedAt: Date | null, periodStart: Date, periodEnd: Date) {
-    if (!offlineJoinedAt) return 1;
-
-    const joinDate = new Date(Date.UTC(offlineJoinedAt.getUTCFullYear(), offlineJoinedAt.getUTCMonth(), offlineJoinedAt.getUTCDate()));
-    if (joinDate > periodEnd) return 0;
-
-    const activeStart = joinDate > periodStart ? joinDate : periodStart;
-    const dayMs = 24 * 60 * 60 * 1000;
-    const totalDays = Math.floor((periodEnd.getTime() - periodStart.getTime()) / dayMs) + 1;
-    const activeDays = Math.floor((periodEnd.getTime() - activeStart.getTime()) / dayMs) + 1;
-
-    if (totalDays <= 0) return 0;
-    return Math.max(0, Math.min(1, activeDays / totalDays));
-  }
-
-  private calcShouldPay(baseAmount: number, rate: number, minAmount: number, capAmount: number) {
-    const raw = this.toFixed2(baseAmount * rate);
-    const floor = Math.max(0, minAmount);
-    const cap = Math.max(floor, capAmount);
-    return this.toFixed2(Math.min(Math.max(raw, floor), cap));
+        if (operatorId) {
+          await (tx as any).userLog.create({
+            data: {
+              userId: operatorId,
+              action: 'OFFLINE_FEE_CONTRACT_UPDATE',
+              targetType: 'OFFLINE_FEE_CONTRACT',
+              targetId: id,
+              oldData: existing,
+              newData: updated,
+              remark: '编辑线下管理费配置',
+            },
+          });
+        }
+        return updated;
+      });
+    } catch (error: any) {
+      this.rethrowOfflineFeeContractDateMigrationError(error);
+    }
   }
 
   // 人工录入/人工编辑后，会将 generatedAt 更新为当前时间；
@@ -279,15 +307,18 @@ export class OfflineFeeService {
     return this.prisma.$transaction(async (tx) => this.generateBillsForMonthTx(tx as any, month, operatorId));
   }
 
-  private async generateBillsForMonthTx(db: PrismaTx, month: string, operatorId?: number) {
+  private async generateBillsForMonthTx(
+    db: PrismaTx,
+    month: string,
+    operatorId?: number,
+    options?: { dueFrom?: Date; dueTo?: Date },
+  ) {
     const { start, end } = this.getMonthRange(month);
-    const dueAt = this.getMonthlyDueAt(month);
     const contracts = await (db as any).offlineFeeContract.findMany({
       where: {
         status: 'ACTIVE',
         user: {
           userType: UserType.STAFF,
-          workMode: 'OFFLINE',
           staffEmploymentStatus: { in: [...BILLABLE_STAFF_EMPLOYMENT_STATUSES] },
         },
       },
@@ -297,6 +328,9 @@ export class OfflineFeeService {
 
     for (const contract of contracts) {
       if (!this.isContractEffectiveForMonth(contract, month)) continue;
+      const dueAt = this.getContractDueAtForMonth(contract, month);
+      if (options?.dueFrom && dueAt < options.dueFrom) continue;
+      if (options?.dueTo && dueAt > options.dueTo) continue;
       const amount = this.normalizeManualAmount(contract.monthlyAmount);
       const existing = await (db as any).offlineFeeBill.findUnique({
         where: { userId_billMonth: { userId: contract.userId, billMonth: month } },
@@ -358,65 +392,21 @@ export class OfflineFeeService {
     return { month, affected };
   }
 
-  @Cron('0 0 20 * * *', { timeZone: 'Asia/Shanghai' })
-  async cronGenerateCurrentMonthBills() {
-    await this.generateBillsForMonth(this.getCurrentMonth());
-  }
-
-  private async legacyGenerateBillsForMonthTx(db: PrismaTx, month: string) {
-    const { start, end } = this.getMonthRange(month);
-    const cfg = await this.getFeeConfig(db);
-    const offlineUsers = await (db as any).user.findMany({
-      where: {
-        userType: UserType.STAFF,
-        workMode: 'OFFLINE',
-        staffEmploymentStatus: { in: [...BILLABLE_STAFF_EMPLOYMENT_STATUSES] },
-        OR: [{ offlineJoinedAt: null }, { offlineJoinedAt: { lte: end } }],
-      },
-      select: { id: true, offlineJoinedAt: true },
-    });
-    let affected = 0;
-    for (const user of offlineUsers) {
-      const perfAgg = await (db as any).performanceRecord.aggregate({
-        where: { ownerUserId: user.id, ownerRoleType: 'PLAYER', status: 'EFFECTIVE', statsDate: { gte: start, lte: end } },
-        _sum: { grossPerformanceAmount: true },
-      });
-      const gross = Number(perfAgg?._sum?.grossPerformanceAmount || 0);
-      const ratio = this.calcJoinedRatio(user.offlineJoinedAt, start, end);
-      const baseAmount = this.toFixed2(gross * ratio);
-      const finalShouldPay = this.calcShouldPay(baseAmount, cfg.rate, cfg.minAmount, cfg.capAmount);
-      await (db as any).offlineFeeBill.upsert({
-        where: { userId_billMonth: { userId: user.id, billMonth: month } },
-        update: {
-          periodStart: start,
-          periodEnd: end,
-          performanceBaseAmount: baseAmount,
-          rate: cfg.rate,
-          minAmount: cfg.minAmount,
-          capAmount: cfg.capAmount,
-          shouldPayAmount: finalShouldPay,
-          remainingAmount: finalShouldPay,
-          status: finalShouldPay > 0 ? 'UNPAID' : 'PAID',
-        },
-        create: {
-          userId: user.id,
-          billMonth: month,
-          periodStart: start,
-          periodEnd: end,
-          performanceBaseAmount: baseAmount,
-          rate: cfg.rate,
-          minAmount: cfg.minAmount,
-          capAmount: cfg.capAmount,
-          shouldPayAmount: finalShouldPay,
-          paidAmount: 0,
-          remainingAmount: finalShouldPay,
-          status: finalShouldPay > 0 ? 'UNPAID' : 'PAID',
-          generatedAt: new Date(),
-        },
-      });
-      affected += 1;
+  @Cron('0 0 * * *', { timeZone: 'Asia/Shanghai' })
+  async cronGenerateUpcomingBills() {
+    const now = new Date();
+    const dueFrom = this.getChinaDateAtUtcMidnight(now);
+    const dueTo = new Date(this.getChinaDateAtUtcMidnight(now, WITHDRAWAL_GUARD_WINDOW_DAYS + 1).getTime() - 1);
+    const months = new Set<string>();
+    for (let offset = 0; offset <= WITHDRAWAL_GUARD_WINDOW_DAYS; offset += 1) {
+      const date = this.getChinaDateAtUtcMidnight(now, offset);
+      months.add(this.formatMonth(date));
     }
-    return { month, affected };
+    for (const month of months) {
+      await this.prisma.$transaction(async (tx) => (
+        this.generateBillsForMonthTx(tx as any, month, undefined, { dueFrom, dueTo })
+      ));
+    }
   }
 
   async listBills(query: QueryOfflineFeeBillsDto) {
@@ -496,7 +486,6 @@ export class OfflineFeeService {
   async listOfflineStaffOptions(keyword?: string) {
     const where: any = {
       userType: UserType.STAFF,
-      workMode: 'OFFLINE',
       staffEmploymentStatus: { in: [...BILLABLE_STAFF_EMPLOYMENT_STATUSES] },
     };
 
@@ -551,31 +540,16 @@ export class OfflineFeeService {
         select: {
           id: true,
           userType: true,
-          workMode: true,
           staffEmploymentStatus: true,
-          offlineJoinedAt: true,
         },
       });
 
-      if (!user) throw new NotFoundException('员工不存在');
+      if (!user) throw new NotFoundException('服务者不存在');
       if (
         user.userType !== UserType.STAFF ||
-        user.workMode !== 'OFFLINE' ||
         !BILLABLE_STAFF_EMPLOYMENT_STATUSES.includes(user.staffEmploymentStatus)
       ) {
-        throw new BadRequestException('仅支持为线下员工录入账单');
-      }
-
-      // 线下入职日期晚于账单周期时，不允许录入该月份账单
-      if (user.offlineJoinedAt) {
-        const joinDate = new Date(Date.UTC(
-          user.offlineJoinedAt.getUTCFullYear(),
-          user.offlineJoinedAt.getUTCMonth(),
-          user.offlineJoinedAt.getUTCDate(),
-        ));
-        if (joinDate > end) {
-          throw new BadRequestException('该员工在线下入职时间之后才生效，不能录入该月份账单');
-        }
+        throw new BadRequestException('仅支持为未退店、未拉黑的服务者录入账单');
       }
 
       const existing = await (tx as any).offlineFeeBill.findUnique({
@@ -862,20 +836,18 @@ export class OfflineFeeService {
       where: { id: userId },
       select: {
         userType: true,
-        workMode: true,
         staffEmploymentStatus: true,
       },
     });
-    const isBillableOfflineStaff =
+    const isBillableStaff =
       user?.userType === UserType.STAFF &&
-      user?.workMode === 'OFFLINE' &&
       BILLABLE_STAFF_EMPLOYMENT_STATUSES.includes(user?.staffEmploymentStatus);
-    if (!isBillableOfflineStaff) {
+    if (!isBillableStaff) {
       return null;
     }
 
-    // 与设备租赁一致：已有未结清账单且进入到期前 24 小时，才影响提现。
-    const withdrawalGuardAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    // 已有未结清账单且进入到期前 3 天，才影响提现；未来更远账单不提前限制。
+    const withdrawalGuardAt = new Date(now.getTime() + WITHDRAWAL_GUARD_WINDOW_DAYS * 24 * 60 * 60 * 1000);
     return (db as any).offlineFeeBill.findFirst({
       where: {
         userId,
@@ -905,28 +877,73 @@ export class OfflineFeeService {
       if (!bill) {
         return {
           hasOutstanding: false,
-          partialMinPay: WITHDRAWAL_PARTIAL_MIN_PAY,
           bill: null,
           availableBalance,
           frozenBalance,
           walletTotal,
-          canPartialPayByWalletRule: true,
         };
       }
 
       const remaining = Number(bill.remainingAmount || 0);
-      const effectivePartialMinPay = this.toFixed2(Math.max(0, Math.min(WITHDRAWAL_PARTIAL_MIN_PAY, remaining)));
       return {
         hasOutstanding: remaining > 0,
-        partialMinPay: effectivePartialMinPay,
         bill,
         availableBalance,
         frozenBalance,
         walletTotal,
-        // 规则：若要部分缴纳，缴后剩余钱包总额度(含冻结)需大于剩余未缴。
-        // 该不等式可约简为：当前钱包总额度 > 当前未缴额度。
-        canPartialPayByWalletRule: walletTotal > this.toFixed2(remaining),
       };
+    });
+  }
+
+  async getWithdrawalObligationTx(db: PrismaTx, userId: number) {
+    const bill = await this.getLastMonthOutstandingBillTx(db, userId);
+    const outstanding = this.toFixed2(Number(bill?.remainingAmount || 0));
+    return {
+      hasOutstanding: outstanding > 0,
+      outstanding,
+      billId: bill?.id ?? null,
+      dueAt: bill?.dueAt ?? null,
+    };
+  }
+
+  async listMyBills(userId: number) {
+    if (!userId) throw new BadRequestException('用户身份无效');
+    const rows = await (this.prisma as any).offlineFeeBill.findMany({
+      where: {
+        userId: Number(userId),
+        remainingAmount: { gt: 0 },
+        status: { in: ['UNPAID', 'PARTIAL'] },
+      },
+      orderBy: [{ dueAt: 'asc' }, { id: 'asc' }],
+      take: 20,
+      select: {
+        id: true,
+        billMonth: true,
+        shouldPayAmount: true,
+        paidAmount: true,
+        remainingAmount: true,
+        status: true,
+        dueAt: true,
+        remark: true,
+        generatedAt: true,
+      },
+    });
+    return rows;
+  }
+
+  async confirmMyBill(userId: number, billId: number) {
+    if (!userId || !billId) throw new BadRequestException('参数非法');
+    return this.prisma.$transaction(async (tx) => {
+      const bill = await (tx as any).offlineFeeBill.findUnique({ where: { id: billId } });
+      if (!bill || Number(bill.userId) !== Number(userId)) throw new NotFoundException('线下费用账单不存在');
+      if (!['UNPAID', 'PARTIAL'].includes(String(bill.status || '')) || Number(bill.remainingAmount || 0) <= 0) {
+        throw new BadRequestException('该账单无需重复缴费');
+      }
+      return this.collectByWalletBalanceTx(tx as any, {
+        bill,
+        amount: Number(bill.remainingAmount || 0),
+        remark: `服务者自行缴纳线下费用 ${bill.billMonth}`,
+      });
     });
   }
 
@@ -945,7 +962,15 @@ export class OfflineFeeService {
     return this.prisma.$transaction(async (tx) => {
       const bill = await (tx as any).offlineFeeBill.findUnique({ where: { id: billId } });
       if (!bill) throw new NotFoundException('线下费用账单不存在');
+      return this.collectByWalletBalanceTx(tx as any, { bill, amount, operatorId, remark });
+    });
+  }
 
+  private async collectByWalletBalanceTx(
+    tx: PrismaTx,
+    params: { bill: any; amount: number; operatorId?: number; remark?: string },
+  ) {
+      const { bill, amount, operatorId, remark } = params;
       const remain = Number(bill.remainingAmount || 0);
       if (remain <= 0) throw new BadRequestException('该账单已结清');
 
@@ -993,14 +1018,13 @@ export class OfflineFeeService {
       const updated = await this.refreshBillPaymentStatusTx(tx as any, bill.id);
       await this.writeLogTx(tx as any, {
         operatorId,
-        action: 'OFFLINE_FEE_BILL_MANUAL_PAY',
+        action: operatorId ? 'OFFLINE_FEE_BILL_MANUAL_PAY' : 'OFFLINE_FEE_BILL_SELF_PAY',
         targetId: bill.id,
         oldData: bill,
         newData: { payment, bill: updated },
-        remark: remark || '手动缴纳线下费用',
+        remark: remark || (operatorId ? '手动缴纳线下费用' : '服务者自行缴纳线下费用'),
       });
       return updated;
-    });
   }
 
   async confirmPaidByOtherChannel(params: {
@@ -1066,99 +1090,4 @@ export class OfflineFeeService {
     });
   }
 
-  async validateAndCollectForWithdrawalTx(params: {
-    tx: PrismaTx;
-    userId: number;
-    withdrawAmount: number;
-    availableBalance: number;
-    frozenBalance: number;
-    payOfflineFeeAmount?: number;
-  }) {
-    const { tx, userId, withdrawAmount, availableBalance, frozenBalance, payOfflineFeeAmount } = params;
-
-    const bill = await this.getLastMonthOutstandingBillTx(tx, userId);
-
-    if (!bill) {
-      return { paidOfflineFeeAmount: 0, billId: null, paymentId: null };
-    }
-
-    const remaining = Number(bill.remainingAmount || 0);
-    if (remaining <= 0) {
-      return { paidOfflineFeeAmount: 0, billId: bill.id, paymentId: null };
-    }
-
-    // 部分缴纳最低额需受当前账单未缴余额约束，避免“剩余小于配置最低额”时无法缴清
-    const effectivePartialMinPay = this.toFixed2(Math.max(0, Math.min(WITHDRAWAL_PARTIAL_MIN_PAY, remaining)));
-    const requested = this.toFixed2(Number(payOfflineFeeAmount || 0));
-
-    if (bill.enforceFullPayment && requested < remaining) {
-      throw new BadRequestException(`该账单已被设置为强制全额缴纳，需至少缴纳 ${remaining}`);
-    }
-
-    if (requested <= 0) {
-      throw new BadRequestException(`上月线下运营成本未缴清，需先缴纳（至少 ${effectivePartialMinPay}）`);
-    }
-
-    if (requested < effectivePartialMinPay && requested < remaining) {
-      throw new BadRequestException(`部分缴纳最低金额为 ${effectivePartialMinPay}`);
-    }
-
-    const actualPay = this.toFixed2(Math.min(requested, remaining));
-
-    if (availableBalance < withdrawAmount + actualPay) {
-      throw new BadRequestException('可用余额不足，无法同时完成提现与线下费用缴纳');
-    }
-
-    const walletTotalAfterPay = this.toFixed2(availableBalance + frozenBalance - actualPay);
-    const remainingAfterPay = this.toFixed2(Math.max(0, remaining - actualPay));
-    if (remainingAfterPay > 0 && !(walletTotalAfterPay > remainingAfterPay)) {
-      throw new BadRequestException('缴费后钱包总额度（含冻结）必须大于未缴额度');
-    }
-
-    const walletAfterFee = await (tx as any).walletAccount.update({
-      where: { userId },
-      data: { availableBalance: { decrement: actualPay } },
-      select: { availableBalance: true, frozenBalance: true },
-    });
-
-    const payment = await (tx as any).offlineFeeBillPayment.create({
-      data: {
-        billId: bill.id,
-        userId,
-        amount: actualPay,
-        source: 'WITHDRAWAL',
-      },
-    });
-
-    await (tx as any).walletTransaction.create({
-      data: {
-        userId,
-        direction: 'OUT',
-        bizType: 'OFFLINE_FEE_PAYMENT',
-        amount: actualPay,
-        status: 'AVAILABLE',
-        sourceType: 'OFFLINE_FEE_PAYMENT',
-        sourceId: payment.id,
-        availableAfter: this.toFixed2(Number(walletAfterFee.availableBalance || 0)),
-        frozenAfter: this.toFixed2(Number(walletAfterFee.frozenBalance || 0)),
-      },
-    });
-
-    await this.refreshBillPaymentStatusTx(tx, bill.id);
-
-    return {
-      paidOfflineFeeAmount: actualPay,
-      billId: bill.id,
-      paymentId: payment.id,
-    };
-  }
-
-  async attachWithdrawalToPayment(params: { tx: PrismaTx; paymentId: number | null; withdrawalRequestId: number }) {
-    if (!params.paymentId) return;
-
-    await (params.tx as any).offlineFeeBillPayment.update({
-      where: { id: params.paymentId },
-      data: { withdrawalRequestId: params.withdrawalRequestId },
-    });
-  }
 }

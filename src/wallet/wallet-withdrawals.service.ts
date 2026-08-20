@@ -323,9 +323,8 @@ export class WalletWithdrawalsService {
         idempotencyKey: string;
         remark?: string;
         channel?: 'MANUAL' | 'WECHAT';
-        payOfflineFeeAmount?: number;
     }) {
-        const { userId, amount, remark, channel = 'MANUAL', payOfflineFeeAmount } = params;
+        const { userId, amount, remark, channel = 'MANUAL' } = params;
         const idempotencyKey = this.normalizeIdempotencyKey(params.idempotencyKey);
 
         if (!amount || amount <= 0) {
@@ -507,25 +506,13 @@ export class WalletWithdrawalsService {
                 }
             }
 
-            let offlineFeePayment: {
-                paidOfflineFeeAmount: number;
-                billId: number | null;
-                paymentId: number | null;
-            } = {
-                paidOfflineFeeAmount: 0,
-                billId: null,
-                paymentId: null,
-            };
-
-            if (u.workMode === 'OFFLINE') {
-                offlineFeePayment = await this.offlineFeeService.validateAndCollectForWithdrawalTx({
-                    tx: tx as any,
-                    userId,
-                    withdrawAmount: amount,
-                    availableBalance: available,
-                    frozenBalance: Number(refreshedAccount?.frozenBalance || 0),
-                    payOfflineFeeAmount,
-                });
+            if (isActiveStaff) {
+                const offlineFeeObligation = await this.offlineFeeService.getWithdrawalObligationTx(tx as any, userId);
+                if (Number(offlineFeeObligation.outstanding || 0) > 0) {
+                    throw new BadRequestException(
+                        `存在临近到期的线下费用账单未结清，需先缴清 ${offlineFeeObligation.outstanding} 后再申请提现`,
+                    );
+                }
             }
 
             // =========================
@@ -631,12 +618,6 @@ export class WalletWithdrawalsService {
                 },
             });
 
-            await this.offlineFeeService.attachWithdrawalToPayment({
-                tx: tx as any,
-                paymentId: offlineFeePayment.paymentId,
-                withdrawalRequestId: request.id,
-            });
-
             await tx.walletTransaction.update({
                 where: { id: reserveTx.id },
                 data: { sourceId: request.id },
@@ -644,10 +625,6 @@ export class WalletWithdrawalsService {
 
             return {
                 ...request,
-                offlineFee: {
-                    paidAmount: offlineFeePayment.paidOfflineFeeAmount,
-                    billId: offlineFeePayment.billId,
-                },
             };
         });
     }
