@@ -106,7 +106,7 @@ export class SystemConfigController {
 
   @Post('staff-rule-engine/get')
   @UseGuards(JwtAuthGuard, PermissionsGuard)
-  @Permissions('users:staff:page', SYSTEM_CONFIGS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
+  @Permissions('users:staff:page', 'users:staff-rental-risk:page', SYSTEM_CONFIGS_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)
   async getStaffRuleEngine() {
     await this.service.ensureDefaults();
     return this.staffRuleEngineService.getConfig();
