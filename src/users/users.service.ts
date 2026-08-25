@@ -264,6 +264,10 @@ export class UsersService {
       allowed.add(UserType.STAFF);
     }
 
+    if (permissions.includes('users:staff-rental-risk:page')) {
+      allowed.add(UserType.STAFF);
+    }
+
     if (permissions.includes('users:internal:page')) {
       allowed.add(UserType.SUPER_ADMIN);
       allowed.add(UserType.ADMIN);
@@ -826,6 +830,7 @@ export class UsersService {
       const sceneTypeMap: Record<string, UserType[] | null> = {
         MEMBER: [UserType.REGISTERED_USER],
         STAFF: [UserType.STAFF],
+        STAFF_RENTAL_RISK: [UserType.STAFF],
         INTERNAL: [UserType.SUPER_ADMIN, UserType.ADMIN, UserType.CUSTOMER_SERVICE, UserType.OPERATION, UserType.FINANCE],
         ALL: actorAllowedUserTypes,
         DEFAULT: actorAllowedUserTypes,
@@ -905,6 +910,8 @@ export class UsersService {
 
     if (staffEmploymentStatus) {
       AND.push({ staffEmploymentStatus: String(staffEmploymentStatus).trim() });
+    } else if (sceneKey === 'STAFF_RENTAL_RISK') {
+      AND.push({ staffEmploymentStatus: { in: ['ACTIVE', 'FROZEN'] } });
     }
 
     if (String(anonymousOnly || '') === 'true') {
@@ -1003,6 +1010,7 @@ export class UsersService {
               walletUid: true,
               availableBalance: true,
               frozenBalance: true,
+              withdrawFrozenBalance: true,
               depositBalance: true,
             }
           },
@@ -1045,6 +1053,8 @@ export class UsersService {
 
       const available = Number(u?.walletAccount?.availableBalance ?? 0);
       const frozen = Number(u?.walletAccount?.frozenBalance ?? 0);
+      const withdrawFrozen = Number(u?.walletAccount?.withdrawFrozenBalance ?? 0);
+      const deposit = Number(u?.walletAccount?.depositBalance ?? 0);
 
       const lastAcceptOrderAt =
           u?.orderParticipants?.[0]?.acceptedAt ?? null;
@@ -1060,8 +1070,10 @@ export class UsersService {
           walletUid: u?.walletAccount?.walletUid ?? null,
           availableBalance: available,
           frozenBalance: frozen,
+          withdrawFrozenBalance: withdrawFrozen,
           totalBalance: Number((available + frozen).toFixed(2)),
-          depositBalance: u?.walletAccount?.depositBalance
+          depositBalance: deposit,
+          rentalRiskReferenceBalance: Number((available + deposit - withdrawFrozen).toFixed(2)),
         },
 
         lastAcceptOrderAt,

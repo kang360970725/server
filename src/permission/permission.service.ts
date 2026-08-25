@@ -180,6 +180,41 @@ export class PermissionService {
         });
     }
 
+    private async ensureRentalAccountPermissionTree() {
+        const usersMenu = await this.prisma.permission.upsert({
+            where: { key: 'menu:users' },
+            update: {
+                name: '用户管理',
+                module: 'menu',
+                type: PermissionType.PAGE,
+            },
+            create: {
+                key: 'menu:users',
+                name: '用户管理',
+                module: 'menu',
+                type: PermissionType.PAGE,
+            },
+            select: { id: true },
+        });
+
+        await this.prisma.permission.upsert({
+            where: { key: 'users:staff-rental-risk:page' },
+            update: {
+                name: '租号风控查询',
+                module: 'users',
+                type: PermissionType.PAGE,
+                parentId: usersMenu.id,
+            },
+            create: {
+                key: 'users:staff-rental-risk:page',
+                name: '租号风控查询',
+                module: 'users',
+                type: PermissionType.PAGE,
+                parentId: usersMenu.id,
+            },
+        });
+    }
+
     private sanitizePermissionInput(data: {
         key: string;
         name: string;
@@ -207,6 +242,7 @@ export class PermissionService {
         await this.ensureServiceOnlineBoardPermissionTree();
         await this.ensureExcellentStaffPermissionTree();
         await this.ensureMemberCouponPermissionTree();
+        await this.ensureRentalAccountPermissionTree();
 
         const permissions = await this.prisma.permission.findMany({
             orderBy: { id: 'asc' },

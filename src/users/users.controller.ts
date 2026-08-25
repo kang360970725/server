@@ -39,6 +39,7 @@ export class UsersController {
   private static readonly userManagePermissions = [
     'users:member:page',
     'users:staff:page',
+    'users:staff-rental-risk:page',
     'users:internal:page',
   ] as const;
 

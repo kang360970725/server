@@ -103,6 +103,7 @@ async function main() {
         { key: 'wallet:withdrawals:page', name: '提现审批/提现记录', module: 'wallet', type: PermissionType.PAGE, parentKey: 'menu:wallet' },
         { key: 'users:member:page', name: '会员管理', module: 'users', type: PermissionType.PAGE, parentKey: 'menu:users' },
         { key: 'users:staff:page', name: '服务者管理', module: 'users', type: PermissionType.PAGE, parentKey: 'menu:users' },
+        { key: 'users:staff-rental-risk:page', name: '租号风控查询', module: 'users', type: PermissionType.PAGE, parentKey: 'menu:users' },
         { key: 'users:internal:page', name: '后台人员', module: 'users', type: PermissionType.PAGE, parentKey: 'menu:users' },
         { key: 'users:member:create:button', name: '新增会员', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:member:page' },
         { key: 'users:member:edit:button', name: '编辑会员资料', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:member:page' },
@@ -227,6 +228,12 @@ async function main() {
         create: { name: 'CS_MANAGER', description: '客服主管（种子数据）' },
     });
 
+    const rentalAccountRole = await prisma.role.upsert({
+        where: { name: 'RENTAL_ACCOUNT_OPERATOR' },
+        update: { description: '商行租号专员（仅可查询服务者租号风控余额）' },
+        create: { name: 'RENTAL_ACCOUNT_OPERATOR', description: '商行租号专员（仅可查询服务者租号风控余额）' },
+    });
+
     /**
      * 3) 给角色挂权限
      * SUPER_ADMIN 拥有全权限；FINANCE_MANAGER 只预置财务、钱包和必要订单权限。
@@ -268,6 +275,19 @@ async function main() {
         data: {
             permissions: {
                 set: financePermissionIds.map((id) => ({ id })),
+            },
+        },
+    });
+
+    const rentalAccountPermissionIds = permissionRecords
+        .filter((p) => p.key === 'users:staff-rental-risk:page')
+        .map((p) => p.id);
+
+    await prisma.role.update({
+        where: { id: rentalAccountRole.id },
+        data: {
+            permissions: {
+                set: rentalAccountPermissionIds.map((id) => ({ id })),
             },
         },
     });
