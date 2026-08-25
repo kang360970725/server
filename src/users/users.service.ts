@@ -1055,6 +1055,7 @@ export class UsersService {
       const frozen = Number(u?.walletAccount?.frozenBalance ?? 0);
       const withdrawFrozen = Number(u?.walletAccount?.withdrawFrozenBalance ?? 0);
       const deposit = Number(u?.walletAccount?.depositBalance ?? 0);
+      const nonWithdrawFrozen = Math.max(0, Number((frozen - withdrawFrozen).toFixed(2)));
 
       const lastAcceptOrderAt =
           u?.orderParticipants?.[0]?.acceptedAt ?? null;
@@ -1073,7 +1074,8 @@ export class UsersService {
           withdrawFrozenBalance: withdrawFrozen,
           totalBalance: Number((available + frozen).toFixed(2)),
           depositBalance: deposit,
-          rentalRiskReferenceBalance: Number((available + deposit - withdrawFrozen).toFixed(2)),
+          nonWithdrawFrozenBalance: nonWithdrawFrozen,
+          rentalRiskReferenceBalance: Number((available + nonWithdrawFrozen + deposit).toFixed(2)),
         },
 
         lastAcceptOrderAt,

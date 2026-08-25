@@ -667,8 +667,8 @@
 - 新增角色 `RENTAL_ACCOUNT_OPERATOR`（商行租号专员），默认仅授予 `users:staff-rental-risk:page` 页面权限。
 - 新增权限 `users:staff-rental-risk:page`（租号风控查询），挂载在用户管理菜单下，并同步 seed、migration 与运行时权限树补齐逻辑。
 - 管理端新增 `/users/rental-risk` 页面，复用服务者列表但切换为只读风控视图，不展示新增、编辑、分配角色、退店、清退、提现开关等管理操作。
-- 服务者列表钱包字段补充 `withdrawFrozenBalance` 与 `rentalRiskReferenceBalance`，租号风控参考余额口径为：可用余额 + 保证金 - 提现冻结金额。
-- 租号风控页新增三色警示灯：低于 500 红色、500-1000 黄色、1000 以上绿色，并明确展示可用、冻结、保证金、提现冻结，避免把提现冻结资金误判为可覆盖风险余额。
+- 服务者列表钱包字段补充 `withdrawFrozenBalance`、`nonWithdrawFrozenBalance` 与 `rentalRiskReferenceBalance`，租号风控参考余额口径为：可用余额 + 非提现冻结金额 + 保证金。
+- 租号风控页新增三色警示灯：低于 500 红色、500-1000 黄色、1000 以上绿色，并明确展示可用、冻结、保证金、提现冻结、非提现冻结，避免把提现冻结资金误判为可覆盖风险余额，同时允许结算冻结等后续可释放资产进入参考。
 
 ---
 
