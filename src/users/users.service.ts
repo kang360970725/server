@@ -854,6 +854,15 @@ export class UsersService {
 
     const includeStaffMembersInMemberScene = sceneKey === 'MEMBER' && String(includeStaffMembers || '') === 'true';
     const sceneUserTypes = includeStaffMembersInMemberScene ? null : resolveSceneUserTypes();
+    if (sceneKey === 'STAFF_RENTAL_RISK' && !String(search || '').trim()) {
+      return {
+        data: [],
+        total: 0,
+        page,
+        limit,
+        totalPages: 0,
+      };
+    }
     if (includeStaffMembersInMemberScene) {
       AND.push({
         OR: [
