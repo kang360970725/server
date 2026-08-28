@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, Req } from '@nestjs/common';
 import { AuthService } from '../auth/auth.service';
 import { Public } from '../auth/decorators/public.decorator';
 import { miniOk } from './mini.response';
@@ -147,6 +147,88 @@ export class MiniAuthController {
     const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
     const profile = await this.authService.getUserWithPermissions(uid);
     return miniOk(profile);
+  }
+
+  @Post('bind-wechat')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: '当前登录用户绑定微信 openid' })
+  async bindWechat(@Req() req: any, @Body() body: { code: string }) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    if (!uid) return miniOk({ success: false, message: '未登录' }, '未登录');
+    const code = String(body?.code || '').trim();
+    if (!code) return miniOk({ success: false, message: '缺少微信登录 code' }, '缺少微信登录 code');
+
+    let wx: any;
+    try {
+      wx = await this.memberService.exchangeWechatCode(code);
+    } catch (e: any) {
+      return miniOk({ success: false, message: e?.message || '微信授权失败' }, e?.message || '微信授权失败');
+    }
+
+    try {
+      await this.memberService.upsertWechatBinding({
+        userId: uid,
+        appId: wx.appId,
+        openId: wx.openId,
+        unionId: wx.unionId,
+        sessionKey: wx.sessionKey,
+      });
+    } catch (e: any) {
+      return miniOk({ success: false, message: e?.message || '微信绑定失败' }, e?.message || '微信绑定失败');
+    }
+
+    return miniOk({
+      success: true,
+      appId: wx.appId,
+      openidMasked: wx.openId ? `${String(wx.openId).slice(0, 6)}***${String(wx.openId).slice(-4)}` : null,
+    }, '微信绑定成功');
+  }
+
+  @Get('bind-wechat-h5-url')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: '生成 H5 微信网页授权绑定地址' })
+  async getBindWechatH5Url(@Query('redirectUri') redirectUri: string) {
+    const uri = String(redirectUri || '').trim();
+    if (!uri || !/^https?:\/\//i.test(uri)) {
+      return miniOk({ success: false, message: '缺少有效 redirectUri' }, '缺少有效 redirectUri');
+    }
+    const { appId } = await this.memberService.getWechatH5OauthConfig();
+    if (!appId) return miniOk({ success: false, message: '未配置微信网页授权 AppID' }, '未配置微信网页授权 AppID');
+    const state = `bind_${Date.now().toString(36)}`;
+    const url =
+      `https://open.weixin.qq.com/connect/oauth2/authorize?appid=${encodeURIComponent(appId)}` +
+      `&redirect_uri=${encodeURIComponent(uri)}` +
+      `&response_type=code&scope=snsapi_base&state=${encodeURIComponent(state)}#wechat_redirect`;
+    return miniOk({ success: true, url, appId });
+  }
+
+  @Post('bind-wechat-h5')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'H5 当前登录用户绑定微信 openid' })
+  async bindWechatH5(@Req() req: any, @Body() body: { code: string }) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    if (!uid) return miniOk({ success: false, message: '未登录' }, '未登录');
+    const code = String(body?.code || '').trim();
+    if (!code) return miniOk({ success: false, message: '缺少微信网页授权 code' }, '缺少微信网页授权 code');
+    let wx: any;
+    try {
+      wx = await this.memberService.exchangeWechatH5OAuthCode(code);
+      await this.memberService.upsertWechatBinding({
+        userId: uid,
+        appId: wx.appId,
+        openId: wx.openId,
+        unionId: wx.unionId,
+        sessionKey: wx.accessToken,
+        platform: 'MP' as any,
+      });
+    } catch (e: any) {
+      return miniOk({ success: false, message: e?.message || '微信绑定失败' }, e?.message || '微信绑定失败');
+    }
+    return miniOk({
+      success: true,
+      appId: wx.appId,
+      openidMasked: wx.openId ? `${String(wx.openId).slice(0, 6)}***${String(wx.openId).slice(-4)}` : null,
+    }, '微信绑定成功');
   }
 
   @Post('refresh')

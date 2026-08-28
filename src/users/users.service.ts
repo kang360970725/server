@@ -879,25 +879,34 @@ export class UsersService {
       AND.push({ userType: { in: sceneUserTypes } });
     }
 
-    /**
-     * 1️⃣ 搜索：支持会员编码 / 手机号 / name / realName
-     * - 纯数字仍兼容后台用户ID精确查询，但前端会员场景不再提示用户ID。
-     */
     if (search) {
       const keyword = String(search).trim();
 
-      const OR: any[] = [
-        { phone: { contains: keyword } },
-        { name: { contains: keyword } },
-        { realName: { contains: keyword } },
-        { memberProfile: { is: { memberCode: { contains: keyword } } } },
-      ];
+      if (sceneKey === 'STAFF_RENTAL_RISK') {
+        AND.push({
+          OR: [
+            { name: keyword },
+            { realName: keyword },
+          ],
+        });
+      } else {
+        /**
+         * 1️⃣ 搜索：支持会员编码 / 手机号 / name / realName
+         * - 纯数字仍兼容后台用户ID精确查询，但前端会员场景不再提示用户ID。
+         */
+        const OR: any[] = [
+          { phone: { contains: keyword } },
+          { name: { contains: keyword } },
+          { realName: { contains: keyword } },
+          { memberProfile: { is: { memberCode: { contains: keyword } } } },
+        ];
 
-      if (/^\d+$/.test(keyword)) {
-        OR.push({ id: Number(keyword) });
+        if (/^\d+$/.test(keyword)) {
+          OR.push({ id: Number(keyword) });
+        }
+
+        AND.push({ OR });
       }
-
-      AND.push({ OR });
     }
 
     /**

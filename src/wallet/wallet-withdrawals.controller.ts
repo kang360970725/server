@@ -66,6 +66,7 @@ export class WalletWithdrawalsController {
             page: number;
             pageSize: number;
             status?: string;
+            transferStatus?: string;
             channel?: string;
             userId?: number;
             requestNo?: string;
@@ -84,6 +85,7 @@ export class WalletWithdrawalsController {
         @Body()
             body: {
             status?: string;
+            transferStatus?: string;
             channel?: string;
             userId?: number;
             requestNo?: string;
@@ -105,10 +107,48 @@ export class WalletWithdrawalsController {
             requestId: number;
             approve: boolean;
             reviewRemark?: string;
+            channel?: 'MANUAL' | 'WECHAT';
+            autoTransfer?: boolean;
         },
     ) {
         const reviewerId = req.user?.userId;
         return this.service.reviewWithdrawal({ ...body, reviewerId });
+    }
+
+    // ✅ 管理端：查询微信提现状态（成功时会真正完成出款扣减提现冻结）
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE)
+    @Post('wechat-transfer/query')
+    async queryWechatTransfer(
+        @Req() req: any,
+        @Body() body: { requestId: number },
+    ) {
+        const operatorId = req.user?.userId;
+        return this.service.queryWechatTransfer(Number(body?.requestId), Number(operatorId));
+    }
+
+    // ✅ 管理端：微信提现失败/处理中时转人工扫码兜底
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE)
+    @Post('fallback-manual')
+    async fallbackManual(
+        @Req() req: any,
+        @Body() body: { requestId: number; remark?: string },
+    ) {
+        const operatorId = req.user?.userId;
+        return this.service.fallbackToManual({ ...body, operatorId });
+    }
+
+    // ✅ 管理端：人工扫码兜底完成打款
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE)
+    @Post('manual-paid')
+    async manualPaid(
+        @Req() req: any,
+        @Body() body: { requestId: number; remark?: string },
+    ) {
+        const operatorId = req.user?.userId;
+        return this.service.completeManualPayout({ ...body, operatorId });
     }
 
     // ✅ 管理端：废除异常提现申请（历史修复/重新入驻冲抵兜底）

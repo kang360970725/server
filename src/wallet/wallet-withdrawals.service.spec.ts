@@ -14,6 +14,14 @@ describe('WalletWithdrawalsService.applyWithdrawal', () => {
     const offlineFeeService = {
       getWithdrawalObligationTx: jest.fn().mockResolvedValue({ outstanding: 0 }),
     } as any;
+    const systemConfigService = {
+      getBoolean: jest.fn().mockResolvedValue(false),
+      getNumber: jest.fn().mockResolvedValue(0),
+      getString: jest.fn().mockResolvedValue(''),
+    } as any;
+    const wechatTransferService = {
+      getConfigStatus: jest.fn().mockResolvedValue({ ready: false }),
+    } as any;
 
     return {
       service: new WalletWithdrawalsService(
@@ -22,6 +30,8 @@ describe('WalletWithdrawalsService.applyWithdrawal', () => {
         {} as any,
         offlineFeeService,
         staffRuleEngineService,
+        systemConfigService,
+        wechatTransferService,
       ),
       walletService,
       offlineFeeService,
@@ -190,6 +200,14 @@ describe('WalletWithdrawalsService.reviewWithdrawal', () => {
     const offlineFeeService = {
       getWithdrawalObligationTx: jest.fn().mockResolvedValue({ outstanding: 0 }),
     } as any;
+    const systemConfigService = {
+      getBoolean: jest.fn().mockResolvedValue(false),
+      getNumber: jest.fn().mockResolvedValue(0),
+      getString: jest.fn().mockResolvedValue(''),
+    } as any;
+    const wechatTransferService = {
+      getConfigStatus: jest.fn().mockResolvedValue({ ready: false }),
+    } as any;
 
     return {
       service: new WalletWithdrawalsService(
@@ -198,6 +216,8 @@ describe('WalletWithdrawalsService.reviewWithdrawal', () => {
         {} as any,
         offlineFeeService,
         staffRuleEngineService,
+        systemConfigService,
+        wechatTransferService,
       ),
       walletService,
     };

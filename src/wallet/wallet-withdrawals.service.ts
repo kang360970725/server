@@ -3,11 +3,13 @@ import { PrismaService } from '../prisma.service';
 import {tcbGetTempFileURL} from "../common/cloudbase.storage";
 import { WalletDepositService } from './wallet.deposit.service';
 import { OfflineFeeService } from '../offline-fee/offline-fee.service';
-import { PlayerWorkStatus, StaffEmploymentStatus, WalletTxStatus } from '@prisma/client';
+import { PlayerWorkStatus, StaffEmploymentStatus, WalletTxStatus, WithdrawalTransferStatus } from '@prisma/client';
 import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
 import { isDispatchMonitoredStaff } from '../common/utils/staff-role-scope.util';
 import { WalletService } from './wallet.service';
 import { EquipmentRentalFeeService } from '../equipment-rental-fee/equipment-rental-fee.service';
+import { SystemConfigService } from '../system-config/system-config.service';
+import { WechatWithdrawalTransferService } from './wechat-withdrawal-transfer.service';
 
 /** ✅ 截断到 2 位小数（不四舍五入） */
 const round2 = (v: any): number => {
@@ -33,6 +35,8 @@ export class WalletWithdrawalsService {
         private readonly walletDepositService: WalletDepositService,
         private readonly offlineFeeService: OfflineFeeService,
         private readonly staffRuleEngineService: StaffRuleEngineService,
+        private readonly systemConfigService: SystemConfigService,
+        private readonly wechatTransferService: WechatWithdrawalTransferService,
         private readonly equipmentRentalFeeService?: EquipmentRentalFeeService,
     ) {}
 
@@ -206,6 +210,241 @@ export class WalletWithdrawalsService {
         };
     }
 
+    private genTransferOutTradeNo(req: { id: number; requestNo?: string | null }) {
+        const base = String(req?.requestNo || `WD${req.id}`).replace(/[^A-Za-z0-9_-]/g, '');
+        return `WDT${base}`.slice(0, 64);
+    }
+
+    private async completeWithdrawalPayoutTx(tx: any, req: any, operatorId: number, patch: any = {}) {
+        const PAYOUT_SOURCE_TYPE = 'WITHDRAWAL_REQUEST_PAYOUT';
+        await this.lockWalletAccountTx(tx, req.userId);
+
+        const existingPayout = await tx.walletTransaction.findUnique({
+            where: {
+                sourceType_sourceId: { sourceType: PAYOUT_SOURCE_TYPE, sourceId: req.id },
+            },
+            select: { id: true },
+        });
+
+        if (existingPayout) {
+            return tx.walletWithdrawalRequest.update({
+                where: { id: req.id },
+                data: {
+                    status: 'PAID',
+                    transferStatus: WithdrawalTransferStatus.SUCCESS,
+                    transferFinishedAt: patch.transferFinishedAt || new Date(),
+                    payoutTxId: existingPayout.id,
+                    ...patch,
+                },
+            });
+        }
+
+        await this.walletService.ensureWalletAccountBucketsReady(req.userId, tx as any, {
+            autoRepairOnDeficit: true,
+            repairReason: '提现出款完成前自动修复钱包异常',
+            operatorId,
+        });
+
+        const accountAfterPayout = await this.walletService.applyWalletAccountDelta(tx as any, req.userId, {
+            withdrawFrozenDelta: -req.amount,
+        });
+        this.assertWalletBucketsNonNegative(accountAfterPayout);
+
+        const payoutTx = await tx.walletTransaction.upsert({
+            where: {
+                sourceType_sourceId: { sourceType: PAYOUT_SOURCE_TYPE, sourceId: req.id },
+            },
+            create: {
+                userId: req.userId,
+                direction: 'OUT',
+                bizType: 'WITHDRAW_PAYOUT',
+                amount: req.amount,
+                status: 'AVAILABLE',
+                sourceType: PAYOUT_SOURCE_TYPE,
+                sourceId: req.id,
+                availableAfter: round2(Number((accountAfterPayout as any).availableBalance ?? 0)),
+                frozenAfter: round2(Number((accountAfterPayout as any).frozenBalance ?? 0)),
+            },
+            update: {
+                direction: 'OUT',
+                bizType: 'WITHDRAW_PAYOUT',
+                amount: req.amount,
+                status: 'AVAILABLE',
+                availableAfter: round2(Number((accountAfterPayout as any).availableBalance ?? 0)),
+                frozenAfter: round2(Number((accountAfterPayout as any).frozenBalance ?? 0)),
+            },
+        });
+
+        return tx.walletWithdrawalRequest.update({
+            where: { id: req.id },
+            data: {
+                status: 'PAID',
+                transferStatus: WithdrawalTransferStatus.SUCCESS,
+                transferFinishedAt: patch.transferFinishedAt || new Date(),
+                payoutTxId: payoutTx.id,
+                ...patch,
+            },
+        });
+    }
+
+    private async assertWechatAutoTransferAllowed(req: any) {
+        const autoEnabled = await this.systemConfigService.getBoolean(SystemConfigService.KEYS.WITHDRAW_AUTO_TRANSFER_ENABLED, false);
+        const wechatEnabled = await this.systemConfigService.getBoolean(SystemConfigService.KEYS.WITHDRAW_WECHAT_TRANSFER_ENABLED, false);
+        if (!autoEnabled || !wechatEnabled) {
+            throw new BadRequestException('微信自动打款未开启，请使用人工扫码兜底');
+        }
+
+        const eligibility = await this.systemConfigService.getJson<any>(SystemConfigService.KEYS.WITHDRAW_AUTO_ELIGIBILITY, {
+            mode: 'WHITELIST',
+            userIds: [],
+            staffRuleGroups: [],
+            allowActiveStaffOnly: true,
+            requireWechatBinding: true,
+        });
+        const user = await this.prisma.user.findUnique({
+            where: { id: Number(req.userId) },
+            select: {
+                id: true,
+                userType: true,
+                staffEmploymentStatus: true,
+                staffTags: true,
+                realName: true,
+            },
+        });
+        if (!user) throw new BadRequestException('服务者不存在');
+        if (eligibility?.allowActiveStaffOnly !== false) {
+            const isActiveStaff =
+                String(user.userType || '') === 'STAFF' &&
+                String(user.staffEmploymentStatus || '') === StaffEmploymentStatus.ACTIVE;
+            if (!isActiveStaff) throw new BadRequestException('仅正常在店服务者可使用微信自动打款');
+        }
+
+        const mode = String(eligibility?.mode || 'WHITELIST').toUpperCase();
+        const allowAll = mode === 'ALL';
+        const allowedUserIds = new Set((Array.isArray(eligibility?.userIds) ? eligibility.userIds : []).map((item: any) => Number(item)).filter((item: number) => item > 0));
+        const allowedGroups = new Set((Array.isArray(eligibility?.staffRuleGroups) ? eligibility.staffRuleGroups : []).map((item: any) => String(item || '').trim()).filter(Boolean));
+        const userGroups = Array.isArray(user.staffTags) ? user.staffTags.map((item: any) => String(item || '').trim()).filter(Boolean) : [];
+        const hitUser = allowedUserIds.has(Number(user.id));
+        const hitGroup = userGroups.some((item) => allowedGroups.has(item));
+        if (!allowAll && !hitUser && !hitGroup) {
+            throw new BadRequestException('该服务者未开通小额微信自动打款资格，请使用人工扫码兜底');
+        }
+
+        if (eligibility?.requireWechatBinding !== false) {
+            await this.wechatTransferService.getReceiverOpenid(req.userId);
+        }
+
+        const amount = round2(Number(req?.amount || 0));
+        const singleLimit = await this.systemConfigService.getNumber(SystemConfigService.KEYS.WITHDRAW_AUTO_SINGLE_LIMIT, 2000);
+        if (amount > Number(singleLimit || 2000)) {
+            throw new BadRequestException(`单笔超过自动打款上限 ${singleLimit}，请转人工处理`);
+        }
+
+        const now = new Date();
+        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+        const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0);
+        const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+        const [userDay, userMonth, platformDay, paidHistoryCount] = await this.prisma.$transaction([
+            this.prisma.walletWithdrawalRequest.aggregate({
+                where: { userId: req.userId, channel: 'WECHAT', status: 'PAID', transferFinishedAt: { gte: startOfDay, lte: endOfDay } },
+                _sum: { amount: true },
+            }),
+            this.prisma.walletWithdrawalRequest.aggregate({
+                where: { userId: req.userId, channel: 'WECHAT', status: 'PAID', transferFinishedAt: { gte: startOfMonth, lte: endOfMonth } },
+                _sum: { amount: true },
+            }),
+            this.prisma.walletWithdrawalRequest.aggregate({
+                where: { channel: 'WECHAT', status: 'PAID', transferFinishedAt: { gte: startOfDay, lte: endOfDay } },
+                _sum: { amount: true },
+            }),
+            this.prisma.walletWithdrawalRequest.count({
+                where: { userId: req.userId, status: 'PAID' },
+            }),
+        ]);
+
+        const userDayLimit = await this.systemConfigService.getNumber(SystemConfigService.KEYS.WITHDRAW_AUTO_USER_DAY_LIMIT, 5000);
+        const userMonthLimit = await this.systemConfigService.getNumber(SystemConfigService.KEYS.WITHDRAW_AUTO_USER_MONTH_LIMIT, 15000);
+        const platformDayLimit = await this.systemConfigService.getNumber(SystemConfigService.KEYS.WITHDRAW_AUTO_PLATFORM_DAY_LIMIT, 50000);
+        const firstLimit = await this.systemConfigService.getNumber(SystemConfigService.KEYS.WITHDRAW_AUTO_FIRST_LIMIT, 1000);
+
+        if (paidHistoryCount === 0 && amount > Number(firstLimit || 1000)) {
+            throw new BadRequestException(`新人首次自动打款上限 ${firstLimit}，请转人工处理`);
+        }
+        if (Number(userDay?._sum?.amount || 0) + amount > Number(userDayLimit || 5000)) {
+            throw new BadRequestException(`单人每日自动打款超过 ${userDayLimit}，请转人工处理`);
+        }
+        if (Number(userMonth?._sum?.amount || 0) + amount > Number(userMonthLimit || 15000)) {
+            throw new BadRequestException(`单人每月自动打款超过 ${userMonthLimit}，请转人工处理`);
+        }
+        if (Number(platformDay?._sum?.amount || 0) + amount > Number(platformDayLimit || 50000)) {
+            throw new BadRequestException(`平台每日自动打款超过 ${platformDayLimit}，请转人工处理`);
+        }
+
+        const status = await this.wechatTransferService.getConfigStatus();
+        if (!status.ready) {
+            throw new BadRequestException('微信商家转账配置未就绪，请使用人工扫码兜底');
+        }
+    }
+
+    private async getWechatAutoEligibilitySnapshot(userId: number) {
+        const autoEnabled = await this.systemConfigService.getBoolean(SystemConfigService.KEYS.WITHDRAW_AUTO_TRANSFER_ENABLED, false);
+        const wechatEnabled = await this.systemConfigService.getBoolean(SystemConfigService.KEYS.WITHDRAW_WECHAT_TRANSFER_ENABLED, false);
+        const eligibility = await this.systemConfigService.getJson<any>(SystemConfigService.KEYS.WITHDRAW_AUTO_ELIGIBILITY, {
+            mode: 'WHITELIST',
+            userIds: [],
+            staffRuleGroups: [],
+            allowActiveStaffOnly: true,
+            requireWechatBinding: true,
+        });
+        const user = await this.prisma.user.findUnique({
+            where: { id: Number(userId) },
+            select: {
+                id: true,
+                userType: true,
+                staffEmploymentStatus: true,
+                staffTags: true,
+            },
+        });
+        const allowedUserIds = new Set((Array.isArray(eligibility?.userIds) ? eligibility.userIds : []).map((item: any) => Number(item)).filter((item: number) => item > 0));
+        const allowedGroups = new Set((Array.isArray(eligibility?.staffRuleGroups) ? eligibility.staffRuleGroups : []).map((item: any) => String(item || '').trim()).filter(Boolean));
+        const userGroups = Array.isArray(user?.staffTags) ? user.staffTags.map((item: any) => String(item || '').trim()).filter(Boolean) : [];
+        const mode = String(eligibility?.mode || 'WHITELIST').toUpperCase();
+        const hitEligibility = mode === 'ALL' || allowedUserIds.has(Number(user?.id || 0)) || userGroups.some((item) => allowedGroups.has(item));
+        const isActiveStaff =
+            String(user?.userType || '') === 'STAFF' &&
+            String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.ACTIVE;
+
+        let bound = false;
+        let bindMessage = '';
+        try {
+            await this.wechatTransferService.getReceiverOpenid(userId);
+            bound = true;
+        } catch (e: any) {
+            bindMessage = e?.message || '未绑定微信';
+        }
+
+        const reasons: string[] = [];
+        if (!autoEnabled) reasons.push('自动打款总开关未开启');
+        if (!wechatEnabled) reasons.push('微信自动打款通道未开启');
+        if (eligibility?.allowActiveStaffOnly !== false && !isActiveStaff) reasons.push('仅正常在店服务者可用');
+        if (!hitEligibility) reasons.push('未在小额自动打款白名单或规则分组内');
+        if (eligibility?.requireWechatBinding !== false && !bound) reasons.push(bindMessage || '未绑定微信');
+
+        return {
+            autoEnabled,
+            wechatEnabled,
+            eligibilityMode: mode,
+            eligible: reasons.length === 0,
+            reasons,
+            wechatBinding: {
+                bound,
+                message: bound ? '已绑定当前小程序微信' : bindMessage,
+            },
+        };
+    }
+
     private buildReviewedAtSingleDayRange(reviewDate?: string) {
         const formatLocalDate = (date: Date) => [
             date.getFullYear(),
@@ -301,6 +540,7 @@ export class WalletWithdrawalsService {
             firstWithdrawMinAcceptedDays: Number(matchedRule?.firstWithdrawMinAcceptedDays ?? 15),
             matchedStaffRule: matchedRule,
             workMode: user.workMode,
+            wechatAutoTransfer: await this.getWechatAutoEligibilitySnapshot(userId),
         };
     }
 
@@ -324,14 +564,15 @@ export class WalletWithdrawalsService {
         remark?: string;
         channel?: 'MANUAL' | 'WECHAT';
     }) {
-        const { userId, amount, remark, channel = 'MANUAL' } = params;
+        const { userId, amount, remark } = params;
+        const channel = 'MANUAL';
         const idempotencyKey = this.normalizeIdempotencyKey(params.idempotencyKey);
 
         if (!amount || amount <= 0) {
             throw new BadRequestException('提现金额必须大于 0');
         }
 
-        return this.prisma.$transaction(async (tx) => {
+        const reviewed = await this.prisma.$transaction(async (tx) => {
             const freezeCheckedUser = await this.autoFreezeDormantStaffIfNeeded(userId, tx);
             if (isDispatchMonitoredStaff(freezeCheckedUser) && String(freezeCheckedUser?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {
                 const config = await this.staffRuleEngineService.getConfig();
@@ -627,6 +868,8 @@ export class WalletWithdrawalsService {
                 ...request,
             };
         });
+
+        return reviewed;
     }
 
     /**
@@ -645,10 +888,12 @@ export class WalletWithdrawalsService {
         reviewerId: number;
         approve: boolean;
         reviewRemark?: string;
+        channel?: 'MANUAL' | 'WECHAT';
+        autoTransfer?: boolean;
     }) {
         const { requestId, reviewerId, approve, reviewRemark } = params;
 
-        return this.prisma.$transaction(async (tx) => {
+        const reviewed = await this.prisma.$transaction(async (tx) => {
             await this.lockWithdrawalRequestTx(tx, requestId);
             const req = await tx.walletWithdrawalRequest.findUnique({
                 where: { id: requestId },
@@ -658,8 +903,11 @@ export class WalletWithdrawalsService {
             // ✅ 幂等：终态直接返回，避免重复扣减/重复流水
             if (req.status === 'PAID' || req.status === 'REJECTED') return req;
 
-            if (req.status !== 'PENDING_REVIEW') {
+            if (approve && req.status !== 'PENDING_REVIEW') {
                 throw new BadRequestException('该提现申请不在待审核状态');
+            }
+            if (!approve && !['PENDING_REVIEW', 'APPROVED', 'FAILED'].includes(String(req.status))) {
+                throw new BadRequestException('该提现申请当前状态不能驳回');
             }
 
             const now = new Date();
@@ -668,78 +916,14 @@ export class WalletWithdrawalsService {
             // ✅ 审批通过：当前阶段按“通过即出款完成”处理（最小改动）
             // ===========================
             if (approve) {
-                // 1) 幂等：是否已存在出款流水（避免重复扣 frozen）
-                const PAYOUT_SOURCE_TYPE = 'WITHDRAWAL_REQUEST_PAYOUT';
-                await this.lockWalletAccountTx(tx, req.userId);
-
-                const existingPayout = await tx.walletTransaction.findUnique({
-                    where: {
-                        sourceType_sourceId: { sourceType: PAYOUT_SOURCE_TYPE, sourceId: req.id },
-                    },
-                    select: { id: true },
-                });
-
-                if (!existingPayout) {
-                    await this.walletService.ensureWalletAccountBucketsReady(req.userId, tx as any, {
-                        autoRepairOnDeficit: true,
-                        repairReason: '提现审核通过前自动修复钱包异常',
-                        operatorId: reviewerId,
-                    });
-                    // 2) 扣除冻结余额（真正扣款）
-                    const accountAfterPayout = await this.walletService.applyWalletAccountDelta(tx as any, req.userId, {
-                        withdrawFrozenDelta: -req.amount,
-                    });
-                    this.assertWalletBucketsNonNegative(accountAfterPayout);
-
-                    // 3) 写出款流水（WITHDRAW_PAYOUT）
-                    const payoutTx = await tx.walletTransaction.upsert({
-                        where: {
-                            sourceType_sourceId: { sourceType: PAYOUT_SOURCE_TYPE, sourceId: req.id },
-                        },
-                        create: {
-                            userId: req.userId,
-                            direction: 'OUT',
-                            bizType: 'WITHDRAW_PAYOUT',
-                            amount: req.amount,
-                            status: 'AVAILABLE', // ✅ 已完成的资金变动
-                            sourceType: PAYOUT_SOURCE_TYPE,
-                            sourceId: req.id,
-                            // ✅ 余额快照（本笔出款后的余额）
-                            availableAfter: round2(Number((accountAfterPayout as any).availableBalance ?? 0)),
-                            frozenAfter: round2(Number((accountAfterPayout as any).frozenBalance ?? 0)),
-                        },
-                        update: {
-                            direction: 'OUT',
-                            bizType: 'WITHDRAW_PAYOUT',
-                            amount: req.amount,
-                            status: 'AVAILABLE',
-                            availableAfter: round2(Number((accountAfterPayout as any).availableBalance ?? 0)),
-                            frozenAfter: round2(Number((accountAfterPayout as any).frozenBalance ?? 0)),
-                        },
-                    });
-
-                    return tx.walletWithdrawalRequest.update({
-                        where: { id: requestId },
-                        data: {
-                            status: 'PAID',
-                            reviewedBy: reviewerId,
-                            reviewedAt: now,
-                            reviewRemark,
-                            payoutTxId: payoutTx.id,
-                        },
-                    });
-                }
-
-                // 4) 更新申请单为 PAID（并记录审核信息）
-                return tx.walletWithdrawalRequest.update({
-                    where: { id: requestId },
-                    data: {
-                        status: 'PAID', // ✅ 当前阶段：通过即视为已打款
-                        reviewedBy: reviewerId,
-                        reviewedAt: now,
-                        reviewRemark,
-                        payoutTxId: existingPayout.id,
-                    },
+                return this.completeWithdrawalPayoutTx(tx, req, reviewerId, {
+                    channel: 'MANUAL',
+                    reviewedBy: reviewerId,
+                    reviewedAt: now,
+                    reviewRemark,
+                    transferStatus: WithdrawalTransferStatus.SUCCESS,
+                    transferStartedAt: now,
+                    transferFinishedAt: now,
                 });
             }
 
@@ -804,10 +988,174 @@ export class WalletWithdrawalsService {
                 where: { id: requestId },
                 data: {
                     status: 'REJECTED',
+                    transferStatus: WithdrawalTransferStatus.CANCELLED,
+                    transferFinishedAt: now,
                     reviewedBy: reviewerId,
                     reviewedAt: now,
                     reviewRemark,
                 },
+            });
+        });
+
+        if (reviewed?.status === 'PAYING' && reviewed?.channel === 'WECHAT') {
+            return this.startWechatTransfer(Number(reviewed.id), Number(reviewerId));
+        }
+
+        return reviewed;
+    }
+
+    async startWechatTransfer(requestId: number, operatorId: number) {
+        const req = await this.prisma.walletWithdrawalRequest.findUnique({ where: { id: Number(requestId) } });
+        if (!req) throw new BadRequestException('提现申请不存在');
+        if (req.status === 'PAID') return req;
+        if (!['PAYING', 'FAILED'].includes(String(req.status))) {
+            throw new BadRequestException('当前提现申请状态不允许发起微信自动打款');
+        }
+        if (String(req.channel) !== 'WECHAT') {
+            throw new BadRequestException('当前提现申请不是微信自动打款通道');
+        }
+        await this.assertWechatAutoTransferAllowed(req);
+
+        const outTradeNo = req.outTradeNo || this.genTransferOutTradeNo(req);
+        await this.prisma.walletWithdrawalRequest.update({
+            where: { id: req.id },
+            data: {
+                status: 'PAYING',
+                transferStatus: WithdrawalTransferStatus.PROCESSING,
+                outTradeNo,
+                transferStartedAt: req.transferStartedAt || new Date(),
+                failReason: null,
+            },
+        });
+
+        try {
+            const result = await this.wechatTransferService.createTransfer({
+                userId: req.userId,
+                requestNo: req.requestNo,
+                outBillNo: outTradeNo,
+                amountFen: Math.max(1, Math.round(Number(req.amount || 0) * 100)),
+                remark: `提现${req.requestNo}`,
+            });
+            return this.applyTransferResult(req.id, operatorId, result);
+        } catch (e: any) {
+            const msg = e?.response?.data?.message || e?.data?.message || e?.message || '微信提现发起失败';
+            return this.prisma.walletWithdrawalRequest.update({
+                where: { id: req.id },
+                data: {
+                    status: 'FAILED',
+                    transferStatus: WithdrawalTransferStatus.FAILED,
+                    failReason: String(msg),
+                    transferFinishedAt: new Date(),
+                },
+            });
+        }
+    }
+
+    private async applyTransferResult(requestId: number, operatorId: number, result: any) {
+        const status = String(result?.status || '').toUpperCase();
+        const now = new Date();
+        const callbackRaw = JSON.stringify(result?.raw || result || {});
+        const channelTradeNo = String(result?.transferBillNo || '').trim() || undefined;
+
+        if (status === 'SUCCESS') {
+            return this.prisma.$transaction(async (tx) => {
+                await this.lockWithdrawalRequestTx(tx, requestId);
+                const req = await tx.walletWithdrawalRequest.findUnique({ where: { id: requestId } });
+                if (!req) throw new BadRequestException('提现申请不存在');
+                if (req.status === 'PAID') return req;
+                return this.completeWithdrawalPayoutTx(tx, req, operatorId, {
+                    channel: 'WECHAT',
+                    transferStatus: WithdrawalTransferStatus.SUCCESS,
+                    channelTradeNo,
+                    callbackRaw,
+                    failReason: null,
+                    transferFinishedAt: now,
+                });
+            });
+        }
+
+        if (status === 'FAILED' || status === 'CANCELLED' || status === 'CANCELED') {
+            return this.prisma.walletWithdrawalRequest.update({
+                where: { id: requestId },
+                data: {
+                    status: 'FAILED',
+                    transferStatus: status === 'FAILED' ? WithdrawalTransferStatus.FAILED : WithdrawalTransferStatus.CANCELLED,
+                    channelTradeNo,
+                    callbackRaw,
+                    failReason: result?.raw?.fail_reason || result?.raw?.message || '微信提现失败或已撤销',
+                    transferFinishedAt: now,
+                },
+            });
+        }
+
+        return this.prisma.walletWithdrawalRequest.update({
+            where: { id: requestId },
+            data: {
+                status: 'PAYING',
+                transferStatus: status === 'WAIT_USER_CONFIRM'
+                    ? WithdrawalTransferStatus.WAIT_USER_CONFIRM
+                    : WithdrawalTransferStatus.PROCESSING,
+                channelTradeNo,
+                callbackRaw,
+            },
+        });
+    }
+
+    async queryWechatTransfer(requestId: number, operatorId: number) {
+        const req = await this.prisma.walletWithdrawalRequest.findUnique({ where: { id: Number(requestId) } });
+        if (!req) throw new BadRequestException('提现申请不存在');
+        if (String(req.channel) !== 'WECHAT') throw new BadRequestException('当前提现申请不是微信自动打款通道');
+        const outTradeNo = String(req.outTradeNo || '').trim();
+        if (!outTradeNo) throw new BadRequestException('缺少微信提现平台出款单号');
+        const result = await this.wechatTransferService.queryTransfer(outTradeNo);
+        return this.applyTransferResult(req.id, operatorId, result);
+    }
+
+    async fallbackToManual(params: { requestId: number; operatorId: number; remark?: string }) {
+        const { requestId, operatorId, remark } = params;
+        return this.prisma.$transaction(async (tx) => {
+            await this.lockWithdrawalRequestTx(tx, requestId);
+            const req = await tx.walletWithdrawalRequest.findUnique({ where: { id: Number(requestId) } });
+            if (!req) throw new BadRequestException('提现申请不存在');
+            if (req.status === 'PAID') return req;
+            if (!['PAYING', 'FAILED', 'APPROVED'].includes(String(req.status))) {
+                throw new BadRequestException('当前提现申请状态不允许转人工');
+            }
+            return tx.walletWithdrawalRequest.update({
+                where: { id: req.id },
+                data: {
+                    status: 'APPROVED',
+                    channel: 'MANUAL',
+                    transferStatus: WithdrawalTransferStatus.MANUAL_FALLBACK,
+                    manualFallbackAt: new Date(),
+                    manualFallbackBy: operatorId || null,
+                    reviewRemark: [req.reviewRemark, String(remark || '转人工扫码处理').trim()].filter(Boolean).join('；'),
+                },
+            });
+        });
+    }
+
+    async completeManualPayout(params: { requestId: number; operatorId: number; remark?: string }) {
+        const { requestId, operatorId, remark } = params;
+        return this.prisma.$transaction(async (tx) => {
+            await this.lockWithdrawalRequestTx(tx, requestId);
+            const req = await tx.walletWithdrawalRequest.findUnique({ where: { id: Number(requestId) } });
+            if (!req) throw new BadRequestException('提现申请不存在');
+            if (req.status === 'PAID') return req;
+            if (String(req.channel) !== 'MANUAL') throw new BadRequestException('当前提现申请不是人工扫码通道');
+            if (!['APPROVED', 'FAILED'].includes(String(req.status))) {
+                throw new BadRequestException('当前提现申请状态不允许确认人工打款');
+            }
+            const now = new Date();
+            return this.completeWithdrawalPayoutTx(tx, req, operatorId, {
+                channel: 'MANUAL',
+                reviewedBy: req.reviewedBy || operatorId,
+                reviewedAt: req.reviewedAt || now,
+                reviewRemark: [req.reviewRemark, String(remark || '人工扫码已打款').trim()].filter(Boolean).join('；'),
+                transferStatus: req.transferStatus === WithdrawalTransferStatus.MANUAL_FALLBACK
+                    ? WithdrawalTransferStatus.MANUAL_FALLBACK
+                    : WithdrawalTransferStatus.SUCCESS,
+                transferFinishedAt: now,
             });
         });
     }
@@ -900,6 +1248,8 @@ export class WalletWithdrawalsService {
                 where: { id: req.id },
                 data: {
                     status: 'CANCELED',
+                    transferStatus: WithdrawalTransferStatus.CANCELLED,
+                    transferFinishedAt: now,
                     reviewedBy: operatorId || null,
                     reviewedAt: now,
                     reviewRemark: cancelRemark,
@@ -937,7 +1287,7 @@ export class WalletWithdrawalsService {
 
     /** 管理端：待审核列表（带用户昵称 + 钱包余额 + 收款码临时URL） */
     async listPending(reviewDate?: string) {
-        const where = { status: 'PENDING_REVIEW' as any };
+        const where = { status: { in: ['PENDING_REVIEW', 'PAYING', 'FAILED', 'APPROVED'] as any } };
         const { reviewedAt, fromDate, toDate, reviewDate: summaryDate } = this.buildReviewedAtSingleDayRange(reviewDate);
 
         const [count, aggregate, list, todayApprovedAgg, todayPaidAgg] = await this.prisma.$transaction([
@@ -1008,6 +1358,7 @@ export class WalletWithdrawalsService {
                         withdrawFrozenBalance: 0,
                     },
                     withdrawQrCodeUrl: withdrawQrCodeUrl || null,
+                    wechatAutoTransfer: await this.getWechatAutoEligibilitySnapshot(r.userId),
                 };
             }),
         );
@@ -1038,6 +1389,7 @@ export class WalletWithdrawalsService {
         page: number;
         pageSize: number;
         status?: string;
+        transferStatus?: string;
         channel?: string;
         userId?: number;
         requestNo?: string;
@@ -1048,6 +1400,7 @@ export class WalletWithdrawalsService {
             page = 1,
             pageSize = 20,
             status,
+            transferStatus,
             channel,
             userId,
             requestNo,
@@ -1061,6 +1414,7 @@ export class WalletWithdrawalsService {
         const where: any = {};
 
         if (status) where.status = status;
+        if (transferStatus) where.transferStatus = transferStatus;
         if (channel) where.channel = channel;
         if (userId) where.userId = Number(userId);
 
@@ -1140,16 +1494,18 @@ export class WalletWithdrawalsService {
      */
     async reconcileSummary(params: {
         status?: string;
+        transferStatus?: string;
         channel?: string;
         userId?: number;
         requestNo?: string;
         createdAtFrom?: string;
         createdAtTo?: string;
     }) {
-        const { status, channel, userId, requestNo, createdAtFrom, createdAtTo } = params || ({} as any);
+        const { status, transferStatus, channel, userId, requestNo, createdAtFrom, createdAtTo } = params || ({} as any);
 
         const baseWhere: any = {};
         if (status) baseWhere.status = status;
+        if (transferStatus) baseWhere.transferStatus = transferStatus;
         if (channel) baseWhere.channel = channel;
         if (userId) baseWhere.userId = Number(userId);
         if (requestNo && String(requestNo).trim()) {

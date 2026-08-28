@@ -9,6 +9,7 @@ import { WalletDepositService } from './wallet.deposit.service';
 import { OfflineFeeModule } from '../offline-fee/offline-fee.module';
 import { SystemConfigModule } from '../system-config/system-config.module';
 import { EquipmentRentalFeeModule } from '../equipment-rental-fee/equipment-rental-fee.module';
+import { WechatWithdrawalTransferService } from './wechat-withdrawal-transfer.service';
 
 /**
  * WalletModule（V0.1）
@@ -24,7 +25,7 @@ import { EquipmentRentalFeeModule } from '../equipment-rental-fee/equipment-rent
         WalletController,
         WalletWithdrawalsController, // ✅ 新增
     ],
-    providers: [WalletService,WalletWithdrawalsService, WalletScheduler,PrismaService, WalletDepositService],
+    providers: [WalletService,WalletWithdrawalsService, WalletScheduler,PrismaService, WalletDepositService, WechatWithdrawalTransferService],
     exports: [WalletService, WalletWithdrawalsService],
 })
 export class WalletModule {}

@@ -7,6 +7,104 @@
 
 ---
 
+## 2026-08-28 ｜微信支付商户安全验证文件
+
+### 本次动作
+- 新增微信支付商户安全验证凭证文件 `verify_98c2bf5059943483ae673d143fec765d.html`。
+- 文件已放置到管理端项目根目录和 `public/` 目录：
+  - `/Users/allen/Desktop/BlueCat-App/newObject/system-admin/verify_98c2bf5059943483ae673d143fec765d.html`
+  - `/Users/allen/Desktop/BlueCat-App/newObject/system-admin/public/verify_98c2bf5059943483ae673d143fec765d.html`
+- `public/` 版本用于前端构建产物在网站根路径直接访问，便于微信支付商户平台完成安全验证。
+
+---
+
+## 2026-08-28 ｜微信提现自动到账暂停与会员 H5 优先级调整
+
+### 决策背景
+- 调研微信商家转账场景与提额要求后，确认当前“服务者提现自动到账”方案存在较高不确定性，后续随时可能因场景、额度、风控或合规口径被限制/停用。
+- 当前阶段不再继续推进微信提现自动到账上线，优先恢复并保障现有人工线下打款流程稳定，再转向会员系统 H5 版本打通。
+
+### 本次动作
+- 管理端系统配置页屏蔽自动到账相关配置入口，避免运营误开启或误配置：
+  - `withdraw_auto_transfer_enabled`
+  - `withdraw_wechat_transfer_enabled`
+  - `withdraw_wechat_transfer_mock`
+  - `withdraw_auto_single_limit`
+  - `withdraw_auto_first_limit`
+  - `withdraw_auto_user_day_limit`
+  - `withdraw_auto_user_month_limit`
+  - `withdraw_auto_platform_day_limit`
+  - `withdraw_auto_eligibility`
+  - `wechat_transfer_scene_id`
+  - `wechat_transfer_notify_url`
+  - `wechat_transfer_appid`
+  - `wechat_transfer_appsecret`
+- 服务者移动端提现申请弹窗移除“微信自动到账/即将上线”入口与资格提示，仅保留现有人工线下打款流程。
+- 管理端提现审批弹窗移除微信自动打款资格展示和“微信自动打款”审批选择，审批通过统一走人工线下打款完成逻辑。
+- 后端提现申请与审批增加保险：即使旧前端缓存或手工请求传入 `channel=WECHAT`/`autoTransfer=true`，新申请和审批通过也会按 `MANUAL` 渠道处理，不触发微信商家转账。
+- 保留 H5 微信网页授权绑定接口和前端 API 能力：`bind-wechat-h5-url` / `bind-wechat-h5` 不删除，后续会员系统 H5 可复用这条微信授权链路获取微信用户标识。
+
+### 后续方向
+- 自动到账相关数据库字段、服务类和管理接口暂不删除，作为预留代码保留；后续如切换更合规稳定的出款通道，再评估是否复用。
+- 下一阶段优先开发会员系统 H5 版本，微信授权绑定能力以会员识别、会员登录/绑定为主，不再绑定到提现自动出款场景。
+
+---
+
+## 2026-08-26 ｜提现微信自动打款一期
+
+### 本次动作
+- 启动“微信自动打款 + 人工扫码兜底”一期开发，暂不开发支付宝、银行 API、第三方代发或订单分账。
+- 新增 Prisma migration `20260826093000_add_withdrawal_auto_transfer_fields`，为 `wallet_withdrawal_requests` 增加独立打款状态 `transferStatus`、打款发起/完成时间、转人工时间和转人工操作人字段。
+- 新增自动打款配置项，默认全部关闭，避免发布后误自动出款：
+  - `withdraw_auto_transfer_enabled`
+  - `withdraw_wechat_transfer_enabled`
+  - `withdraw_wechat_transfer_mock`
+  - `withdraw_auto_single_limit`
+  - `withdraw_auto_first_limit`
+  - `withdraw_auto_user_day_limit`
+  - `withdraw_auto_user_month_limit`
+  - `withdraw_auto_platform_day_limit`
+  - `wechat_transfer_scene_id`
+  - `wechat_transfer_notify_url`
+- 新增钱包侧 `WechatWithdrawalTransferService`，复用微信支付商户号、AppID、商户证书序列号和商户私钥配置；微信提现收款 openid 从 `UserWechatBinding` 中按当前小程序 AppID 读取。
+- 提现审核流程拆分为两条：
+  - 人工扫码：审核通过后仍按旧逻辑直接完成出款，扣减提现冻结并写 `WITHDRAW_PAYOUT` 流水。
+  - 微信自动打款：审核通过后先置为 `PAYING/PROCESSING`，事务提交后发起微信商家转账；只有通道成功或查单成功后才真正扣减提现冻结并置为 `PAID`。
+- 自动打款失败时，提现单置为 `FAILED`，提现冻结保持不释放；后台可选择“转人工”继续扫码兜底，或在失败状态下驳回并释放冻结。
+- 新增管理端接口：
+  - `POST /wallet/withdrawals/wechat-transfer/query`：查询微信提现状态，成功时完成出款。
+  - `POST /wallet/withdrawals/fallback-manual`：微信提现处理中/失败后转人工扫码兜底。
+  - `POST /wallet/withdrawals/manual-paid`：人工扫码确认已打款，完成出款扣减提现冻结。
+- 提现审批页从“待审核”扩展为“待处理提现”，展示待审核、打款中、打款失败、转人工待确认单；审批弹窗支持选择“人工扫码兜底/微信自动打款”。
+- 提现记录页新增打款状态、通道单号展示和筛选，方便财务对账。
+- 新增登录态微信绑定接口 `POST /mini/auth/bind-wechat`，服务者必须先以当前账号登录后绑定微信；该接口只绑定当前账号，不会像微信登录一样自动创建新会员账号。
+- 新增 H5/移动端微信网页授权绑定闭环：
+  - `GET /mini/auth/bind-wechat-h5-url` 生成微信网页授权地址；
+  - `POST /mini/auth/bind-wechat-h5` 使用微信网页授权 `code` 绑定当前登录账号；
+  - 管理端服务者钱包/提现页在未满足微信绑定条件时提供“在微信内绑定当前账号”入口，微信回跳后自动完成绑定并刷新提现资格。
+- 新增小额自动打款资格配置 `withdraw_auto_eligibility`，默认 `WHITELIST` 且名单为空；只有全局开关、微信通道、资格白名单/规则分组、服务者状态和微信绑定均通过时，后台才允许选择微信自动打款。
+- 服务者提现页返回并展示微信自动到账资格状态；提现审批页同步展示该服务者是否具备微信自动打款资格和未命中原因。
+
+### 上线前置
+- 商户后台需确认已开通“商家转账到零钱 / API 发起转账”，并完成场景 ID、接口安全 IP、商户 API 私钥/证书序列号、AppID 与商户号绑定配置。
+- 服务者必须通过对应小程序完成微信绑定，系统需要能取到同一 AppID 下的 `openid`。
+- 如优先走移动端 H5 绑定，需配置 `wechat_transfer_appid` 与 `wechat_transfer_appsecret`，并在微信公众平台配置网页授权域名；该 AppID 也需要与微信支付商户号满足商家转账要求。
+- 后台需在 `withdraw_auto_eligibility` 中配置允许使用小额自动打款的 `userIds` 或 `staffRuleGroups`；如需全员按风控规则开放，可显式将 `mode` 改为 `ALL`。
+- 灰度测试建议先开启 `withdraw_wechat_transfer_mock=true` 验证状态机和钱包冻结，再关闭 mock 并从小额单开始真实打款。
+
+---
+
+## 2026-08-26 ｜风控查询收紧与手机号展示脱敏
+
+### 本次动作
+- 风控查询场景 `STAFF_RENTAL_RISK` 改为后端强制精确查询：仅允许按服务者展示名 `name` 或姓名 `realName` 完全匹配，不再支持手机号、ID、会员编码或模糊查询；空查询继续返回空列表，避免默认暴露服务者账户余额。
+- 管理端风控查询页同步调整搜索项文案为“姓名/昵称”，提示“仅支持精确查询”，降低误用手机号/ID 查询的预期。
+- 新增统一隐私工具 `maskPhone`，手机号展示统一按“前三位 + ****** + 后两位”呈现，例如 `138******00`；登录、绑定手机号、搜索输入等业务输入场景不做脱敏，避免影响用户录入。
+- 用户管理、会员充值小票、订单创建/详情/列表、服务者在线看板、服务者工作台、罚单、值班、优惠券、商品评价、奖池后台、财务账单、钱包对账等后台展示点统一接入手机号脱敏。
+- 后台页面新增全局水印：除登录页、公开菜单页和公开活动页外，统一展示当前登录用户姓名 + 脱敏手机号；服务者工作台原有局部水印同步脱敏。
+
+---
+
 ## 2026-08-20 ｜服务者默认规则分组可选
 
 ### 本次动作

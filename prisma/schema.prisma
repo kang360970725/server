@@ -1434,6 +1434,7 @@ model WalletWithdrawalRequest {
   amount         Float
   status         WithdrawalStatus   @default(PENDING_REVIEW)
   channel        WithdrawalChannel  @default(MANUAL)
+  transferStatus WithdrawalTransferStatus @default(NOT_STARTED)
   /// ✅ 幂等键：前端/客户端生成（推荐 uuid），用于防重复提交
   /// - 同一个 userId + idempotencyKey 只能申请一次
   idempotencyKey String             @db.VarChar(64)
@@ -1454,6 +1455,10 @@ model WalletWithdrawalRequest {
   outTradeNo     String?            @db.VarChar(64)
   /// 微信/三方返回的交易号
   channelTradeNo String?            @db.VarChar(64)
+  transferStartedAt DateTime?
+  transferFinishedAt DateTime?
+  manualFallbackAt DateTime?
+  manualFallbackBy Int?
   /// 三方回调原始内容（可存 JSON 字符串）
   callbackRaw    String?            @db.Text
   /// 最近一次打款错误原因
@@ -1829,6 +1834,16 @@ enum WithdrawalStatus {
 enum WithdrawalChannel {
   WECHAT
   MANUAL
+}
+
+enum WithdrawalTransferStatus {
+  NOT_STARTED
+  PROCESSING
+  WAIT_USER_CONFIRM
+  SUCCESS
+  FAILED
+  CANCELLED
+  MANUAL_FALLBACK
 }
 
 enum EquipmentRentalContractStatus {

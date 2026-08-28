@@ -1655,6 +1655,49 @@ export class MemberService {
     };
   }
 
+  async getWechatH5OauthConfig() {
+    const fallbackMiniAppId = await this.systemConfigService.getString(
+      SystemConfigService.KEYS.WECHAT_MINI_APPID,
+      String(process.env.WECHAT_MINI_APPID || process.env.WECHAT_PAY_APPID || '').trim(),
+    );
+    const appId =
+      await this.systemConfigService.getString(
+        SystemConfigService.KEYS.WECHAT_TRANSFER_APPID,
+        String(process.env.WECHAT_TRANSFER_APPID || '').trim(),
+      ) || fallbackMiniAppId;
+    const appSecret =
+      await this.systemConfigService.getString(
+        SystemConfigService.KEYS.WECHAT_TRANSFER_APPSECRET,
+        String(process.env.WECHAT_TRANSFER_APPSECRET || '').trim(),
+      ) ||
+      await this.systemConfigService.getString(
+        SystemConfigService.KEYS.WECHAT_MINI_APPSECRET,
+        String(process.env.WECHAT_MINI_APPSECRET || '').trim(),
+      );
+    return { appId, appSecret };
+  }
+
+  async exchangeWechatH5OAuthCode(code: string) {
+    const { appId, appSecret } = await this.getWechatH5OauthConfig();
+    if (!appId || !appSecret) {
+      throw new BadRequestException('未配置微信网页授权参数');
+    }
+    const url = `https://api.weixin.qq.com/sns/oauth2/access_token?appid=${encodeURIComponent(appId)}&secret=${encodeURIComponent(appSecret)}&code=${encodeURIComponent(String(code || '').trim())}&grant_type=authorization_code`;
+    const resp = await fetch(url);
+    const data: any = await resp.json();
+    const openId = String(data?.openid || '').trim();
+    if (!openId) {
+      throw new BadRequestException(data?.errmsg || '微信网页授权失败');
+    }
+    return {
+      appId,
+      openId,
+      unionId: String(data?.unionid || '').trim() || undefined,
+      accessToken: String(data?.access_token || '').trim() || undefined,
+      refreshToken: String(data?.refresh_token || '').trim() || undefined,
+    };
+  }
+
   async getWechatMiniConfig() {
     const appId = await this.systemConfigService.getString(
       SystemConfigService.KEYS.WECHAT_MINI_APPID,
