@@ -1166,7 +1166,7 @@ export class UsersService {
       matchedStaffRule: matchedRule,
       matchedDepositAmount: Number(matchedRule?.depositAmount ?? user?.depositLimit ?? 2000),
       matchedFirstWithdrawMinBalance: Number(matchedRule?.firstWithdrawMinBalance ?? 1000),
-      matchedFirstWithdrawMinAcceptedDays: Number(matchedRule?.firstWithdrawMinAcceptedDays ?? 15),
+      matchedFirstWithdrawMinAcceptedOrders: Number(matchedRule?.firstWithdrawMinAcceptedOrders ?? 20),
       matchedQuitCoolingDays: Number(matchedRule?.quitCoolingDays ?? this.staffExitCooldownDays),
       matchedDepositForfeitDays: Number(matchedRule?.depositForfeitDays ?? 0),
     };
@@ -1242,7 +1242,7 @@ export class UsersService {
       clearAmount: Number((availableBalance + frozenBalance + depositBalance).toFixed(2)),
       depositAmountRule,
       firstWithdrawMinBalance: ruleSummary.matchedFirstWithdrawMinBalance,
-      firstWithdrawMinAcceptedDays: ruleSummary.matchedFirstWithdrawMinAcceptedDays,
+      firstWithdrawMinAcceptedOrders: ruleSummary.matchedFirstWithdrawMinAcceptedOrders,
       refundWhenDepositInsufficient: false,
       blacklistAllowed: finalAvailableBalance <= 0,
       suggestedExitMode: StaffExitMode.RELEASE_TO_AVAILABLE,

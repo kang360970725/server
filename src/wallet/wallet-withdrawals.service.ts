@@ -537,7 +537,7 @@ export class WalletWithdrawalsService {
             depositBalance: Number(user.walletAccount?.depositBalance || 0),
             depositLimit: Number(matchedRule?.depositAmount ?? user.depositLimit ?? 500),
             firstWithdrawMinBalance: Number(matchedRule?.firstWithdrawMinBalance ?? 1000),
-            firstWithdrawMinAcceptedDays: Number(matchedRule?.firstWithdrawMinAcceptedDays ?? 15),
+            firstWithdrawMinAcceptedOrders: Number(matchedRule?.firstWithdrawMinAcceptedOrders ?? 20),
             matchedStaffRule: matchedRule,
             workMode: user.workMode,
             wechatAutoTransfer: await this.getWechatAutoEligibilitySnapshot(userId),
@@ -678,25 +678,24 @@ export class WalletWithdrawalsService {
                     u.staffTags,
                 );
                 const firstWithdrawMinBalance = Number(matchedRule?.firstWithdrawMinBalance ?? 1000);
-                const firstWithdrawMinAcceptedDays = Number(matchedRule?.firstWithdrawMinAcceptedDays ?? 15);
+                const firstWithdrawMinAcceptedOrders = Number(matchedRule?.firstWithdrawMinAcceptedOrders ?? 20);
 
-                const firstDispatch = await tx.orderParticipant.findFirst({
-                    where: { userId },
-                    orderBy: { acceptedAt: 'asc' },
-                    select: { acceptedAt: true },
+                // 按订单去重；历史轮次接过单也计入，不受当前参与者 isActive 影响。
+                const acceptedOrderCount = await tx.order.count({
+                    where: {
+                        status: { notIn: ['CANCELLED', 'REFUNDED'] },
+                        dispatches: {
+                            some: {
+                                participants: {
+                                    some: { userId, acceptedAt: { not: null }, rejectedAt: null },
+                                },
+                            },
+                        },
+                    },
                 });
 
-                if (!firstDispatch) {
-                    throw new BadRequestException('未接单用户暂不能提现');
-                }
-
-                const days = Math.floor(
-                    (Date.now() - new Date(firstDispatch.acceptedAt).getTime()) /
-                    (1000 * 60 * 60 * 24)
-                );
-
-                if (days < firstWithdrawMinAcceptedDays) {
-                    throw new BadRequestException(`首次提现需接单满${firstWithdrawMinAcceptedDays}天`);
+                if (acceptedOrderCount < firstWithdrawMinAcceptedOrders) {
+                    throw new BadRequestException(`首次提现需接单满${firstWithdrawMinAcceptedOrders}单，当前已接${acceptedOrderCount}单`);
                 }
 
                 const accountCheck = await tx.walletAccount.findUnique({

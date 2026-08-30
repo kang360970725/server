@@ -1,7 +1,21 @@
 import { StaffRuleEngineService } from './staff-rule-engine.service';
 
 describe('StaffRuleEngineService', () => {
-  it('defaults first withdrawal accepted-days threshold to 15 for existing rules', () => {
+  it.each([-1, 1.5, 'abc'])('rejects invalid first withdrawal order threshold %s', (value) => {
+    const service = new StaffRuleEngineService({} as any);
+    expect(() => service.normalizeConfig({
+      defaultRule: { firstWithdrawMinAcceptedOrders: value },
+    })).toThrow('首次提现接单单数');
+  });
+
+  it('allows zero orders to disable the order-count restriction', () => {
+    const service = new StaffRuleEngineService({} as any);
+    expect(service.normalizeConfig({
+      defaultRule: { firstWithdrawMinAcceptedOrders: 0 },
+    }).defaultRule.firstWithdrawMinAcceptedOrders).toBe(0);
+  });
+
+  it('defaults first withdrawal order threshold to 20 for legacy day-based rules', () => {
     const service = new StaffRuleEngineService({} as any);
 
     const config = service.normalizeConfig({
@@ -20,13 +34,16 @@ describe('StaffRuleEngineService', () => {
           tagCodes: ['new_staff'],
           depositAmount: 500,
           firstWithdrawMinBalance: 1000,
+          firstWithdrawMinAcceptedDays: 15,
           quitCoolingDays: 180,
           depositForfeitDays: 30,
         },
       ],
     });
 
-    expect(config.rules[0].firstWithdrawMinAcceptedDays).toBe(15);
+    expect(config.rules[0].firstWithdrawMinAcceptedOrders).toBe(20);
+    expect(config.defaultRule.firstWithdrawMinAcceptedOrders).toBe(20);
+    expect(config.rules[0]).not.toHaveProperty('firstWithdrawMinAcceptedDays');
     expect(config.rules[0].dormantFreezeDays).toBe(7);
     expect(config.rules[0].settlementFreezeExperienceDays).toBe(3);
     expect(config.rules[0].settlementFreezeRegularDays).toBe(7);
@@ -42,7 +59,7 @@ describe('StaffRuleEngineService', () => {
       defaultRule: {
         depositAmount: 600,
         firstWithdrawMinBalance: 1200,
-        firstWithdrawMinAcceptedDays: 10,
+        firstWithdrawMinAcceptedOrders: 10,
         quitCoolingDays: 90,
         depositForfeitDays: 45,
         dormantFreezeDays: 12,
@@ -57,7 +74,7 @@ describe('StaffRuleEngineService', () => {
           tagCodes: ['vip'],
           depositAmount: 800,
           firstWithdrawMinBalance: 1600,
-          firstWithdrawMinAcceptedDays: 20,
+          firstWithdrawMinAcceptedOrders: 20,
           quitCoolingDays: 180,
           depositForfeitDays: 60,
           dormantFreezeDays: 5,
@@ -70,6 +87,7 @@ describe('StaffRuleEngineService', () => {
     const matched = service.resolveMatchedRule(config, []);
     expect(matched?.id).toBe('default_rule');
     expect(matched?.depositAmount).toBe(600);
+    expect(matched?.firstWithdrawMinAcceptedOrders).toBe(10);
     expect(service.getDormantFreezeDays(config, [])).toBe(12);
     expect(matched?.settlementFreezeExperienceDays).toBe(4);
     expect(matched?.settlementFreezeRegularDays).toBe(8);

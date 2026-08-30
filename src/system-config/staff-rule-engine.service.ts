@@ -18,7 +18,7 @@ export type StaffRuleItem = {
   tagCodes: string[];
   depositAmount: number;
   firstWithdrawMinBalance: number;
-  firstWithdrawMinAcceptedDays: number;
+  firstWithdrawMinAcceptedOrders: number;
   quitCoolingDays: number;
   depositForfeitDays: number;
   dormantFreezeDays: number;
@@ -50,7 +50,7 @@ export class StaffRuleEngineService {
       tagCodes: [],
       depositAmount: 500,
       firstWithdrawMinBalance: 1000,
-      firstWithdrawMinAcceptedDays: 15,
+      firstWithdrawMinAcceptedOrders: 20,
       quitCoolingDays: 180,
       depositForfeitDays: 30,
       dormantFreezeDays: 7,
@@ -79,6 +79,13 @@ export class StaffRuleEngineService {
   private normalizeRuleItem(item: any, index: number, tagCodeSet: Set<string>, options?: { defaultRule?: boolean; allowMultipleTags?: boolean }): StaffRuleItem {
     const isDefaultRule = Boolean(options?.defaultRule);
     const fallbackDefault = this.getDefaultRule();
+    // 天数与单数不是同一单位；旧配置缺少新字段时统一使用20单。
+    const acceptedOrders = item?.firstWithdrawMinAcceptedOrders == null
+      ? fallbackDefault.firstWithdrawMinAcceptedOrders
+      : this.toSafeNumber(item.firstWithdrawMinAcceptedOrders, '首次提现接单单数');
+    if (!Number.isSafeInteger(acceptedOrders)) {
+      throw new BadRequestException('首次提现接单单数必须为大于等于 0 的整数');
+    }
     const id = String(item?.id || (isDefaultRule ? fallbackDefault.id : '')).trim();
     const name = String(item?.name || (isDefaultRule ? fallbackDefault.name : '')).trim();
     const tagCodes = Array.isArray(item?.tagCodes)
@@ -114,9 +121,7 @@ export class StaffRuleEngineService {
       firstWithdrawMinBalance: item?.firstWithdrawMinBalance === undefined || item?.firstWithdrawMinBalance === null
         ? fallbackDefault.firstWithdrawMinBalance
         : this.toSafeNumber(item?.firstWithdrawMinBalance, `规则 ${name} 的首次提现金额限制`),
-      firstWithdrawMinAcceptedDays: item?.firstWithdrawMinAcceptedDays === undefined || item?.firstWithdrawMinAcceptedDays === null
-        ? fallbackDefault.firstWithdrawMinAcceptedDays
-        : this.toSafeNumber(item?.firstWithdrawMinAcceptedDays, `规则 ${name} 的首次提现接单天数限制`),
+      firstWithdrawMinAcceptedOrders: acceptedOrders,
       quitCoolingDays: item?.quitCoolingDays === undefined || item?.quitCoolingDays === null
         ? fallbackDefault.quitCoolingDays
         : this.toSafeNumber(item?.quitCoolingDays, `规则 ${name} 的退店冷却期`),
@@ -309,7 +314,7 @@ export class StaffRuleEngineService {
         return {
           ...rule,
           tagCodes: ruleTags,
-          firstWithdrawMinAcceptedDays: Number(rule?.firstWithdrawMinAcceptedDays ?? 15),
+          firstWithdrawMinAcceptedOrders: Number(rule?.firstWithdrawMinAcceptedOrders ?? 20),
           dormantFreezeDays: Number(rule?.dormantFreezeDays ?? 7),
           settlementFreezeExperienceDays: Number(rule?.settlementFreezeExperienceDays ?? 3),
           settlementFreezeRegularDays: Number(rule?.settlementFreezeRegularDays ?? 7),
@@ -323,7 +328,7 @@ export class StaffRuleEngineService {
       ...defaultRule,
       enabled: true,
       tagCodes: [],
-      firstWithdrawMinAcceptedDays: Number(defaultRule?.firstWithdrawMinAcceptedDays ?? 15),
+      firstWithdrawMinAcceptedOrders: Number(defaultRule?.firstWithdrawMinAcceptedOrders ?? 20),
       dormantFreezeDays: Number(defaultRule?.dormantFreezeDays ?? 7),
       settlementFreezeExperienceDays: Number(defaultRule?.settlementFreezeExperienceDays ?? 3),
       settlementFreezeRegularDays: Number(defaultRule?.settlementFreezeRegularDays ?? 7),

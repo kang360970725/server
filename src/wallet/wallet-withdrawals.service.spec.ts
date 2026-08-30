@@ -38,7 +38,20 @@ describe('WalletWithdrawalsService.applyWithdrawal', () => {
     };
   };
 
-  it('uses configured first withdrawal accepted-days threshold', async () => {
+  it.each([
+    [20, 0, 1000, '首次提现需接单满20单，当前已接0单', 0],
+    [20, 19, 1000, '首次提现需接单满20单，当前已接19单', 0],
+    [3, 2, 1000, '首次提现需接单满3单，当前已接2单', 0],
+    [20, 20, 999, '首次提现余额需达到 1000', 0],
+    [20, 20, 1000, '可用余额不足', 0],
+    [20, 21, 1000, '可用余额不足', 0],
+    [0, 0, 1000, '可用余额不足', 0],
+    [20, 20, 1000, '', 0],
+    [20, 21, 1000, '', 0],
+    [3, 3, 1000, '', 0],
+    [0, 0, 1000, '', 0],
+    [20, 0, 500, '', 1],
+  ])('checks threshold %s, orders %s, balance %s, error "%s", history %s', async (threshold, count, balance, expectedError, history) => {
     const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
     const tx: any = {
       $queryRawUnsafe: jest.fn().mockResolvedValue([]),
@@ -68,14 +81,20 @@ describe('WalletWithdrawalsService.applyWithdrawal', () => {
           .fn()
           .mockResolvedValueOnce(0)
           .mockResolvedValueOnce(0)
-          .mockResolvedValueOnce(0),
+          .mockResolvedValueOnce(history),
         findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockImplementation(async ({ data }) => ({ id: 31, ...data })),
       },
       orderParticipant: {
         findFirst: jest.fn().mockResolvedValue({ acceptedAt: twoDaysAgo }),
       },
+      order: { count: jest.fn().mockResolvedValue(count) },
       walletAccount: {
-        findUnique: jest.fn(),
+        findUnique: jest.fn().mockResolvedValue({ availableBalance: balance, depositBalance: 500 }),
+      },
+      walletTransaction: {
+        create: jest.fn().mockResolvedValue({ id: 91 }),
+        update: jest.fn().mockResolvedValue({ id: 91 }),
       },
     };
 
@@ -85,21 +104,54 @@ describe('WalletWithdrawalsService.applyWithdrawal', () => {
     const staffRuleEngineService = {
       getConfig: jest.fn().mockResolvedValue({ tags: [], rules: [], defaultRule: { dormantFreezeDays: 7 } }),
       resolveMatchedRule: jest.fn().mockReturnValue({
-        firstWithdrawMinBalance: 100,
-        firstWithdrawMinAcceptedDays: 3,
+        firstWithdrawMinBalance: 1000,
+        firstWithdrawMinAcceptedOrders: threshold,
         depositAmount: 500,
         dormantFreezeDays: 7,
       }),
       getDormantFreezeDays: jest.fn().mockReturnValue(7),
       buildDormantFreezeMessage: jest.fn((days: number) => `用户活跃度太低，已经超过${days}天，账号已自动冻结，请联系管理超哥进行处理。`),
     } as any;
-    const { service } = createService(prisma, tx, staffRuleEngineService);
+    const { service, walletService } = createService(prisma, tx, staffRuleEngineService);
 
-    await expect(service.applyWithdrawal({
+    const withdrawal = service.applyWithdrawal({
       userId: 9,
-      amount: 100,
-      idempotencyKey: 'first-withdraw-days-1',
-    })).rejects.toThrow('首次提现需接单满3天');
+      amount: expectedError ? 1100 : 500,
+      idempotencyKey: 'first-withdraw-orders-1',
+    });
+    if (expectedError) {
+      await expect(withdrawal).rejects.toThrow(expectedError);
+      expect(walletService.applyWalletAccountDelta).not.toHaveBeenCalled();
+      expect(tx.walletWithdrawalRequest.create).not.toHaveBeenCalled();
+      expect(tx.walletTransaction.create).not.toHaveBeenCalled();
+    } else {
+      await expect(withdrawal).resolves.toMatchObject({
+        userId: 9, amount: 500, status: 'PENDING_REVIEW', reserveTxId: 91,
+      });
+      expect(walletService.applyWalletAccountDelta).toHaveBeenCalledTimes(1);
+      expect(walletService.applyWalletAccountDelta).toHaveBeenCalledWith(tx, 9, {
+        availableDelta: -500, depositDelta: 0, withdrawFrozenDelta: 500,
+      });
+      expect(tx.walletTransaction.create).toHaveBeenCalledTimes(1);
+      expect(tx.walletTransaction.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ bizType: 'WITHDRAW_RESERVE', amount: 500 }),
+      }));
+      expect(tx.walletTransaction.update).toHaveBeenCalledWith({
+        where: { id: 91 }, data: { sourceId: 31 },
+      });
+    }
+    if (history) {
+      expect(tx.order.count).not.toHaveBeenCalled();
+      return;
+    }
+    expect(tx.order.count).toHaveBeenCalledWith({
+      where: {
+        status: { notIn: ['CANCELLED', 'REFUNDED'] },
+        dispatches: { some: { participants: { some: {
+          userId: 9, acceptedAt: { not: null }, rejectedAt: null,
+        } } } },
+      },
+    });
   });
 
   it('does not auto deduct deposit for exited staff withdrawal', async () => {
