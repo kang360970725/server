@@ -7,6 +7,55 @@
 
 ---
 
+## 2026-08-28 ｜续单/指定二选一归因与移动端派单体验优化
+
+### 背景
+- 续单之外新增“指定”分红场景：指定复用续单分红规则，但不受优秀服务者名单限制，所有被指定成员均参与分红。
+- 客服在移动端快捷派单/创建订单时需要更快选择“普通、续单、指定”，避免两个复选框造成误选或同时勾选。
+- 订单弹窗顶部金额/状态摘要在移动端占用高度偏大，需要进一步压缩。
+
+### 本次动作
+- `order_renewal_groups` 新增 `attributionType` 字段：
+  - `RENEWAL`：续单，仍按派单时快照的优秀服务者资格决定谁享受续单分红。
+  - `DESIGNATED`：指定，分红规则同续单，但所选服务者均参与分红，不读取优秀服务者名单。
+- 新增 migration：`20260828172000_add_order_bonus_attribution_type`，并增加 `attributionType/status/settledAt` 组合索引。
+- 创建订单、快捷发单、订单管理创建弹窗均支持“分红归因：普通 / 续单 / 指定”三段选择，并在前后端同时校验续单和指定不可同时存在。
+- 指定/续单成员必须来自当前首轮派单服务者；非首轮派单不允许设置续单或指定归因。
+- 续单榜单仅统计 `attributionType=RENEWAL` 的数据，避免指定单污染续单榜单。
+- 订单详情和结单确认弹窗改为“分红归因”中性文案，钱包入账备注按实际归因显示“续单分红”或“指定分红”。
+- 管理端移动端表单摘要卡压缩高度与字号，5 个顶部指标改为更紧凑的横向轻扫小卡，减少遮挡表单内容。
+
+### 设计约束
+- 为降低影响范围，继续复用原 `OrderRenewalGroup` 与 `OrderRenewalBonus` 结算链路，只增加归因类型字段区分业务含义。
+- `Order.isRenewal` 暂作为“存在续单/指定额外分红归因”的兼容标识保留，避免大范围改动旧查询和旧结算入口。
+
+---
+
+## 2026-08-28 ｜派单客户标识类型与真实游戏ID补录
+
+### 背景
+- 客服派单时，客户经常只提供游戏昵称或房间号；昵称可变、房间号一次性，不能作为长期客户账号绑定依据。
+- 原系统只有 `customerGameId` 字段，容易把昵称/房间号误当作准确游戏ID，导致后续查询消费记录和客户账号绑定不稳定。
+
+### 本次动作
+- 订单表新增字段：
+  - `customerIdentifierType`：客户首次提供内容类型，`GAME_ID` 表示准确游戏ID，`ALIAS` 表示昵称/房间号等临时标识。
+  - `customerOriginalIdentifier`：客服首次录入的原始客户标识，后续补齐真实游戏ID时不覆盖。
+- 新增 migration：`20260828161000_add_order_customer_identifier_type`；历史订单默认回填为 `GAME_ID`，并将原 `customerGameId` 写入 `customerOriginalIdentifier`。
+- 创建订单/快捷发单新增“客户提供内容”选择：
+  - 准确游戏ID：写入 `customerGameId`，流程与历史一致，存单/结单不阻断。
+  - 昵称/房间号：仅写入 `customerOriginalIdentifier`，`customerGameId` 暂为空，等待服务者补齐。
+- 服务者工作台、客服订单详情页的存单/结单弹窗增加补录规则：
+  - 若订单为 `ALIAS` 且尚无 `customerGameId`，必须填写客户准确游戏ID后才能继续存单或结单。
+  - 补齐后只更新 `customerGameId`，不覆盖 `customerOriginalIdentifier`。
+- 订单列表和订单详情展示“客户提供内容/客户准确游戏ID”，避免将昵称或房间号误读为准确游戏ID。
+
+### 设计约束
+- 采用轻字段兼容，不改动客户主数据结构，不强制派单时绑定客户账号。
+- 后端在存单/结单接口做强校验，避免绕过前端导致不完整订单继续流转。
+
+---
+
 ## 2026-08-28 ｜微信支付商户安全验证文件
 
 ### 本次动作
@@ -15,6 +64,12 @@
   - `/Users/allen/Desktop/BlueCat-App/newObject/system-admin/verify_98c2bf5059943483ae673d143fec765d.html`
   - `/Users/allen/Desktop/BlueCat-App/newObject/system-admin/public/verify_98c2bf5059943483ae673d143fec765d.html`
 - `public/` 版本用于前端构建产物在网站根路径直接访问，便于微信支付商户平台完成安全验证。
+- 新增商户转账场景证明流程图，用于描述“平台撮合订单 -> 服务者提供服务 -> 完成结算 -> 冻结期 -> 提现审核 -> 转账”的业务闭环：
+  - `/Users/allen/Desktop/BlueCat-App/newObject/system-admin/public/verification-assets/platform-settlement-flow.svg`
+  - `/Users/allen/Desktop/BlueCat-App/newObject/system-admin/public/verification-assets/platform-settlement-flow.png`
+- 新增《平台服务者入驻与服务收益结算协议（审核材料参考版）》：
+  - `/Users/allen/Desktop/BlueCat-App/newObject/server/docs/PLATFORM_SERVICE_PROVIDER_AGREEMENT.md`
+- 协议口径强调“平台招商合作服务提供方”“订单服务收益结算”“服务者自主申请提现”，避免使用工资、薪资、员工发薪、雇佣等表述；正式对外使用前需由法律顾问按主体资质和真实业务复核。
 
 ---
 
@@ -23,6 +78,7 @@
 ### 决策背景
 - 调研微信商家转账场景与提额要求后，确认当前“服务者提现自动到账”方案存在较高不确定性，后续随时可能因场景、额度、风控或合规口径被限制/停用。
 - 当前阶段不再继续推进微信提现自动到账上线，优先恢复并保障现有人工线下打款流程稳定，再转向会员系统 H5 版本打通。
+- 会员系统 H5 优先采用公众号 AppID 做微信网页授权；小程序 AppID 继续用于小程序登录、支付和订阅消息，不与 H5 主身份链路混用。
 
 ### 本次动作
 - 管理端系统配置页屏蔽自动到账相关配置入口，避免运营误开启或误配置：
@@ -43,10 +99,17 @@
 - 管理端提现审批弹窗移除微信自动打款资格展示和“微信自动打款”审批选择，审批通过统一走人工线下打款完成逻辑。
 - 后端提现申请与审批增加保险：即使旧前端缓存或手工请求传入 `channel=WECHAT`/`autoTransfer=true`，新申请和审批通过也会按 `MANUAL` 渠道处理，不触发微信商家转账。
 - 保留 H5 微信网页授权绑定接口和前端 API 能力：`bind-wechat-h5-url` / `bind-wechat-h5` 不删除，后续会员系统 H5 可复用这条微信授权链路获取微信用户标识。
+- 新增独立 H5 公众号网页授权配置项：
+  - `wechat_h5_appid`
+  - `wechat_h5_appsecret`
+- H5 微信授权配置读取顺序调整为：优先 `wechat_h5_appid/appsecret`，其次历史预留的 `wechat_transfer_appid/appsecret`，最后兜底小程序配置；后续会员 H5 应直接配置公众号 AppID。
+- 微信绑定补齐 `unionId` 保护：微信返回 `unionid` 时会写入 `user_wechat_bindings.unionId`，并禁止同一 `unionid` 绑定到不同系统用户；微信未返回 `unionid` 时不阻塞绑定，也不会把历史已有 `unionId` 覆盖为空。
+- H5 绑定接口返回补充 `hasUnionId` 与 `unionidMasked`，便于后续会员 H5 判断当前公众号/小程序是否已挂到同一个微信开放平台主体。
 
 ### 后续方向
 - 自动到账相关数据库字段、服务类和管理接口暂不删除，作为预留代码保留；后续如切换更合规稳定的出款通道，再评估是否复用。
 - 下一阶段优先开发会员系统 H5 版本，微信授权绑定能力以会员识别、会员登录/绑定为主，不再绑定到提现自动出款场景。
+- 如需跨公众号、小程序统一会员身份，应确认公众号与小程序已绑定到同一微信开放平台账号；否则只能分别依赖各自 AppID 下的 `openid`，无法稳定生成同一 `unionid`。
 
 ---
 

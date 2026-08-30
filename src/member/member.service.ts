@@ -532,6 +532,7 @@ export class MemberService {
     const platform = input.platform ?? WechatBindingPlatform.MINIAPP;
     const openId = String(input.openId || '').trim();
     const appId = String(input.appId || '').trim();
+    const unionId = String(input.unionId || '').trim();
     if (!openId || !appId) throw new BadRequestException('微信绑定参数缺失');
 
     const existingByOpenId = await db.userWechatBinding.findUnique({
@@ -548,6 +549,19 @@ export class MemberService {
       throw new BadRequestException('该微信账号已绑定其他用户');
     }
 
+    if (unionId) {
+      const existingByUnionId = await db.userWechatBinding.findFirst({
+        where: {
+          unionId,
+          userId: { not: Number(input.userId) },
+        },
+        select: { id: true, userId: true },
+      });
+      if (existingByUnionId) {
+        throw new BadRequestException('该微信开放平台账号已绑定其他用户');
+      }
+    }
+
     return db.userWechatBinding.upsert({
       where: {
         platform_appId_openId: {
@@ -561,7 +575,7 @@ export class MemberService {
         platform,
         appId,
         openId,
-        unionId: input.unionId ? String(input.unionId).trim() : null,
+        unionId: unionId || null,
         sessionKey: input.sessionKey ? String(input.sessionKey).trim() : null,
         nickname: input.nickname ? String(input.nickname).trim() : null,
         avatarUrl: input.avatarUrl ? String(input.avatarUrl).trim() : null,
@@ -570,7 +584,7 @@ export class MemberService {
       },
       update: {
         userId: input.userId,
-        unionId: input.unionId ? String(input.unionId).trim() : null,
+        ...(unionId ? { unionId } : {}),
         sessionKey: input.sessionKey ? String(input.sessionKey).trim() : null,
         nickname: input.nickname ? String(input.nickname).trim() : null,
         avatarUrl: input.avatarUrl ? String(input.avatarUrl).trim() : null,
@@ -1656,16 +1670,24 @@ export class MemberService {
   }
 
   async getWechatH5OauthConfig() {
+    const h5AppId = await this.systemConfigService.getString(
+      SystemConfigService.KEYS.WECHAT_H5_APPID,
+      String(process.env.WECHAT_H5_APPID || process.env.WECHAT_MP_APPID || '').trim(),
+    );
+    const h5AppSecret = await this.systemConfigService.getString(
+      SystemConfigService.KEYS.WECHAT_H5_APPSECRET,
+      String(process.env.WECHAT_H5_APPSECRET || process.env.WECHAT_MP_APPSECRET || '').trim(),
+    );
     const fallbackMiniAppId = await this.systemConfigService.getString(
       SystemConfigService.KEYS.WECHAT_MINI_APPID,
       String(process.env.WECHAT_MINI_APPID || process.env.WECHAT_PAY_APPID || '').trim(),
     );
-    const appId =
+    const appId = h5AppId ||
       await this.systemConfigService.getString(
         SystemConfigService.KEYS.WECHAT_TRANSFER_APPID,
         String(process.env.WECHAT_TRANSFER_APPID || '').trim(),
       ) || fallbackMiniAppId;
-    const appSecret =
+    const appSecret = h5AppSecret ||
       await this.systemConfigService.getString(
         SystemConfigService.KEYS.WECHAT_TRANSFER_APPSECRET,
         String(process.env.WECHAT_TRANSFER_APPSECRET || '').trim(),

@@ -878,6 +878,10 @@ model Order {
   projectSnapshot        Json
   /// 客户游戏 ID / 昵称：用于查询消费记录
   customerGameId         String?
+  /// 客服首次录入的客户标识类型：GAME_ID=准确游戏ID，ALIAS=昵称/房间号等临时标识
+  customerIdentifierType String?                 @db.VarChar(20)
+  /// 客服首次录入的原始客户标识，后续补齐真实游戏ID时不覆盖
+  customerOriginalIdentifier String?
   /// 下单客户（用于小程序/公众号等自助来源回溯客户信息）
   customerUserId         Int?
   /// 当前客服/当前归属客服：允许在重新派单时更新
@@ -965,6 +969,7 @@ model Order {
   @@index([isRenewal])
   @@index([orderSource])
   @@index([customerGameId])
+  @@index([customerIdentifierType], map: "idx_order_customer_identifier_type")
   @@index([currentDispatchId], map: "Order_currentDispatchId_fkey")
   @@index([latestPaymentId], map: "Order_latestPaymentId_fkey")
 }
@@ -1213,6 +1218,8 @@ model OrderRenewalGroup {
   dispatchId          Int
   /// 续单组合 key：续单打手 userId 升序拼接，例如 "12,18"
   groupKey            String              @db.VarChar(255)
+  /// 分红归因类型：RENEWAL=续单，DESIGNATED=指定；指定复用续单分红规则但不受优秀服务者限制
+  attributionType     String              @default("RENEWAL") @db.VarChar(24)
   memberUserIds       Json
   memberNamesSnapshot Json?
   bonusEligibleUserIds Json?
@@ -1238,6 +1245,7 @@ model OrderRenewalGroup {
   bonuses             OrderRenewalBonus[]
 
   @@unique([orderId], map: "uniq_order_renewal_group_order")
+  @@index([attributionType, status, settledAt], map: "idx_order_renewal_group_attr_rank")
   @@index([groupKey, status, settledAt], map: "idx_order_renewal_group_rank")
   @@index([dispatchId], map: "idx_order_renewal_group_dispatch")
   @@map("order_renewal_groups")

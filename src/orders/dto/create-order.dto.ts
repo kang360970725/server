@@ -60,6 +60,14 @@ export class CreateOrderDto {
     customerGameId?: string;
 
     @IsOptional()
+    @IsString()
+    customerIdentifierType?: string;
+
+    @IsOptional()
+    @IsString()
+    customerOriginalIdentifier?: string;
+
+    @IsOptional()
     @IsInt()
     customerUserId?: number;
 
@@ -158,5 +166,24 @@ export class CreateOrderDto {
     @Type(() => Number)
     @IsInt({ each: true })
     renewalPlayerIds?: number[];
+
+    /**
+     * 是否指定：
+     * - 与续单二选一，不可同时存在
+     * - 分红规则复用续单规则，但指定成员不受优秀服务者名单限制
+     */
+    @IsOptional()
+    @IsBoolean()
+    isDesignated?: boolean;
+
+    /**
+     * 指定归属服务者：
+     * - 必须是本次创建订单传入 playerIds 的子集
+     */
+    @IsOptional()
+    @IsArray()
+    @Type(() => Number)
+    @IsInt({ each: true })
+    designatedPlayerIds?: number[];
 
 }

@@ -113,6 +113,8 @@ export class SystemConfigService implements OnModuleInit {
     WECHAT_PAY_RECHARGE_NOTIFY_URL: 'wechat_pay_recharge_notify_url',
     WECHAT_MINI_APPID: 'wechat_mini_appid',
     WECHAT_MINI_APPSECRET: 'wechat_mini_appsecret',
+    WECHAT_H5_APPID: 'wechat_h5_appid',
+    WECHAT_H5_APPSECRET: 'wechat_h5_appsecret',
     WITHDRAW_AUTO_TRANSFER_ENABLED: 'withdraw_auto_transfer_enabled',
     WITHDRAW_WECHAT_TRANSFER_ENABLED: 'withdraw_wechat_transfer_enabled',
     WITHDRAW_WECHAT_TRANSFER_MOCK: 'withdraw_wechat_transfer_mock',
@@ -240,6 +242,18 @@ export class SystemConfigService implements OnModuleInit {
         value: String(process.env.WECHAT_MINI_APPSECRET || '').trim(),
         valueType: 'STRING',
         remark: '微信小程序 AppSecret',
+      },
+      {
+        key: SystemConfigService.KEYS.WECHAT_H5_APPID,
+        value: String(process.env.WECHAT_H5_APPID || process.env.WECHAT_MP_APPID || '').trim(),
+        valueType: 'STRING',
+        remark: '微信 H5 网页授权公众号 AppID；会员 H5 优先使用',
+      },
+      {
+        key: SystemConfigService.KEYS.WECHAT_H5_APPSECRET,
+        value: String(process.env.WECHAT_H5_APPSECRET || process.env.WECHAT_MP_APPSECRET || '').trim(),
+        valueType: 'STRING',
+        remark: '微信 H5 网页授权公众号 AppSecret；会员 H5 优先使用',
       },
       {
         key: SystemConfigService.KEYS.WITHDRAW_AUTO_TRANSFER_ENABLED,

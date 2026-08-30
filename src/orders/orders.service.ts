@@ -49,6 +49,7 @@ type AssignDispatchOptions = {
     updateOrderDispatcherId?: boolean;
     writeOperatorLog?: boolean;
     renewalPlayerIds?: number[];
+    renewalAttributionType?: 'RENEWAL' | 'DESIGNATED';
     renewalCreatedBy?: number;
 };
 type ArchiveDispatchOptions = {
@@ -722,17 +723,20 @@ export class OrdersService {
         playerIds: number[];
         renewalPlayerIds: number[];
         operatorId: number;
+        attributionType?: 'RENEWAL' | 'DESIGNATED';
     }) {
         const { tx, orderId, dispatchId, playerIds, renewalPlayerIds, operatorId } = params;
+        const attributionType = params.attributionType === 'DESIGNATED' ? 'DESIGNATED' : 'RENEWAL';
+        const attributionLabel = attributionType === 'DESIGNATED' ? '指定' : '续单';
         const normalizedPlayers = this.normalizeIdArray(playerIds);
         const normalizedRenewalPlayers = this.normalizeIdArray(renewalPlayerIds).sort((a, b) => a - b);
         if (!normalizedRenewalPlayers.length) {
-            throw new BadRequestException('续单必须选择续单打手');
+            throw new BadRequestException(`${attributionLabel}必须选择${attributionLabel}服务者`);
         }
         const playerSet = new Set(normalizedPlayers);
         const invalid = normalizedRenewalPlayers.filter((id) => !playerSet.has(id));
         if (invalid.length) {
-            throw new BadRequestException('续单打手必须从当前派单打手中选择');
+            throw new BadRequestException(`${attributionLabel}服务者必须从当前派单服务者中选择`);
         }
 
         const users = await tx.user.findMany({
@@ -740,7 +744,7 @@ export class OrdersService {
             select: { id: true, name: true, phone: true },
         });
         if (users.length !== normalizedRenewalPlayers.length) {
-            throw new BadRequestException('续单打手不存在或已不可用');
+            throw new BadRequestException(`${attributionLabel}服务者不存在或已不可用`);
         }
         const userMap = new Map<number, any>(users.map((u: any) => [Number(u.id), u]));
         const memberNamesSnapshot = normalizedRenewalPlayers.map((id) => {
@@ -751,13 +755,24 @@ export class OrdersService {
                 phone: u?.phone || null,
             };
         });
-        const eligibility = await this.buildRenewalBonusEligibilitySnapshotTx(tx, normalizedRenewalPlayers, userMap);
+        const eligibility = attributionType === 'DESIGNATED'
+            ? {
+                eligibleUserIds: normalizedRenewalPlayers,
+                snapshot: normalizedRenewalPlayers.map((id) => ({
+                    userId: id,
+                    name: userMap.get(id)?.name || `#${id}`,
+                    eligible: true,
+                    source: 'DESIGNATED_ALL_STAFF',
+                })),
+            }
+            : await this.buildRenewalBonusEligibilitySnapshotTx(tx, normalizedRenewalPlayers, userMap);
 
         const group = await tx.orderRenewalGroup.create({
             data: {
                 orderId,
                 dispatchId,
                 groupKey: normalizedRenewalPlayers.join(','),
+                attributionType,
                 memberUserIds: normalizedRenewalPlayers as any,
                 memberNamesSnapshot: memberNamesSnapshot as any,
                 bonusEligibleUserIds: eligibility.eligibleUserIds as any,
@@ -794,13 +809,15 @@ export class OrdersService {
             include: { bonuses: true },
         });
         if (!group) return { skipped: 'NO_RENEWAL_GROUP' };
+        const attributionType = String(group.attributionType || 'RENEWAL').toUpperCase();
+        const attributionLabel = attributionType === 'DESIGNATED' ? '指定' : '续单';
 
         if (String(group.status) === 'SETTLED') return { skipped: 'ALREADY_SETTLED', groupId: group.id };
         if (['INVALIDATED', 'REVERSED'].includes(String(group.status))) {
             return { skipped: 'ALREADY_INACTIVE', groupId: group.id, status: group.status };
         }
         if (String(group.status) !== 'PENDING') {
-            throw new BadRequestException(`续单状态异常，无法确认结算：${group.status}`);
+            throw new BadRequestException(`${attributionLabel}状态异常，无法确认结算：${group.status}`);
         }
 
         if (mode === 'INVALIDATE') {
@@ -830,7 +847,7 @@ export class OrdersService {
             ? this.normalizeIdArray(group.bonusEligibleUserIds)
             : allRenewalMemberUserIds;
         if (!allRenewalMemberUserIds.length) {
-            throw new BadRequestException('续单组缺少续单打手，无法结算');
+            throw new BadRequestException(`${attributionLabel}组缺少${attributionLabel}服务者，无法结算`);
         }
         if (!eligibleUserIds.length) {
             const settledAt = new Date();
@@ -897,7 +914,7 @@ export class OrdersService {
         await this.assertPersistedOrderSettlementPayoutWithinBaseTx({
             tx,
             order,
-            context: '续单分红结算',
+            context: `${attributionLabel}分红结算`,
             extraPositivePayoutAmount: bonusTotalAmount,
             extraAllowanceAmount: bonusTotalAmount,
         });
@@ -925,7 +942,7 @@ export class OrdersService {
                 sourceId: bonus.id,
                 orderId,
                 dispatchId: Number(group.dispatchId || 0) || null,
-                remark: `续单分红：订单 ${order?.autoSerial || `#${orderId}`}`,
+                remark: `${attributionLabel}分红：订单 ${order?.autoSerial || `#${orderId}`}`,
             }, tx);
             await tx.orderRenewalBonus.update({
                 where: { id: bonus.id },
@@ -1855,6 +1872,14 @@ export class OrdersService {
                 ? Number(context.customerUserId)
                 : ((dto as any)?.customerUserId != null ? Number((dto as any).customerUserId) : null);
         const orderSource = await this.normalizeOrderSource(dto?.orderSource, scene);
+        const rawCustomerIdentifierType = String((dto as any)?.customerIdentifierType || '').trim().toUpperCase();
+        const customerIdentifierType = rawCustomerIdentifierType === 'ALIAS' ? 'ALIAS' : 'GAME_ID';
+        const customerOriginalIdentifier = String(
+            (dto as any)?.customerOriginalIdentifier ?? dto.customerGameId ?? '',
+        ).trim();
+        const customerGameId = customerIdentifierType === 'GAME_ID'
+            ? String(dto.customerGameId ?? customerOriginalIdentifier ?? '').trim() || null
+            : null;
         const project = await this.prisma.gameProject.findUnique({where: {id: dto.projectId}});
         if (!project) throw new NotFoundException('项目不存在');
 
@@ -1862,17 +1887,24 @@ export class OrdersService {
             ? this.normalizeIdArray((dto as any).playerIds)
             : [];
         const isRenewal = Boolean((dto as any).isRenewal);
+        const isDesignated = Boolean((dto as any).isDesignated);
         const renewalPlayerIds = this.normalizeIdArray((dto as any).renewalPlayerIds);
-        if (isRenewal) {
+        const designatedPlayerIds = this.normalizeIdArray((dto as any).designatedPlayerIds);
+        if (isRenewal && isDesignated) {
+            throw new BadRequestException('续单和指定只能二选一，不可同时设置');
+        }
+        const attributionPlayerIds = isDesignated ? designatedPlayerIds : renewalPlayerIds;
+        const attributionLabel = isDesignated ? '指定' : '续单';
+        if (isRenewal || isDesignated) {
             if (!playerIds.length) {
-                throw new BadRequestException('续单只能在创建订单首轮派单时设置，请先选择派单打手');
+                throw new BadRequestException(`${attributionLabel}只能在创建订单首轮派单时设置，请先选择派单服务者`);
             }
-            if (!renewalPlayerIds.length) {
-                throw new BadRequestException('续单必须选择续单打手');
+            if (!attributionPlayerIds.length) {
+                throw new BadRequestException(`请选择${attributionLabel}服务者`);
             }
             const playerSet = new Set(playerIds);
-            if (renewalPlayerIds.some((id) => !playerSet.has(id))) {
-                throw new BadRequestException('续单打手必须从当前派单打手中选择');
+            if (attributionPlayerIds.some((id) => !playerSet.has(id))) {
+                throw new BadRequestException(`${attributionLabel}服务者必须从当前派单服务者中选择`);
             }
         }
         if (playerIds.length) {
@@ -2047,7 +2079,9 @@ export class OrdersService {
                     baseAmountWan: dto.baseAmountWan ?? null,
                     projectId: project.id,
                     projectSnapshot: projectSnapshot as any,
-                    customerGameId: dto.customerGameId ?? null,
+                    customerGameId,
+                    customerIdentifierType,
+                    customerOriginalIdentifier: customerOriginalIdentifier || customerGameId,
                     customerUserId,
                     dispatcherId,
                     initialDispatcherId: dispatcherId,
@@ -2070,7 +2104,7 @@ export class OrdersService {
                     marketingCostAmount: discountAmount,
                     discountType,
                     status: OrderStatus.WAIT_ASSIGN,
-                    isRenewal,
+                    isRenewal: isRenewal || isDesignated,
                     renewalAmount: 0,
                     renewalCount: 0,
                     ...(discountDetails.length
@@ -2226,7 +2260,8 @@ export class OrdersService {
             await this.assignDispatch(order.id, playerIds, operatorId, 'AUTO_CREATE', {
                 updateOrderDispatcherId: scene !== 'MINIAPP',
                 writeOperatorLog: scene !== 'MINIAPP',
-                renewalPlayerIds: isRenewal ? renewalPlayerIds : undefined,
+                renewalPlayerIds: isRenewal ? renewalPlayerIds : (isDesignated ? designatedPlayerIds : undefined),
+                renewalAttributionType: isDesignated ? 'DESIGNATED' : 'RENEWAL',
                 renewalCreatedBy: operatorId,
             });
             // 派单后返回完整详情（带 currentDispatch/participants）
@@ -2313,6 +2348,8 @@ export class OrdersService {
                     receivableAmount: true,
                     paidAmount: true,
                     customerGameId: true,
+                    customerIdentifierType: true,
+                    customerOriginalIdentifier: true,
                     createdAt: true,
                     project: {
                         select: { id: true, name: true },
@@ -2877,8 +2914,9 @@ export class OrdersService {
         // round 从 1 开始递增
         const nextRound = (order.dispatches?.reduce((max, d) => Math.max(max, d.round), 0) || 0) + 1;
         const renewalPlayerIds = this.normalizeIdArray(options?.renewalPlayerIds);
+        const renewalAttributionType = options?.renewalAttributionType === 'DESIGNATED' ? 'DESIGNATED' : 'RENEWAL';
         if (renewalPlayerIds.length && nextRound !== 1) {
-            throw new BadRequestException('续单只能在首轮派单时设置');
+            throw new BadRequestException(`${renewalAttributionType === 'DESIGNATED' ? '指定' : '续单'}只能在首轮派单时设置`);
         }
 
         const dispatch = await this.prisma.$transaction(async (tx) => {
@@ -2922,6 +2960,7 @@ export class OrdersService {
                     dispatchId: createdDispatch.id,
                     playerIds,
                     renewalPlayerIds,
+                    attributionType: renewalAttributionType,
                     operatorId: Number(options?.renewalCreatedBy || operatorId || 0),
                 });
             }
@@ -3017,6 +3056,13 @@ export class OrdersService {
                     dispatch.order?.project?.billingMode ??
                     (snap && typeof snap === 'object' && !Array.isArray(snap) ? (snap.billingMode ?? null) : null);
                 if (!orderClass) throw new BadRequestException('订单类型有误，无法操作，请联系管理员！');
+
+                const pendingCustomerGameId = String(dto?.customerGameId || '').trim();
+                const requiresCustomerGameId = String((dispatch.order as any)?.customerIdentifierType || 'GAME_ID') === 'ALIAS';
+                const existingCustomerGameId = String((dispatch.order as any)?.customerGameId || '').trim();
+                if (requiresCustomerGameId && !existingCustomerGameId && !pendingCustomerGameId) {
+                    throw new BadRequestException('该订单由昵称/房间号派单，请先补齐客户准确游戏ID后再存单或结单');
+                }
 
                 // HOURLY: 小时单
                 // GUARANTEED: 保底单
@@ -3115,7 +3161,10 @@ export class OrdersService {
                 // ✅ 5) 订单置存单
                 await tx.order.update({
                     where: {id: dispatch.orderId},
-                    data: {status: dispatchStatus === 'COMPLETED' ? OrderStatus.COMPLETED_PENDING_CONFIRM : OrderStatus.ARCHIVED},
+                    data: {
+                        status: dispatchStatus === 'COMPLETED' ? OrderStatus.COMPLETED_PENDING_CONFIRM : OrderStatus.ARCHIVED,
+                        ...(pendingCustomerGameId && !existingCustomerGameId ? { customerGameId: pendingCustomerGameId } : {}),
+                    },
                 });
 
                 // ⚠️ 6) 释放参与者状态：这是运营副作用，你现在保留也行
@@ -4664,6 +4713,15 @@ export class OrdersService {
         const forbid = new Set<OrderStatus>([OrderStatus.COMPLETED, OrderStatus.REFUNDED]);
         if (forbid.has(order.status)) throw new BadRequestException('已结单/已退款订单不允许编辑');
 
+        const rawCustomerIdentifierType = String(dto?.customerIdentifierType || '').trim().toUpperCase();
+        const nextCustomerIdentifierType = rawCustomerIdentifierType === 'ALIAS'
+            ? 'ALIAS'
+            : (rawCustomerIdentifierType === 'GAME_ID' ? 'GAME_ID' : undefined);
+        const nextCustomerGameId = dto.customerGameId != null ? String(dto.customerGameId || '').trim() : undefined;
+        const nextCustomerOriginalIdentifier = dto.customerOriginalIdentifier != null
+            ? String(dto.customerOriginalIdentifier || '').trim()
+            : undefined;
+
         // 允许编辑的字段（不含陪玩/派单）
         const data: any = {
             orderQuantity: dto.orderQuantity != null ? Number(dto.orderQuantity) : undefined,
@@ -4677,7 +4735,13 @@ export class OrdersService {
                         ? Number(dto.paidAmount)
                         : (dto.receivableAmount != null ? Number(dto.receivableAmount) : undefined))),
             baseAmountWan: dto.baseAmountWan != null ? Number(dto.baseAmountWan) : undefined,
-            customerGameId: dto.customerGameId ?? undefined,
+            customerGameId: nextCustomerGameId,
+            customerIdentifierType: nextCustomerIdentifierType,
+            customerOriginalIdentifier: nextCustomerOriginalIdentifier !== undefined
+                ? nextCustomerOriginalIdentifier
+                : (nextCustomerIdentifierType === 'GAME_ID' && nextCustomerGameId && !order.customerOriginalIdentifier
+                    ? nextCustomerGameId
+                    : undefined),
             orderTime: dto.orderTime ? new Date(dto.orderTime) : undefined,
             paymentTime: dto.paymentTime ? new Date(dto.paymentTime) : undefined,
             csRate: dto.csRate != null ? Number(dto.csRate) : undefined,
@@ -5070,6 +5134,9 @@ export class OrdersService {
                 createdAt: true,
                 updatedAt: true,
                 paymentTime: true,
+                customerGameId: true,
+                customerIdentifierType: true,
+                customerOriginalIdentifier: true,
 
                 // ⚠️ 如果你当前 Order 还没有 customerUserId，就删掉这行
                 // customerUserId: true,
@@ -6314,7 +6381,7 @@ export class OrdersService {
             ? String(params.dimension || '').toUpperCase()
             : 'DAY';
         const settledAtRange = this.buildEvaluationDateRange('CUSTOM', params.startAt, params.endAt);
-        const where: any = { status: 'SETTLED' };
+        const where: any = { status: 'SETTLED', attributionType: 'RENEWAL' };
         if (Object.keys(settledAtRange).length) {
             where.settledAt = settledAtRange;
         }

@@ -181,6 +181,8 @@ export class MiniAuthController {
       success: true,
       appId: wx.appId,
       openidMasked: wx.openId ? `${String(wx.openId).slice(0, 6)}***${String(wx.openId).slice(-4)}` : null,
+      unionidMasked: wx.unionId ? `${String(wx.unionId).slice(0, 6)}***${String(wx.unionId).slice(-4)}` : null,
+      hasUnionId: Boolean(wx.unionId),
     }, '微信绑定成功');
   }
 
