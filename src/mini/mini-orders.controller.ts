@@ -97,6 +97,8 @@ export class MiniOrdersController {
     decrypted: any,
   ) {
     const paidFen = Number(decrypted?.amount?.payer_total ?? 0);
+    const notifiedTime = typeof decrypted?.success_time === 'string' ? new Date(decrypted.success_time) : null;
+    const paidAt = notifiedTime && Number.isFinite(notifiedTime.getTime()) ? notifiedTime : new Date();
     const updated = await this.prisma.$transaction(async (tx) => {
       const currentOrder = await tx.order.findUnique({
         where: { id: orderId },
@@ -114,7 +116,7 @@ export class MiniOrdersController {
               transactionId: String(decrypted?.transaction_id || ''),
               payerOpenid: String(decrypted?.payer?.openid || ''),
               notifyRaw: decrypted,
-              paidAt: new Date(),
+              paidAt,
             },
             select: { id: true },
           })
@@ -131,7 +133,7 @@ export class MiniOrdersController {
               transactionId: String(decrypted?.transaction_id || ''),
               payerOpenid: String(decrypted?.payer?.openid || ''),
               notifyRaw: decrypted,
-              paidAt: new Date(),
+              paidAt,
             },
             update: {
               status: 'SUCCESS',
@@ -141,7 +143,7 @@ export class MiniOrdersController {
               transactionId: String(decrypted?.transaction_id || ''),
               payerOpenid: String(decrypted?.payer?.openid || ''),
               notifyRaw: decrypted,
-              paidAt: new Date(),
+              paidAt,
             },
             select: { id: true },
           });
@@ -151,7 +153,7 @@ export class MiniOrdersController {
         data: {
           isPaid: true,
           payStatus: 'SUCCESS',
-          paymentTime: new Date(),
+          paymentTime: paidAt,
           paidAmount: paidFen > 0 ? Number((paidFen / 100).toFixed(2)) : undefined,
           latestPaymentId: payment.id,
         },

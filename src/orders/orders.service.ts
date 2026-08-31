@@ -3,6 +3,7 @@ import {PrismaService} from '../prisma/prisma.service';
 import {CreateOrderDto} from './dto/create-order.dto';
 import {AcceptDispatchDto} from './dto/accept-dispatch.dto';
 import {MarkPaidDto} from './dto/mark-paid.dto';
+import { recordOrderSupplementTx } from '../finance/order-receipts.util';
 import {
     BillingMode,
     CouponScope,
@@ -3247,6 +3248,7 @@ export class OrdersService {
 
         const result = await this.prisma.$transaction(async (tx) => {
             // 1) 读取订单（事务内）
+            await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
             const order = await tx.order.findUnique({
                 where: {id: orderId},
                 include: {project: true},
@@ -4772,9 +4774,16 @@ export class OrdersService {
             data.clubRate = (dto.customClubRate != null ? Number(dto.customClubRate) : (project.clubRate ?? null));
         }
 
-        const updated = await this.prisma.order.update({
-            where: {id: orderId},
-            data,
+        const updated = await this.prisma.$transaction(async (tx) => {
+            await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
+            const current = await tx.order.findUnique({ where: { id: orderId } });
+            if (!current) throw new NotFoundException('订单不存在');
+            // 已收款金额与日期不能通过普通编辑回写，否则会修改历史日收入。
+            if (current.isPaid && (
+                (data.paidAmount !== undefined && data.paidAmount !== Number(current.paidAmount)) ||
+                (data.paymentTime !== undefined && data.paymentTime.getTime() !== current.paymentTime?.getTime())
+            )) throw new BadRequestException('已收款订单不能直接修改实收金额或付款日期，请通过补收或退款流程处理');
+            return tx.order.update({ where: { id: orderId }, data });
         });
 
         await this.logOrderAction(operatorId, orderId, 'UPDATE_ORDER', {
@@ -7238,6 +7247,11 @@ export class OrdersService {
      * 补收方法？
      * -----------------------------*/
     private async applyPaidAmountUpdateInTx(tx: any, order: any, paidAmount: number, operatorId: number, remark?: string, confirmPaid?: any) {
+        // 不使用调用前的快照判断差额，锁定后读取最新累计实收，防止并发重复补收。
+        await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', order.id);
+        const locked = await tx.order.findUnique({ where: { id: order.id } });
+        if (!locked) throw new NotFoundException('订单不存在');
+        order = { ...order, ...locked };
         if (!Number.isFinite(paidAmount) || paidAmount < 0) {
             throw new BadRequestException('paidAmount 非法');
         }
@@ -7262,6 +7276,10 @@ export class OrdersService {
         // 是否标记收款（仅在原来未收款时）
         const shouldMarkPaid = confirmPaidBool && (order as any).isPaid !== true;
         const now = new Date();
+
+        if (order.isPaid === true && paidAmount > old) {
+            await recordOrderSupplementTx(tx, order, paidAmount, operatorId, now);
+        }
 
         // 金额没变：只在 shouldMarkPaid 时标记收款
         if (paidAmount === old) {

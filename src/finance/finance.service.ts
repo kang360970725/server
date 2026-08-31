@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { ReceiptItem, receiptRange, reconcileReceipts } from './receipt-reconciliation';
 import { PrismaService } from '../prisma/prisma.service';
 import { FinanceDashboardSummaryDto } from './dto/finance-dashboard-summary.dto';
 import { FinanceDashboardTrendDto } from './dto/finance-dashboard-trend.dto';
@@ -725,183 +726,51 @@ export class FinanceService {
     }
 
     async dashboardReconciliation(dto: { startDate?: string; endDate?: string }) {
-        const { startAt, endAt } = this.buildPaymentRange(dto);
-        const rows = await this.prisma.order.findMany({
-            where: {
-                paymentTime: { gte: startAt, lte: endAt },
-                isPaid: true,
-                isGifted: false,
-            },
-            select: {
-                id: true,
-                autoSerial: true,
-                orderSource: true,
-                receivableAmount: true,
-                paidAmount: true,
-                settlementBaseAmount: true,
-                paymentTime: true,
-                createdAt: true,
-                updatedAt: true,
-                dispatcherId: true,
-                dispatcher: {
-                    select: {
-                        id: true,
-                        name: true,
-                        userType: true,
-                    },
-                },
-            },
-            orderBy: [{ paymentTime: 'asc' }, { id: 'asc' }],
-        });
-
-        const dayMap = new Map<
-            string,
-            {
-                axis: string;
-                allOrderCount: number;
-                allPaidAmountTotal: number;
-                manualReceiptOrderCount: number;
-                manualReceiptAmountTotal: number;
-                dispatcherMap: Map<
-                    string,
-                    {
-                        dispatcherId: number | null;
-                        dispatcherName: string;
-                        dispatcherUserType: string;
-                        orderCount: number;
-                        paidAmountTotal: number;
-                    }
-                >;
-                detailRows: Array<{
-                    orderId: number;
-                    autoSerial: string;
-                    paymentTime: string;
-                    paidAmount: number;
-                    dispatcherLabel: string;
-                    dispatcherUserType: string;
-                    orderSource: string;
-                    orderSourceLabel: string;
-                }>;
-            }
-        >();
-
-        let allOrderCount = 0;
-        let allPaidAmountTotal = 0;
-        let manualReceiptOrderCount = 0;
-        let manualReceiptAmountTotal = 0;
-
-        for (const row of rows) {
-            const paymentAt = row.paymentTime || row.updatedAt || row.createdAt;
-            if (!paymentAt) continue;
-
-            const axis = this.toDateStr(paymentAt);
-            const paidAmount = this.round2(Number(row.paidAmount ?? 0));
-            const source = String(row.orderSource || '').trim() || 'CUSTOMER_SERVICE_MANUAL';
-            const sourceLabel = this.getOrderSourceLabel(source);
-            const dispatcherLabel = this.getDispatcherLabel(row.dispatcher as any);
-            const dispatcherUserType = String(row.dispatcher?.userType || '').trim() || 'UNKNOWN';
-            const dispatcherKey = String(row.dispatcherId || 0) || `dispatcher-${row.id}`;
-            const isManualReceipt = this.isManualReceiptSource(source);
-
-            allOrderCount += 1;
-            allPaidAmountTotal = this.round2(allPaidAmountTotal + paidAmount);
-
-            if (isManualReceipt) {
-                manualReceiptOrderCount += 1;
-                manualReceiptAmountTotal = this.round2(manualReceiptAmountTotal + paidAmount);
-            }
-
-            if (!isManualReceipt) {
-                // 小程序自助单不纳入对账单明细
-                continue;
-            }
-
-            if (!dayMap.has(axis)) {
-                dayMap.set(axis, {
-                    axis,
-                    allOrderCount: 0,
-                    allPaidAmountTotal: 0,
-                    manualReceiptOrderCount: 0,
-                    manualReceiptAmountTotal: 0,
-                    dispatcherMap: new Map(),
-                    detailRows: [],
-                });
-            }
-
-            const bucket = dayMap.get(axis)!;
-            bucket.allOrderCount += 1;
-            bucket.allPaidAmountTotal = this.round2(bucket.allPaidAmountTotal + paidAmount);
-            bucket.manualReceiptOrderCount += 1;
-            bucket.manualReceiptAmountTotal = this.round2(bucket.manualReceiptAmountTotal + paidAmount);
-
-            if (!bucket.dispatcherMap.has(dispatcherKey)) {
-                bucket.dispatcherMap.set(dispatcherKey, {
-                    dispatcherId: row.dispatcherId ?? null,
-                    dispatcherName: String(row.dispatcher?.name || '未指定').trim() || '未指定',
-                    dispatcherUserType,
-                    orderCount: 0,
-                    paidAmountTotal: 0,
-                });
-            }
-
-            const dispatcherBucket = bucket.dispatcherMap.get(dispatcherKey)!;
-            dispatcherBucket.orderCount += 1;
-            dispatcherBucket.paidAmountTotal = this.round2(dispatcherBucket.paidAmountTotal + paidAmount);
-
-            bucket.detailRows.push({
-                orderId: Number(row.id),
-                autoSerial: String(row.autoSerial || ''),
-                paymentTime: paymentAt instanceof Date ? paymentAt.toISOString() : new Date(paymentAt).toISOString(),
-                paidAmount,
-                dispatcherLabel,
-                dispatcherUserType,
-                orderSource: source,
-                orderSourceLabel: sourceLabel,
-            });
-        }
-
-        const dailyRows = Array.from(dayMap.values())
-            .sort((a, b) => a.axis.localeCompare(b.axis))
-            .map((item) => ({
-                axis: item.axis,
-                allOrderCount: item.allOrderCount,
-                allPaidAmountTotal: this.round2(item.allPaidAmountTotal),
-                manualReceiptOrderCount: item.manualReceiptOrderCount,
-                manualReceiptAmountTotal: this.round2(item.manualReceiptAmountTotal),
-                dispatcherItems: Array.from(item.dispatcherMap.values())
-                    .sort((a, b) => b.paidAmountTotal - a.paidAmountTotal)
-                    .map((dispatcher) => ({
-                        ...dispatcher,
-                        paidAmountTotal: this.round2(dispatcher.paidAmountTotal),
-                        dispatcherLabel: this.getDispatcherLabel({
-                            name: dispatcher.dispatcherName,
-                            userType: dispatcher.dispatcherUserType,
-                        }),
-                    })),
-                detailRows: item.detailRows
-                    .sort((a, b) => a.paymentTime.localeCompare(b.paymentTime))
-                    .map((detail) => ({
-                        ...detail,
-                        paidAmount: this.round2(detail.paidAmount),
-                    })),
+        const range = receiptRange(dto);
+        const timeWhere = { gte: range.startAt, lt: range.endAt };
+        // 同一数据库快照读取，避免补收事务提交时重复统计旧订单与新流水。
+        return this.prisma.$transaction(async (tx) => {
+            const [orders, snapshots, recharges] = await Promise.all([
+                tx.order.findMany({
+                    where: { paymentTime: timeWhere, isPaid: true, isGifted: false },
+                    select: { id: true, autoSerial: true, orderSource: true, paidAmount: true, paymentTime: true,
+                        dispatcherId: true, dispatcher: { select: { name: true, userType: true } },
+                        latestPayment: { select: { channel: true } } },
+                }),
+                tx.orderReceipt.findMany({ where: { paidAt: timeWhere } }),
+                tx.memberRechargeOrder.findMany({
+                    where: { status: 'SUCCESS', paidAt: timeWhere },
+                    select: { id: true, rechargeNo: true, payAmount: true, channel: true, paidAt: true, operatorId: true, notifyRaw: true },
+                }),
+            ]);
+            const tracked = orders.length ? await tx.orderReceipt.findMany({
+                where: { orderId: { in: orders.map((o) => o.id) }, kind: 'INITIAL' }, select: { orderId: true },
+            }) : [];
+            const trackedIds = new Set(tracked.map((o) => o.orderId));
+            const items: ReceiptItem[] = orders.filter((o) => !trackedIds.has(o.id)).map((o) => ({
+                receiptId: `ORDER:${o.id}`, kind: 'INITIAL', orderId: o.id, autoSerial: o.autoSerial,
+                paymentTime: o.paymentTime!, paidAmount: Number(o.paidAmount),
+                orderSource: o.orderSource || 'CUSTOMER_SERVICE_MANUAL',
+                channel: o.latestPayment?.channel || (o.orderSource === 'MINIAPP_SELF_SERVICE' ? 'MINIAPP_WECHAT' : 'MANUAL_SHOUQIANBA'),
+                dispatcherId: o.dispatcherId, dispatcherName: o.dispatcher?.name, dispatcherUserType: o.dispatcher?.userType,
             }));
-
-        return {
-            success: true,
-            data: {
-                range: {
-                    startDate: this.toDateStr(startAt),
-                    endDate: this.toDateStr(endAt),
-                },
-                summary: {
-                    allOrderCount,
-                    allPaidAmountTotal: this.round2(allPaidAmountTotal),
-                    manualReceiptOrderCount,
-                    manualReceiptAmountTotal: this.round2(manualReceiptAmountTotal),
-                },
-                rows: dailyRows,
-            },
-        };
+            for (const s of snapshots) items.push({
+                receiptId: s.receiptKey, kind: s.kind, orderId: s.orderId, autoSerial: s.autoSerial,
+                paymentTime: s.paidAt, paidAmount: Number(s.amount), orderSource: s.orderSource, channel: s.channel,
+                dispatcherId: s.dispatcherId, dispatcherName: s.dispatcherName, dispatcherUserType: s.dispatcherType,
+            });
+            for (const r of recharges) {
+                // 微信实付优先用回调总金额（分），防止测试支付把套餐面值计入收入。
+                const raw = r.notifyRaw as any;
+                const actualFen = r.channel !== 'MANUAL' ? raw?.amount?.total : undefined;
+                const paidAmount = Number.isFinite(actualFen) && actualFen >= 0 ? actualFen / 100 : Number(r.payAmount);
+                items.push({ receiptId: `RECHARGE:${r.id}`, kind: 'RECHARGE', autoSerial: r.rechargeNo,
+                    paymentTime: r.paidAt!, paidAmount, channel: r.channel, orderSource: 'MEMBER_RECHARGE',
+                    dispatcherId: r.operatorId });
+            }
+            return { success: true, data: { range: { startDate: range.startDate, endDate: range.endDate },
+                ...reconcileReceipts(items) } };
+        }, { isolationLevel: 'RepeatableRead' });
     }
 
     async recordsList(dto: FinanceRecordListDto) {

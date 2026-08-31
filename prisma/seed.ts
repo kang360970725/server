@@ -66,6 +66,10 @@ async function main() {
         { key: 'finance:records:list', name: '财务明细', module: 'finance', type: PermissionType.PAGE, parentKey: 'menu:finance' },
         { key: 'finance:offline-fees:page', name: '线下费用', module: 'finance', type: PermissionType.PAGE, parentKey: 'menu:finance' },
         { key: 'finance:equipment-rental-fees:page', name: '设备租赁费', module: 'finance', type: PermissionType.PAGE, parentKey: 'menu:finance' },
+        { key: 'rental-orders:page', name: '租号订单', module: 'rental-orders', type: PermissionType.PAGE, parentKey: 'menu:finance' },
+        { key: 'rental-orders:create:button', name: '创建租号订单', module: 'rental-orders', type: PermissionType.BUTTON, parentKey: 'rental-orders:page' },
+        { key: 'rental-orders:settle:button', name: '结算租号订单', module: 'rental-orders', type: PermissionType.BUTTON, parentKey: 'rental-orders:page' },
+        { key: 'rental-orders:void:button', name: '废除租号订单', module: 'rental-orders', type: PermissionType.BUTTON, parentKey: 'rental-orders:page' },
         { key: 'staff:my-orders:page', name: '我的服务记录', module: 'staff', type: PermissionType.PAGE, parentKey: 'menu:staff' },
         { key: 'staff:workbench:page', name: '服务者工作台', module: 'staff', type: PermissionType.PAGE, parentKey: 'menu:staff' },
         { key: 'staff:questionnaires:page', name: '信息采集', module: 'staff', type: PermissionType.PAGE, parentKey: 'menu:staff' },
@@ -280,7 +284,7 @@ async function main() {
     });
 
     const rentalAccountPermissionIds = permissionRecords
-        .filter((p) => p.key === 'users:staff-rental-risk:page')
+        .filter((p) => p.key === 'users:staff-rental-risk:page' || p.key.startsWith('rental-orders:'))
         .map((p) => p.id);
 
     await prisma.role.update({

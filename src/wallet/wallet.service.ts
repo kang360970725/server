@@ -37,6 +37,9 @@ import {
 // type PrismaTx = | import('@prisma/client').PrismaClient | Prisma.TransactionClient;
 type PrismaTx = PrismaClient | Prisma.TransactionClient;
 
+const RENTAL_WALLET_SOURCES = ['RENTAL_ORDER_PREPAY', 'RENTAL_ORDER_DEPOSIT', 'RENTAL_ORDER_REFUND',
+    'RENTAL_ORDER_EXCESS_CHARGE', 'RENTAL_ORDER_VOID_REFUND'];
+
 /** 金额统一保留 2 位（避免浮点尾差扩散） */
 function round2(n: number) {
     return Math.round(n * 100) / 100;
@@ -2209,21 +2212,14 @@ export class WalletService {
 
                 const matchedOrderIds = matchedOrders.map((o) => Number(o.id));
 
-                // 没有匹配到订单，直接让结果为空
-                if (matchedOrderIds.length === 0) {
-                    where.orderId = -1;
-                } else {
-                    // 如果前面已经传了 orderId，则取交集逻辑
-                    if (where.orderId) {
-                        if (matchedOrderIds.includes(Number(where.orderId))) {
-                            where.orderId = Number(where.orderId);
-                        } else {
-                            where.orderId = -1;
-                        }
-                    } else {
-                        where.orderId = { in: matchedOrderIds };
-                    }
-                }
+                const rentals = await this.prisma.rentalOrder.findMany({
+                    where: { staffUserId: userId, serialNo: { contains: keyword } }, select: { id: true },
+                });
+                // 保留外层 userId/orderId 等筛选，避免不同业务同值ID串号。
+                where.OR = [
+                    { orderId: { in: matchedOrderIds } },
+                    { sourceType: { in: RENTAL_WALLET_SOURCES }, sourceId: { in: rentals.map((o) => o.id) } },
+                ];
             }
         }
 
@@ -2278,6 +2274,7 @@ export class WalletService {
                     dispatchId: true,
                     settlementId: true,
                     reversalOfTxId: true,
+                    remark: true,
                     createdAt: true,
                 },
             }),
@@ -2302,6 +2299,14 @@ export class WalletService {
                 orders.map((o: any) => [Number(o.id), String(o.autoSerial ?? '')]),
             );
         }
+
+        const rentalIds = [...new Set<number>((rows || [])
+            .filter((r) => RENTAL_WALLET_SOURCES.includes(String(r.sourceType)))
+            .map((r) => Number(r.sourceId)).filter((id) => Number.isSafeInteger(id) && id > 0))];
+        const rentals = rentalIds.length ? await this.prisma.rentalOrder.findMany({
+            where: { id: { in: rentalIds }, staffUserId: userId }, select: { id: true, serialNo: true },
+        }) : [];
+        const rentalSerialMap = new Map(rentals.map((order) => [order.id, order.serialNo]));
 
         // 为结算主流水补冻结单状态，替代直接展示 RELEASE_FROZEN 明细
         const settlementTxIds = Array.from(
@@ -2432,7 +2437,7 @@ export class WalletService {
                 return { deltaAvailable, deltaFrozen };
             }
 
-            if (biz === 'OFFLINE_FEE_PAYMENT' || biz === 'DEPOSIT_ADD' || biz === 'DEPOSIT_DEDUCT') {
+            if (biz === 'OFFLINE_FEE_PAYMENT' || biz === 'DEPOSIT_ADD' || biz === 'DEPOSIT_DEDUCT' || RENTAL_WALLET_SOURCES.includes(biz)) {
                 if (amt > 0) {
                     if (tx.direction === 'IN') deltaAvailable += amt;
                     if (tx.direction === 'OUT') deltaAvailable -= amt;
@@ -2465,8 +2470,9 @@ export class WalletService {
             frozenAfter = frozenBefore;
 
             const oid = Number(r?.orderId);
-            const orderAutoSerial =
-                Number.isFinite(oid) && oid > 0 ? (orderSerialMap.get(oid) || null) : null;
+            const orderAutoSerial = RENTAL_WALLET_SOURCES.includes(String(r.sourceType))
+                ? (rentalSerialMap.get(Number(r.sourceId)) || null)
+                : (Number.isFinite(oid) && oid > 0 ? (orderSerialMap.get(oid) || null) : null);
             const hold = holdMap.get(Number(r.id));
 
             return {

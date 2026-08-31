@@ -35,6 +35,7 @@ import { MiniappProtocolsModule } from './miniapp-protocols/miniapp-protocols.mo
 import { QuestionnaireModule } from './questionnaire/questionnaire.module';
 import { EquipmentRentalFeeModule } from './equipment-rental-fee/equipment-rental-fee.module';
 import { ExcellentStaffModule } from './excellent-staff/excellent-staff.module';
+import { RentalOrdersModule } from './rental-orders/rental-orders.module';
 
 
 @Module({
@@ -68,6 +69,7 @@ import { ExcellentStaffModule } from './excellent-staff/excellent-staff.module';
         QuestionnaireModule,
         EquipmentRentalFeeModule,
         ExcellentStaffModule,
+        RentalOrdersModule,
   ],
     controllers: [AppController],
     providers: [AppService, PrismaService,

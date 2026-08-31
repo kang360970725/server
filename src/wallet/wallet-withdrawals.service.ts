@@ -8,6 +8,7 @@ import { StaffRuleEngineService } from '../system-config/staff-rule-engine.servi
 import { isDispatchMonitoredStaff } from '../common/utils/staff-role-scope.util';
 import { WalletService } from './wallet.service';
 import { EquipmentRentalFeeService } from '../equipment-rental-fee/equipment-rental-fee.service';
+import { inspectWalletFundingTx } from './wallet-funding.util';
 import { SystemConfigService } from '../system-config/system-config.service';
 import { WechatWithdrawalTransferService } from './wechat-withdrawal-transfer.service';
 
@@ -245,10 +246,14 @@ export class WalletWithdrawalsService {
             operatorId,
         });
 
+        const funding = await inspectWalletFundingTx(tx, req.userId, req.id);
+        if (funding.spendableAssets < 0) {
+            throw new BadRequestException('有效收益冻结不足以覆盖可用余额欠款，暂不能出款，可驳回释放提现冻结');
+        }
         const accountAfterPayout = await this.walletService.applyWalletAccountDelta(tx as any, req.userId, {
             withdrawFrozenDelta: -req.amount,
         });
-        this.assertWalletBucketsNonNegative(accountAfterPayout);
+        this.assertWithdrawalFrozenBucketsNonNegative(accountAfterPayout);
 
         const payoutTx = await tx.walletTransaction.upsert({
             where: {
@@ -994,7 +999,8 @@ export class WalletWithdrawalsService {
                     reviewRemark,
                 },
             });
-        });
+        // 等待钱包行锁期间可能发生租号扣款；用当前已提交余额，不能沿用等待前的快照。
+        }, { isolationLevel: 'ReadCommitted' });
 
         if (reviewed?.status === 'PAYING' && reviewed?.channel === 'WECHAT') {
             return this.startWechatTransfer(Number(reviewed.id), Number(reviewerId));
@@ -1070,7 +1076,7 @@ export class WalletWithdrawalsService {
                     failReason: null,
                     transferFinishedAt: now,
                 });
-            });
+            }, { isolationLevel: 'ReadCommitted' });
         }
 
         if (status === 'FAILED' || status === 'CANCELLED' || status === 'CANCELED') {
@@ -1156,7 +1162,7 @@ export class WalletWithdrawalsService {
                     : WithdrawalTransferStatus.SUCCESS,
                 transferFinishedAt: now,
             });
-        });
+        }, { isolationLevel: 'ReadCommitted' });
     }
 
     /**

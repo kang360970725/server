@@ -974,6 +974,29 @@ model Order {
   @@index([latestPaymentId], map: "Order_latestPaymentId_fkey")
 }
 
+// 收款统计快照：与支付/退款交易解耦，避免累计实收被补收改写后回补旧日。
+// 不级联删除，保留实际收款记录；旧订单未生成快照前按原付款时间兼容读取。
+model OrderReceipt {
+  id             Int      @id @default(autoincrement())
+  receiptKey     String   @unique @db.VarChar(100)
+  orderId        Int
+  autoSerial     String   @db.VarChar(64)
+  kind           String   @db.VarChar(20)
+  amount         Decimal  @db.Decimal(12, 2)
+  paidAt         DateTime
+  orderSource    String   @db.VarChar(40)
+  channel        String   @db.VarChar(32)
+  dispatcherId   Int?
+  dispatcherName String?  @db.VarChar(100)
+  dispatcherType String?  @db.VarChar(40)
+  operatorId     Int?
+  createdAt      DateTime @default(now())
+
+  @@index([paidAt])
+  @@index([orderId])
+  @@map("order_receipts")
+}
+
 model OrderPayment {
   id             Int            @id @default(autoincrement())
   orderId        Int
@@ -1357,13 +1380,13 @@ model WalletAccount {
   /// 一人一账
   userId                Int      @unique
   /// 可用余额（可提现/可抵扣）
-  availableBalance      Decimal  @default(0.0) @db.Decimal(10, 1)
+  availableBalance      Decimal  @default(0.0) @db.Decimal(12, 2)
   /// 冻结余额（未到解冻时间）
-  frozenBalance         Decimal  @default(0.0) @db.Decimal(10, 1)
+  frozenBalance         Decimal  @default(0.0) @db.Decimal(12, 2)
   /// 收益冻结余额（由 wallet_holds 驱动）
-  earningFrozenBalance  Decimal  @default(0.0) @db.Decimal(10, 1)
+  earningFrozenBalance  Decimal  @default(0.0) @db.Decimal(12, 2)
   /// 提现冻结余额（由 wallet_withdrawal_requests 驱动）
-  withdrawFrozenBalance Decimal  @default(0.0) @db.Decimal(10, 1)
+  withdrawFrozenBalance Decimal  @default(0.0) @db.Decimal(12, 2)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   /// 钱包UID：展示级唯一号（大写字母+数字混合），兼容老数据先允许为空
@@ -1482,6 +1505,55 @@ model WalletWithdrawalRequest {
   @@index([status, createdAt])
   @@index([status, reviewedAt])
   @@map("wallet_withdrawal_requests")
+}
+
+enum RentalOrderStatus {
+  RUNNING
+  SETTLED
+  VOIDED
+}
+
+/// 租号领域独立订单，不复用服务订单或设备租赁账单。
+model RentalOrder {
+  id Int @id @default(autoincrement())
+  serialNo String @unique @db.VarChar(12)
+  staffUserId Int
+  staffNameSnapshot String @db.VarChar(100)
+  accountSourceId Int?
+  accountSourceNo String @db.VarChar(100)
+  sourceChannel String @default("ADMIN") @db.VarChar(24)
+  prepaidAmount Decimal @db.Decimal(12, 2)
+  depositAmount Decimal @default(0) @db.Decimal(12, 2)
+  startDate DateTime @db.Date
+  forcedSettlementDate DateTime @db.Date
+  status RentalOrderStatus @default(RUNNING)
+  noRefundDifference Boolean @default(true)
+  refundDifferenceAmount Decimal @default(0) @db.Decimal(12, 2)
+  refundDifferenceRemark String? @db.Text
+  lossAmount Decimal @default(0) @db.Decimal(12, 2)
+  lossDetail String? @db.Text
+  hasAbnormalCompensation Boolean @default(false)
+  abnormalCompensationAmount Decimal @default(0) @db.Decimal(12, 2)
+  abnormalCompensationRemark String? @db.Text
+  ownerSettlementAmount Decimal? @db.Decimal(12, 2)
+  actualAmount Decimal? @db.Decimal(12, 2)
+  settlementNetRefund Decimal? @db.Decimal(12, 2)
+  calculationSnapshot Json?
+  createdBy Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  settledBy Int?
+  settledAt DateTime?
+  voidedBy Int?
+  voidedAt DateTime?
+  voidReason String? @db.Text
+  version Int @default(0)
+
+  @@index([staffUserId, createdAt])
+  @@index([status, forcedSettlementDate])
+  @@index([createdAt])
+  @@index([settledAt])
+  @@map("rental_orders")
 }
 
 model EquipmentRentalContract {
@@ -1819,6 +1891,11 @@ enum WalletBizType {
   OFFLINE_FEE_PAYMENT
   /// 设备租赁费扣款
   EQUIPMENT_RENTAL_FEE
+  RENTAL_ORDER_PREPAY
+  RENTAL_ORDER_DEPOSIT
+  RENTAL_ORDER_REFUND
+  RENTAL_ORDER_EXCESS_CHARGE
+  RENTAL_ORDER_VOID_REFUND
   SETTLEMENT_REVERSAL
   SETTLEMENT_RECALC
   MEMBER_RECHARGE

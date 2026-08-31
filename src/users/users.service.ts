@@ -1093,7 +1093,7 @@ export class UsersService {
           totalBalance: Number((available + frozen).toFixed(2)),
           depositBalance: deposit,
           nonWithdrawFrozenBalance: nonWithdrawFrozen,
-          rentalRiskReferenceBalance: Number((available + nonWithdrawFrozen + deposit).toFixed(2)),
+          rentalRiskReferenceBalance: Number((available + nonWithdrawFrozen).toFixed(2)),
         },
 
         lastAcceptOrderAt,

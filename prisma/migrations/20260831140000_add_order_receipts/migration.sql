@@ -1,0 +1,20 @@
+CREATE TABLE `order_receipts` (
+  `id` INTEGER NOT NULL AUTO_INCREMENT,
+  `receiptKey` VARCHAR(100) NOT NULL,
+  `orderId` INTEGER NOT NULL,
+  `autoSerial` VARCHAR(64) NOT NULL,
+  `kind` VARCHAR(20) NOT NULL,
+  `amount` DECIMAL(12, 2) NOT NULL,
+  `paidAt` DATETIME(3) NOT NULL,
+  `orderSource` VARCHAR(40) NOT NULL,
+  `channel` VARCHAR(32) NOT NULL,
+  `dispatcherId` INTEGER NULL,
+  `dispatcherName` VARCHAR(100) NULL,
+  `dispatcherType` VARCHAR(40) NULL,
+  `operatorId` INTEGER NULL,
+  `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE INDEX `order_receipts_receiptKey_key` (`receiptKey`),
+  INDEX `order_receipts_paidAt_idx` (`paidAt`),
+  INDEX `order_receipts_orderId_idx` (`orderId`),
+  PRIMARY KEY (`id`)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

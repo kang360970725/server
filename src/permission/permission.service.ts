@@ -215,6 +215,22 @@ export class PermissionService {
         });
     }
 
+    private async ensureRentalOrderPermissions() {
+        const menu = await this.prisma.permission.findUnique({ where: { key: 'menu:finance' } });
+        const page = await this.prisma.permission.upsert({
+            where: { key: 'rental-orders:page' },
+            create: { key: 'rental-orders:page', name: '租号订单', module: 'rental-orders', type: PermissionType.PAGE, parentId: menu?.id },
+            update: { name: '租号订单', type: PermissionType.PAGE, parentId: menu?.id },
+        });
+        for (const [action, name] of [['create', '创建租号订单'], ['settle', '结算租号订单'], ['void', '废除租号订单']]) {
+            const key = `rental-orders:${action}:button`;
+            await this.prisma.permission.upsert({ where: { key },
+                create: { key, name, module: 'rental-orders', type: PermissionType.BUTTON, parentId: page.id },
+                update: { name, type: PermissionType.BUTTON, parentId: page.id },
+            });
+        }
+    }
+
     private sanitizePermissionInput(data: {
         key: string;
         name: string;
@@ -243,6 +259,7 @@ export class PermissionService {
         await this.ensureExcellentStaffPermissionTree();
         await this.ensureMemberCouponPermissionTree();
         await this.ensureRentalAccountPermissionTree();
+        await this.ensureRentalOrderPermissions();
 
         const permissions = await this.prisma.permission.findMany({
             orderBy: { id: 'asc' },

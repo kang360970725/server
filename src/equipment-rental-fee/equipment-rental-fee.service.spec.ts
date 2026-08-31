@@ -15,6 +15,8 @@ describe('EquipmentRentalFeeService', () => {
         create: jest.fn().mockResolvedValue({ id: 1, userId: 7 }),
       },
     } as any;
+    prisma.userLog = { create: jest.fn() };
+    prisma.$transaction = jest.fn((callback) => callback(prisma));
     const service = new EquipmentRentalFeeService(prisma);
 
     await expect(
@@ -35,6 +37,8 @@ describe('EquipmentRentalFeeService', () => {
         create: jest.fn().mockResolvedValue({ id: 2, userId: 8 }),
       },
     } as any;
+    prisma.userLog = { create: jest.fn() };
+    prisma.$transaction = jest.fn((callback) => callback(prisma));
     const service = new EquipmentRentalFeeService(prisma);
 
     await expect(
@@ -191,6 +195,7 @@ describe('EquipmentRentalFeeService', () => {
 
   it('confirms external channel payment without touching wallet balance', async () => {
     const tx: any = {
+      userLog: { create: jest.fn() },
       equipmentRentalBill: {
         findUnique: jest.fn().mockResolvedValue({
           id: 13,

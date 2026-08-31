@@ -1065,6 +1065,11 @@ export class MemberService {
     if (!order) throw new NotFoundException('充值订单不存在');
     if (order.status === 'SUCCESS') return order;
 
+    // 支付通知可能跨日到达，归属支付成功日而非回调处理日；人工充值使用操作时间。
+    const notifiedTime = order.channel !== 'MANUAL' && typeof payload.notifyRaw?.success_time === 'string'
+      ? new Date(payload.notifyRaw.success_time) : null;
+    const paidAt = notifiedTime && Number.isFinite(notifiedTime.getTime()) ? notifiedTime : new Date();
+
     return this.prisma.$transaction(async (tx) => {
       await this.ensureUserAssets(order.userId, tx as any);
 
@@ -1072,7 +1077,7 @@ export class MemberService {
         where: { id: order.id },
         data: {
           status: 'SUCCESS',
-          paidAt: new Date(),
+          paidAt,
           transactionId: payload.transactionId ? String(payload.transactionId).trim() : null,
           payerOpenid: payload.payerOpenid ? String(payload.payerOpenid).trim() : order.payerOpenid,
           notifyRaw: payload.notifyRaw ?? undefined,

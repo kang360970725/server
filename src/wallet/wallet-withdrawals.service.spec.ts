@@ -275,6 +275,36 @@ describe('WalletWithdrawalsService.reviewWithdrawal', () => {
     };
   };
 
+  it.each([
+    [-700, 800, true], [-1000, 800, true], [-1000.01, 800, false], [-700, 799, false],
+  ])('reviews pre-reserved withdrawal with available=%s reserve=%s allowed=%s', async (available, reserved, allowed) => {
+    const request = { id: 12, userId: 7, amount: 800, status: 'PENDING_REVIEW', reserveTxId: 90,
+      reserveTx: { userId: 7, sourceId: 12, amount: 800, status: 'FROZEN', direction: 'OUT', bizType: 'WITHDRAW_RESERVE' } };
+    const tx: any = {
+      $queryRawUnsafe: jest.fn().mockResolvedValue([]),
+      walletAccount: { findUnique: jest.fn().mockResolvedValue({ availableBalance: available, earningFrozenBalance: 1000,
+        withdrawFrozenBalance: reserved, frozenBalance: 1000 + reserved, depositBalance: 9000 }) },
+      walletHold: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: 1000 } }), count: jest.fn().mockResolvedValue(0) },
+      walletWithdrawalRequest: {
+        findUnique: jest.fn().mockResolvedValue(request), findMany: jest.fn().mockResolvedValue([request]),
+        update: jest.fn().mockImplementation(async ({ data }) => ({ ...request, ...data })),
+      },
+      walletTransaction: { findUnique: jest.fn().mockResolvedValue(null), upsert: jest.fn().mockResolvedValue({ id: 91 }) },
+    };
+    const { service, walletService } = createService({ $transaction: (fn: any) => fn(tx) });
+    walletService.applyWalletAccountDelta.mockResolvedValue({ availableBalance: available, frozenBalance: 1000, earningFrozenBalance: 1000, withdrawFrozenBalance: 0 });
+    const result = service.reviewWithdrawal({ requestId: 12, reviewerId: 3, approve: true });
+    if (allowed) {
+      await expect(result).resolves.toMatchObject({ status: 'PAID', payoutTxId: 91 });
+      expect(walletService.applyWalletAccountDelta).toHaveBeenCalledWith(tx, 7, { withdrawFrozenDelta: -800 });
+      expect(tx.walletTransaction.upsert).toHaveBeenCalledTimes(1);
+    } else {
+      await expect(result).rejects.toThrow();
+      expect(walletService.applyWalletAccountDelta).not.toHaveBeenCalled();
+      expect(tx.walletWithdrawalRequest.update).not.toHaveBeenCalled();
+    }
+  });
+
   it('allows rejecting a withdrawal when release only partially offsets a negative available balance', async () => {
     const tx: any = {
       $queryRawUnsafe: jest.fn().mockResolvedValue([]),
