@@ -193,6 +193,7 @@ export class NotificationsService {
         content: dto.content,
         audience,
         forceRead: Boolean(dto.forceRead),
+        forceReadOnce: Boolean(dto.forceReadOnce),
         enabled: dto.enabled !== false,
         publishAt,
         expireAt,
@@ -231,6 +232,7 @@ export class NotificationsService {
         content: dto.content,
         audience: dto.audience ? this.parseAudience(dto.audience) : undefined,
         forceRead: dto.forceRead,
+        forceReadOnce: dto.forceReadOnce,
         enabled: dto.enabled,
         publishAt,
         expireAt,
@@ -298,8 +300,8 @@ export class NotificationsService {
 
   async getMyForceAnnouncementStats(userId: number) {
     const list = await this.listMyAnnouncements(userId);
-    // 按业务要求：强制阅读公告每次进入都要弹窗，不依赖历史已读状态
-    const forceUnread = list.filter((x) => Boolean(x.forceRead));
+    // forceRead：每次进入都确认；forceReadOnce：仅首次未读时确认。
+    const forceUnread = list.filter((x) => Boolean(x.forceRead) || (Boolean(x.forceReadOnce) && !x.isRead));
     return {
       unreadForceCount: forceUnread.length,
       list: forceUnread,

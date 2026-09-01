@@ -8,31 +8,31 @@ datasource db {
 }
 
 model GameProject {
-  id             Int             @id @default(autoincrement())
-  name           String
-  price          Float
-  originPrice    Float?
-  type           OrderType
-  gameType       String?         @db.VarChar(64)
-  projectType    String?         @db.Text
-  category       String?         @db.VarChar(64)
-  richContent    String?         @db.LongText
-  showInMenuList Boolean         @default(true)
+  id                       Int             @id @default(autoincrement())
+  name                     String
+  price                    Float
+  originPrice              Float?
+  type                     OrderType
+  gameType                 String?         @db.VarChar(64)
+  projectType              String?         @db.Text
+  category                 String?         @db.VarChar(64)
+  richContent              String?         @db.LongText
+  showInMenuList           Boolean         @default(true)
   /// 计费模式：小时单 / 保底单/ 玩法单（你已落地）
-  billingMode    BillingMode     @default(GUARANTEED)
-  baseAmount     Float?
+  billingMode              BillingMode     @default(GUARANTEED)
+  baseAmount               Float?
   /// 保底单结算策略：STANDARD / FINAL_ROUND_TAKES_ALL
-  guaranteedSettlementMode String @default("STANDARD") @db.VarChar(32)
+  guaranteedSettlementMode String          @default("STANDARD") @db.VarChar(32)
   /// 最后一组最低保底进度（万）；为空或 0 表示不启用倒推补足
-  minimumFinalProgressWan Float?
-  clubRate       Float?
-  coverImage     String?
-  description    String?
-  status         ProjectStatus   @default(ACTIVE)
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
-  orders         Order[]
-  reviews        ProductReview[]
+  minimumFinalProgressWan  Float?
+  clubRate                 Float?
+  coverImage               String?
+  description              String?
+  status                   ProjectStatus   @default(ACTIVE)
+  createdAt                DateTime        @default(now())
+  updatedAt                DateTime        @updatedAt
+  orders                   Order[]
+  reviews                  ProductReview[]
 }
 
 model Role {
@@ -486,23 +486,25 @@ model UserCoupon {
 }
 
 model SystemAnnouncement {
-  id         Int                      @id @default(autoincrement())
-  title      String                   @db.VarChar(120)
-  content    String                   @db.Text
-  audience   AnnouncementAudience     @default(ALL)
-  forceRead  Boolean                  @default(false)
-  enabled    Boolean                  @default(true)
-  publishAt  DateTime?
-  expireAt   DateTime?
-  notifiedAt DateTime?
-  createdBy  Int?
-  createdAt  DateTime                 @default(now())
-  updatedAt  DateTime                 @updatedAt
-  creator    User?                    @relation("AnnouncementCreator", fields: [createdBy], references: [id], onDelete: SetNull)
-  reads      SystemAnnouncementRead[]
+  id            Int                      @id @default(autoincrement())
+  title         String                   @db.VarChar(120)
+  content       String                   @db.Text
+  audience      AnnouncementAudience     @default(ALL)
+  forceRead     Boolean                  @default(false)
+  forceReadOnce Boolean                  @default(false)
+  enabled       Boolean                  @default(true)
+  publishAt     DateTime?
+  expireAt      DateTime?
+  notifiedAt    DateTime?
+  createdBy     Int?
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
+  creator       User?                    @relation("AnnouncementCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  reads         SystemAnnouncementRead[]
 
   @@index([enabled, publishAt, expireAt], map: "idx_announcement_publish")
   @@index([forceRead], map: "idx_announcement_force_read")
+  @@index([forceReadOnce], map: "idx_announcement_force_read_once")
   @@map("system_announcements")
 }
 
@@ -577,19 +579,19 @@ model CsDutyLeave {
 }
 
 model OfflineFeeContract {
-  id            Int      @id @default(autoincrement())
+  id            Int                      @id @default(autoincrement())
   userId        Int
-  monthlyAmount Decimal  @db.Decimal(12, 2)
-  startMonth    String   @db.VarChar(7)
-  endMonth      String?  @db.VarChar(7)
+  monthlyAmount Decimal                  @db.Decimal(12, 2)
+  startMonth    String                   @db.VarChar(7)
+  endMonth      String?                  @db.VarChar(7)
   startDate     DateTime?
   endDate       DateTime?
   status        OfflineFeeContractStatus @default(ACTIVE)
-  remark        String?  @db.VarChar(255)
+  remark        String?                  @db.VarChar(255)
   createdBy     Int?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
+  user          User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, status], map: "idx_offline_fee_contract_user_status")
   @@index([status, startMonth], map: "idx_offline_fee_contract_status_month")
@@ -856,114 +858,114 @@ model UserLog {
 }
 
 model Order {
-  id                     Int                     @id @default(autoincrement())
+  id                         Int                     @id @default(autoincrement())
   /// 自动单号：建议 YYYYMMDD-0001（由代码生成，不靠 DB 自增）
-  autoSerial             String                  @unique
+  autoSerial                 String                  @unique
   /// 金额：手工录入（已确认 Q1=A）
-  receivableAmount       Float
-  paidAmount             Float
+  receivableAmount           Float
+  paidAmount                 Float
   /// 结算基数：默认等于应收，用于分佣，不受优惠券/实收波动影响
-  settlementBaseAmount   Float                   @default(0)
+  settlementBaseAmount       Float                   @default(0)
   /// 时间字段：
-  orderTime              DateTime?
-  paymentTime            DateTime?
-  openedAt               DateTime                @default(now())
+  orderTime                  DateTime?
+  paymentTime                DateTime?
+  openedAt                   DateTime                @default(now())
   /// 保底数额（单位：万）
   /// 仅保底/护航类项目使用；小时单可为空
-  baseAmountWan          Float?
+  baseAmountWan              Float?
   /// 小时单“总小时”不再需要手填：
   /// 因为你要求用 接单时间 -> 存/结单时间 自动计算 billableHours
   /// 所以小时单的小时数最终落在 OrderDispatch.billableHours 上
-  orderQuantity          Int                     @default(1)
+  orderQuantity              Int                     @default(1)
   /// 关联项目：仍用 GameProject（必选）
-  projectId              Int
+  projectId                  Int
   /// 项目快照：记录当时项目配置（项目可能随时调整）
   /// 建议存：name/type/billingMode/baseAmount/clubRate/price 等
-  projectSnapshot        Json
+  projectSnapshot            Json
   /// 客户游戏 ID / 昵称：用于查询消费记录
-  customerGameId         String?
+  customerGameId             String?
   /// 客服首次录入的客户标识类型：GAME_ID=准确游戏ID，ALIAS=昵称/房间号等临时标识
-  customerIdentifierType String?                 @db.VarChar(20)
+  customerIdentifierType     String?                 @db.VarChar(20)
   /// 客服首次录入的原始客户标识，后续补齐真实游戏ID时不覆盖
   customerOriginalIdentifier String?
   /// 下单客户（用于小程序/公众号等自助来源回溯客户信息）
-  customerUserId         Int?
+  customerUserId             Int?
   /// 当前客服/当前归属客服：允许在重新派单时更新
-  dispatcherId           Int?
+  dispatcherId               Int?
   /// 初始客服：创建订单时固化，结单客服分红按该字段结算
-  initialDispatcherId    Int?
+  initialDispatcherId        Int?
   /// 订单渠道来源（字符串，支持后台维护）
-  orderSource            String?                 @db.VarChar(40)
+  orderSource                String?                 @db.VarChar(40)
   /// 回访登记：文本 + 状态
-  revisitDetail          String?
-  revisitStatus          RevisitStatus           @default(NOT_REVISITED)
+  revisitDetail              String?
+  revisitStatus              RevisitStatus           @default(NOT_REVISITED)
   /// 分佣比例（可调）
-  csRate                 Float?
-  inviteRate             Float?
-  inviter                String?
+  csRate                     Float?
+  inviteRate                 Float?
+  inviter                    String?
   /// 俱乐部抽成比例（订单级固定抽成）
-  customClubRate         Float?
-  clubRate               Float?
+  customClubRate             Float?
+  clubRate                   Float?
   /// 结算汇总（可选，结单自动结算后写入，用于对账与校验）
-  clubEarnings           Float?
-  totalPlayerEarnings    Float?
+  clubEarnings               Float?
+  totalPlayerEarnings        Float?
   /// 订单状态（用于筛选）
-  status                 OrderStatus             @default(WAIT_ASSIGN)
+  status                     OrderStatus             @default(WAIT_ASSIGN)
   /// 当前派单批次（为了快速查“这一轮派单/状态”）
-  currentDispatchId      Int?
+  currentDispatchId          Int?
   /// 是否续单：创建订单首轮派单时固化；续单订单推荐人失效
-  isRenewal              Boolean                 @default(false)
+  isRenewal                  Boolean                 @default(false)
   /// 续单榜单统计金额（客服确认结单后写入，默认按实付）
-  renewalAmount          Decimal                 @default(0) @db.Decimal(12, 2)
+  renewalAmount              Decimal                 @default(0) @db.Decimal(12, 2)
   /// 续单榜单统计数量（订单维度，确认有效后为 1）
-  renewalCount           Decimal                 @default(0) @db.Decimal(8, 2)
-  createdAt              DateTime                @default(now())
-  updatedAt              DateTime                @updatedAt
+  renewalCount               Decimal                 @default(0) @db.Decimal(8, 2)
+  createdAt                  DateTime                @default(now())
+  updatedAt                  DateTime                @updatedAt
   /// 是否赠送单：赠送单不收款，但仍正常结算/分红；
   /// ⚠️ 日账单/营收统计需排除 isGifted=true 的订单
-  isGifted               Boolean                 @default(false)
+  isGifted                   Boolean                 @default(false)
   /// 赠送金额（用于统计活动成本/赠送成本）
   /// - 前端不传
   /// - 后端创建订单时：isGifted=true => giftedAmount = paidAmount（或订单价值口径）
-  giftedAmount           Decimal?                @db.Decimal(10, 2)
+  giftedAmount               Decimal?                @db.Decimal(10, 2)
   /// 是否已确认收款（人工确认）
   /// - 先打后付场景：结单后可能仍未收款
   /// - 确认收款接�����会同时写入 paymentTime=now() 与 paidAmount（允许修正）
-  isPaid                 Boolean                 @default(false)
+  isPaid                     Boolean                 @default(false)
   /// 订单支付状态（与支付流水联动）
-  payStatus              OrderPayStatus          @default(PENDING)
-  isTestPayment          Boolean                 @default(false)
+  payStatus                  OrderPayStatus          @default(PENDING)
+  isTestPayment              Boolean                 @default(false)
   /// 订单优惠汇总（统一优惠口径）
   /// - originalAmount：优惠前基准金额（通常=应收）
   /// - discountAmount：总优惠（可由多来源叠加）
   /// - finalPayableAmount：最终应付（优惠后）
-  originalAmount         Decimal                 @default(0) @db.Decimal(10, 2)
-  discountAmount         Decimal                 @default(0) @db.Decimal(10, 2)
-  couponDiscountAmount   Decimal                 @default(0) @db.Decimal(10, 2)
-  activityDiscountAmount Decimal                 @default(0) @db.Decimal(10, 2)
-  giftDiscountAmount     Decimal                 @default(0) @db.Decimal(10, 2)
-  manualAdjustAmount     Decimal                 @default(0) @db.Decimal(10, 2)
-  finalPayableAmount     Decimal                 @default(0) @db.Decimal(10, 2)
-  marketingCostAmount    Decimal                 @default(0) @db.Decimal(10, 2)
+  originalAmount             Decimal                 @default(0) @db.Decimal(10, 2)
+  discountAmount             Decimal                 @default(0) @db.Decimal(10, 2)
+  couponDiscountAmount       Decimal                 @default(0) @db.Decimal(10, 2)
+  activityDiscountAmount     Decimal                 @default(0) @db.Decimal(10, 2)
+  giftDiscountAmount         Decimal                 @default(0) @db.Decimal(10, 2)
+  manualAdjustAmount         Decimal                 @default(0) @db.Decimal(10, 2)
+  finalPayableAmount         Decimal                 @default(0) @db.Decimal(10, 2)
+  marketingCostAmount        Decimal                 @default(0) @db.Decimal(10, 2)
   /// 优惠类型：NONE / COUPON / ACTIVITY / GIFT / MANUAL / MIXED
-  discountType           String?                 @db.VarChar(20)
-  appliedUserCoupon      UserCoupon?             @relation("OrderAppliedUserCoupon")
-  latestPaymentId        Int?
-  currentDispatch        OrderDispatch?          @relation("OrderCurrentDispatch", fields: [currentDispatchId], references: [id])
-  dispatcher             User?                   @relation("OrderDispatcher", fields: [dispatcherId], references: [id])
-  initialDispatcher      User?                   @relation("OrderInitialDispatcher", fields: [initialDispatcherId], references: [id])
-  customerUser           User?                   @relation("OrderCustomer", fields: [customerUserId], references: [id])
-  project                GameProject             @relation(fields: [projectId], references: [id])
-  dispatches             OrderDispatch[]         @relation("OrderDispatches")
-  settlements            OrderSettlement[]
-  discountDetails        OrderDiscount[]
-  review                 ProductReview?
-  playerEvaluations      OrderPlayerEvaluation[]
-  latestPayment          OrderPayment?           @relation("OrderLatestPayment", fields: [latestPaymentId], references: [id])
-  payments               OrderPayment[]          @relation("OrderPayments")
-  refunds                OrderRefund[]
-  renewalGroups          OrderRenewalGroup[]
-  renewalBonuses         OrderRenewalBonus[]
+  discountType               String?                 @db.VarChar(20)
+  appliedUserCoupon          UserCoupon?             @relation("OrderAppliedUserCoupon")
+  latestPaymentId            Int?
+  currentDispatch            OrderDispatch?          @relation("OrderCurrentDispatch", fields: [currentDispatchId], references: [id])
+  dispatcher                 User?                   @relation("OrderDispatcher", fields: [dispatcherId], references: [id])
+  initialDispatcher          User?                   @relation("OrderInitialDispatcher", fields: [initialDispatcherId], references: [id])
+  customerUser               User?                   @relation("OrderCustomer", fields: [customerUserId], references: [id])
+  project                    GameProject             @relation(fields: [projectId], references: [id])
+  dispatches                 OrderDispatch[]         @relation("OrderDispatches")
+  settlements                OrderSettlement[]
+  discountDetails            OrderDiscount[]
+  review                     ProductReview?
+  playerEvaluations          OrderPlayerEvaluation[]
+  latestPayment              OrderPayment?           @relation("OrderLatestPayment", fields: [latestPaymentId], references: [id])
+  payments                   OrderPayment[]          @relation("OrderPayments")
+  refunds                    OrderRefund[]
+  renewalGroups              OrderRenewalGroup[]
+  renewalBonuses             OrderRenewalBonus[]
 
   @@index([projectId])
   @@index([dispatcherId])
@@ -1240,36 +1242,36 @@ model OrderSettlement {
 }
 
 model OrderRenewalGroup {
-  id                  Int                 @id @default(autoincrement())
-  orderId             Int
-  dispatchId          Int
+  id                    Int                 @id @default(autoincrement())
+  orderId               Int
+  dispatchId            Int
   /// 续单组合 key：续单打手 userId 升序拼接，例如 "12,18"
-  groupKey            String              @db.VarChar(255)
+  groupKey              String              @db.VarChar(255)
   /// 分红归因类型：RENEWAL=续单，DESIGNATED=指定；指定复用续单分红规则但不受优秀服务者限制
-  attributionType     String              @default("RENEWAL") @db.VarChar(24)
-  memberUserIds       Json
-  memberNamesSnapshot Json?
-  bonusEligibleUserIds Json?
+  attributionType       String              @default("RENEWAL") @db.VarChar(24)
+  memberUserIds         Json
+  memberNamesSnapshot   Json?
+  bonusEligibleUserIds  Json?
   bonusEligibleSnapshot Json?
   /// PENDING / SETTLED / INVALIDATED / REVERSED
-  status              String              @default("PENDING") @db.VarChar(24)
-  renewalOrderCount   Decimal             @default(0) @db.Decimal(8, 2)
-  renewalAmount       Decimal             @default(0) @db.Decimal(12, 2)
-  bonusBaseAmount     Decimal             @default(0) @db.Decimal(12, 2)
-  bonusRate           Decimal             @default(0) @db.Decimal(6, 4)
-  bonusTotalAmount    Decimal             @default(0) @db.Decimal(12, 2)
-  settlementBatchId   String?             @db.VarChar(36)
-  createdBy           Int?
-  settledBy           Int?
-  settledAt           DateTime?
-  invalidatedBy       Int?
-  invalidatedAt       DateTime?
-  invalidateReason    String?             @db.VarChar(255)
-  createdAt           DateTime            @default(now())
-  updatedAt           DateTime            @updatedAt
-  order               Order               @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  dispatch            OrderDispatch       @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
-  bonuses             OrderRenewalBonus[]
+  status                String              @default("PENDING") @db.VarChar(24)
+  renewalOrderCount     Decimal             @default(0) @db.Decimal(8, 2)
+  renewalAmount         Decimal             @default(0) @db.Decimal(12, 2)
+  bonusBaseAmount       Decimal             @default(0) @db.Decimal(12, 2)
+  bonusRate             Decimal             @default(0) @db.Decimal(6, 4)
+  bonusTotalAmount      Decimal             @default(0) @db.Decimal(12, 2)
+  settlementBatchId     String?             @db.VarChar(36)
+  createdBy             Int?
+  settledBy             Int?
+  settledAt             DateTime?
+  invalidatedBy         Int?
+  invalidatedAt         DateTime?
+  invalidateReason      String?             @db.VarChar(255)
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+  order                 Order               @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  dispatch              OrderDispatch       @relation(fields: [dispatchId], references: [id], onDelete: Cascade)
+  bonuses               OrderRenewalBonus[]
 
   @@unique([orderId], map: "uniq_order_renewal_group_order")
   @@index([attributionType, status, settledAt], map: "idx_order_renewal_group_attr_rank")
@@ -1462,47 +1464,47 @@ model WalletHold {
 }
 
 model WalletWithdrawalRequest {
-  id             Int                @id @default(autoincrement())
+  id                 Int                      @id @default(autoincrement())
   /// 申请人
-  userId         Int
+  userId             Int
   /// 申请金额（始终为正数）
-  amount         Float
-  status         WithdrawalStatus   @default(PENDING_REVIEW)
-  channel        WithdrawalChannel  @default(MANUAL)
-  transferStatus WithdrawalTransferStatus @default(NOT_STARTED)
+  amount             Float
+  status             WithdrawalStatus         @default(PENDING_REVIEW)
+  channel            WithdrawalChannel        @default(MANUAL)
+  transferStatus     WithdrawalTransferStatus @default(NOT_STARTED)
   /// ✅ 幂等键：前端/客户端生成（推荐 uuid），用于防重复提交
   /// - 同一个 userId + idempotencyKey 只能申请一次
-  idempotencyKey String             @db.VarChar(64)
+  idempotencyKey     String                   @db.VarChar(64)
   /// ✅ 业务单号：服务端生成（可用于展示/对账/三方回调关联）
-  requestNo      String             @unique @db.VarChar(32)
+  requestNo          String                   @unique @db.VarChar(32)
   /// 申请备注（可选）
-  remark         String?
+  remark             String?
   /// 审批信息
-  reviewedBy     Int?
-  reviewedAt     DateTime?
-  reviewRemark   String?
+  reviewedBy         Int?
+  reviewedAt         DateTime?
+  reviewRemark       String?
   /// ✅ 关键：关联“预扣流水”（申请时产生）
-  reserveTxId    Int                @unique
+  reserveTxId        Int                      @unique
   /// ✅ 关键：关联“出款流水”（打款成功时产生，可空）
-  payoutTxId     Int?               @unique
+  payoutTxId         Int?                     @unique
   /// ---------- 为微信自动打款预留 ----------
   /// 外部打款单号（你系统生成，发给微信用）
-  outTradeNo     String?            @db.VarChar(64)
+  outTradeNo         String?                  @db.VarChar(64)
   /// 微信/三方返回的交易号
-  channelTradeNo String?            @db.VarChar(64)
-  transferStartedAt DateTime?
+  channelTradeNo     String?                  @db.VarChar(64)
+  transferStartedAt  DateTime?
   transferFinishedAt DateTime?
-  manualFallbackAt DateTime?
-  manualFallbackBy Int?
+  manualFallbackAt   DateTime?
+  manualFallbackBy   Int?
   /// 三方回调原始内容（可存 JSON 字符串）
-  callbackRaw    String?            @db.Text
+  callbackRaw        String?                  @db.Text
   /// 最近一次打款错误原因
-  failReason     String?            @db.Text
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
-  payoutTx       WalletTransaction? @relation("WithdrawalPayoutTx", fields: [payoutTxId], references: [id])
-  reserveTx      WalletTransaction  @relation("WithdrawalReserveTx", fields: [reserveTxId], references: [id])
-  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  failReason         String?                  @db.Text
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+  payoutTx           WalletTransaction?       @relation("WithdrawalPayoutTx", fields: [payoutTxId], references: [id])
+  reserveTx          WalletTransaction        @relation("WithdrawalReserveTx", fields: [reserveTxId], references: [id])
+  user               User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, idempotencyKey], map: "uniq_withdraw_user_idempotency")
   @@index([userId, status, createdAt])
@@ -1519,39 +1521,39 @@ enum RentalOrderStatus {
 
 /// 租号领域独立订单，不复用服务订单或设备租赁账单。
 model RentalOrder {
-  id Int @id @default(autoincrement())
-  serialNo String @unique @db.VarChar(12)
-  staffUserId Int
-  staffNameSnapshot String @db.VarChar(100)
-  accountSourceId Int?
-  accountSourceNo String @db.VarChar(100)
-  sourceChannel String @default("ADMIN") @db.VarChar(24)
-  prepaidAmount Decimal @db.Decimal(12, 2)
-  depositAmount Decimal @default(0) @db.Decimal(12, 2)
-  startDate DateTime @db.Date
-  forcedSettlementDate DateTime @db.Date
-  status RentalOrderStatus @default(RUNNING)
-  noRefundDifference Boolean @default(true)
-  refundDifferenceAmount Decimal @default(0) @db.Decimal(12, 2)
-  refundDifferenceRemark String? @db.Text
-  lossAmount Decimal @default(0) @db.Decimal(12, 2)
-  lossDetail String? @db.Text
-  hasAbnormalCompensation Boolean @default(false)
-  abnormalCompensationAmount Decimal @default(0) @db.Decimal(12, 2)
-  abnormalCompensationRemark String? @db.Text
-  ownerSettlementAmount Decimal? @db.Decimal(12, 2)
-  actualAmount Decimal? @db.Decimal(12, 2)
-  settlementNetRefund Decimal? @db.Decimal(12, 2)
-  calculationSnapshot Json?
-  createdBy Int
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  settledBy Int?
-  settledAt DateTime?
-  voidedBy Int?
-  voidedAt DateTime?
-  voidReason String? @db.Text
-  version Int @default(0)
+  id                         Int               @id @default(autoincrement())
+  serialNo                   String            @unique @db.VarChar(12)
+  staffUserId                Int
+  staffNameSnapshot          String            @db.VarChar(100)
+  accountSourceId            Int?
+  accountSourceNo            String            @db.VarChar(100)
+  sourceChannel              String            @default("ADMIN") @db.VarChar(24)
+  prepaidAmount              Decimal           @db.Decimal(12, 2)
+  depositAmount              Decimal           @default(0) @db.Decimal(12, 2)
+  startDate                  DateTime          @db.Date
+  forcedSettlementDate       DateTime          @db.Date
+  status                     RentalOrderStatus @default(RUNNING)
+  noRefundDifference         Boolean           @default(true)
+  refundDifferenceAmount     Decimal           @default(0) @db.Decimal(12, 2)
+  refundDifferenceRemark     String?           @db.Text
+  lossAmount                 Decimal           @default(0) @db.Decimal(12, 2)
+  lossDetail                 String?           @db.Text
+  hasAbnormalCompensation    Boolean           @default(false)
+  abnormalCompensationAmount Decimal           @default(0) @db.Decimal(12, 2)
+  abnormalCompensationRemark String?           @db.Text
+  ownerSettlementAmount      Decimal?          @db.Decimal(12, 2)
+  actualAmount               Decimal?          @db.Decimal(12, 2)
+  settlementNetRefund        Decimal?          @db.Decimal(12, 2)
+  calculationSnapshot        Json?
+  createdBy                  Int
+  createdAt                  DateTime          @default(now())
+  updatedAt                  DateTime          @updatedAt
+  settledBy                  Int?
+  settledAt                  DateTime?
+  voidedBy                   Int?
+  voidedAt                   DateTime?
+  voidReason                 String?           @db.Text
+  version                    Int               @default(0)
 
   @@index([staffUserId, createdAt])
   @@index([status, forcedSettlementDate])
@@ -1961,7 +1963,7 @@ enum WalletHoldStatus {
 }
 
 enum DepositBizType {
-  /// 提现按比例缴纳押金（例如10%）
+  /// 提现按比例缴纳押金（当前为20%）
   WITHDRAW_PERCENT
   /// 奖励直接转押金
   REWARD_TRANSFER

@@ -1,5 +1,12 @@
 import { StaffEmploymentStatus } from '@prisma/client';
-import { WalletWithdrawalsService } from './wallet-withdrawals.service';
+import { WITHDRAW_DEPOSIT_AUTO_FILL_RATE, WalletWithdrawalsService } from './wallet-withdrawals.service';
+
+describe('withdrawal deposit policy', () => {
+  it('auto fills 20% of the requested withdrawal amount', () => {
+    expect(WITHDRAW_DEPOSIT_AUTO_FILL_RATE).toBe(0.2);
+    expect(Math.floor(550 * WITHDRAW_DEPOSIT_AUTO_FILL_RATE)).toBe(110);
+  });
+});
 
 describe('WalletWithdrawalsService.applyWithdrawal', () => {
   const createService = (prisma: any, tx: any, staffRuleEngineService: any) => {

@@ -13,6 +13,10 @@ export class CreateAnnouncementDto {
   forceRead?: boolean;
 
   @IsOptional()
+  @IsBoolean()
+  forceReadOnce?: boolean;
+
+  @IsOptional()
   @IsString()
   audience?: 'ADMIN' | 'APPLET' | 'ALL';
 

@@ -12,6 +12,8 @@ import { inspectWalletFundingTx } from './wallet-funding.util';
 import { SystemConfigService } from '../system-config/system-config.service';
 import { WechatWithdrawalTransferService } from './wechat-withdrawal-transfer.service';
 
+export const WITHDRAW_DEPOSIT_AUTO_FILL_RATE = 0.2;
+
 /** ✅ 截断到 2 位小数（不四舍五入） */
 const round2 = (v: any): number => {
     const n = Number(v);
@@ -777,7 +779,7 @@ export class WalletWithdrawalsService {
 
                 if (depositNeed > 0) {
 
-                    const depositByRate = Math.floor(amount * 0.1);
+                    const depositByRate = Math.floor(amount * WITHDRAW_DEPOSIT_AUTO_FILL_RATE);
 
                     depositAdd = Math.min(depositByRate, depositNeed);
                 }

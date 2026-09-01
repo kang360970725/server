@@ -2861,6 +2861,10 @@ export class OrdersService {
 
         if (!order) throw new NotFoundException('订单不存在');
 
+        if (String(order.status) !== OrderStatus.REFUNDED) {
+            throw new BadRequestException('仅已退款订单允许删除');
+        }
+
         await this.prisma.order.delete({
             where: { id: orderId },
         });
