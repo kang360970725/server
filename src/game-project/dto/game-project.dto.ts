@@ -14,6 +14,8 @@ export class CreateGameProjectDto {
     billingMode?: BillingMode; // ✅ 新增：小时/保底，允许不传（后端会给默认）
 
     baseAmount?: number;
+    guaranteedSettlementMode?: 'STANDARD' | 'FINAL_ROUND_TAKES_ALL';
+    minimumFinalProgressWan?: number | null;
     clubRate?: number;
     coverImage?: string;
     description?: string;
@@ -32,6 +34,8 @@ export class UpdateGameProjectDto {
     billingMode?: BillingMode; // ✅ 新增
 
     baseAmount?: number;
+    guaranteedSettlementMode?: 'STANDARD' | 'FINAL_ROUND_TAKES_ALL';
+    minimumFinalProgressWan?: number | null;
     clubRate?: number;
     coverImage?: string;
     description?: string;

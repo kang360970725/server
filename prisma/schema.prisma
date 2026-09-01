@@ -21,6 +21,10 @@ model GameProject {
   /// 计费模式：小时单 / 保底单/ 玩法单（你已落地）
   billingMode    BillingMode     @default(GUARANTEED)
   baseAmount     Float?
+  /// 保底单结算策略：STANDARD / FINAL_ROUND_TAKES_ALL
+  guaranteedSettlementMode String @default("STANDARD") @db.VarChar(32)
+  /// 最后一组最低保底进度（万）；为空或 0 表示不启用倒推补足
+  minimumFinalProgressWan Float?
   clubRate       Float?
   coverImage     String?
   description    String?

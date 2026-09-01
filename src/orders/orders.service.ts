@@ -29,7 +29,8 @@ import {groupByUserId, round2, roundMix1, toNum} from "../utils/money/format";
 import {
     computeBillingGuaranteed,
     computeBillingHours,
-    computeBillingMODEPLAY
+    computeBillingMODEPLAY,
+    resolveGuaranteedSettlementPolicy,
 } from "../utils/orderDispatches/revenueInit";
 import {compareSettlementsToPlan} from "../utils/finance/generateRepairPlan";
 import {computeSettlementFreezeTime} from "../utils/orderDispatches/settlement-freeze.rule";
@@ -1230,6 +1231,12 @@ export class OrdersService {
             throw new BadRequestException(`请先完成全部打手评价：${Array.from(new Set(missingKeys)).join(',')}`);
         }
 
+        const finalTakesAll = this.getBillingModeFromOrder(order) === BillingMode.GUARANTEED
+            && resolveGuaranteedSettlementPolicy(order).mode === 'FINAL_ROUND_TAKES_ALL';
+        const completedDispatchIds = new Set((order?.dispatches || [])
+            .filter((d: any) => String(d?.status) === String(DispatchStatus.COMPLETED))
+            .map((d: any) => Number(d.id)));
+
         const rowStates = adjustablePlayerRows.map((row: any) => {
             const key = this.buildPlayerEvaluationKey(Number(row.dispatchId), Number(row.userId));
             const evalItem = evalMap.get(key);
@@ -1238,7 +1245,10 @@ export class OrdersService {
             const base65 = roundMix1(baseAmount * 0.65);
             // 炸单轮：保持订单基础比例算出来的原始负数，不允许被评级/段位改写。
             const isBombLoss = currentFinal < 0;
-            const baseFinalBeforeExtras = isBombLoss
+            // 全额模式的最后完成轮已经是“平台抽成后的全部收益”，不再被中/差评基础比例降到 65%；
+            // 售后责任扣款、维护费及订单打赏仍沿用统一后处理规则。
+            const keepFinalRoundFull = finalTakesAll && completedDispatchIds.has(Number(row.dispatchId));
+            const baseFinalBeforeExtras = isBombLoss || keepFinalRoundFull
                 ? currentFinal
                 : (evalItem.ratingLabel === 'GOOD' ? currentFinal : base65);
             return {
@@ -1306,7 +1316,13 @@ export class OrdersService {
         }
 
         // 2) 打赏池：全单只取一次 3%，订单级下拉选择；候选只来自非差评参与者
-        const allowedTipUserIds = Array.from(goodParticipantIds).filter((userId) => !badParticipantIds.has(Number(userId)));
+        const allowedTipUserIds = Array.from(goodParticipantIds).filter((userId) => {
+            if (badParticipantIds.has(Number(userId))) return false;
+            if (!finalTakesAll) return true;
+            return (userStates.get(Number(userId)) || []).some((st: any) =>
+                completedDispatchIds.has(Number(st.dispatchId)) && Number(st.baseFinalBeforeExtras ?? 0) > 0,
+            );
+        });
         const requestedTipUserIdsFiltered = requestedTipUserIds.filter((userId) => allowedTipUserIds.includes(Number(userId)));
         if (hasOrderTipPayload) {
             if (orderTipEnabled) {
@@ -1934,6 +1950,8 @@ export class OrdersService {
             billingMode: project.billingMode,
             price: project.price,
             baseAmount: project.baseAmount ?? null,
+            guaranteedSettlementMode: project.guaranteedSettlementMode || 'STANDARD',
+            minimumFinalProgressWan: project.minimumFinalProgressWan ?? null,
             clubRate: project.clubRate ?? null,
             coverImage: project.coverImage ?? null,
         };
@@ -4767,6 +4785,8 @@ export class OrdersService {
                 price: project.price,
                 baseAmount: project.baseAmount ?? null,
                 clubRate: project.clubRate ?? null,
+                guaranteedSettlementMode: project.guaranteedSettlementMode || 'STANDARD',
+                minimumFinalProgressWan: project.minimumFinalProgressWan ?? null,
                 coverImage: project.coverImage ?? null,
             } as any;
 
@@ -5119,6 +5139,8 @@ export class OrdersService {
                         billingMode: true,
                         price: true,
                         clubRate: true,
+                        guaranteedSettlementMode: true,
+                        minimumFinalProgressWan: true,
                     },
                 },
 

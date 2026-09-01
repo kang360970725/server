@@ -47,6 +47,76 @@ const shouldSkipEmptySettlementDispatch = (dispatch: any) => {
     return String(dispatch?.status || '').trim().toUpperCase() === String(DispatchStatus.ARCHIVED);
 };
 
+export type GuaranteedSettlementPolicy = {
+    mode: 'STANDARD' | 'FINAL_ROUND_TAKES_ALL';
+    minimumFinalProgressWan: number;
+};
+
+export const resolveGuaranteedSettlementPolicy = (order: any): GuaranteedSettlementPolicy => {
+    const snapshot = order?.projectSnapshot || {};
+    const project = order?.project || {};
+    const snapshotHasMode = Object.prototype.hasOwnProperty.call(snapshot, 'guaranteedSettlementMode');
+    const snapshotHasMinimum = Object.prototype.hasOwnProperty.call(snapshot, 'minimumFinalProgressWan');
+    const rawMode = snapshotHasMode ? snapshot.guaranteedSettlementMode : (project?.guaranteedSettlementMode ?? 'STANDARD');
+    const mode = String(rawMode).trim().toUpperCase() === 'FINAL_ROUND_TAKES_ALL'
+        ? 'FINAL_ROUND_TAKES_ALL' : 'STANDARD';
+    const rawMinimum = snapshotHasMinimum ? snapshot.minimumFinalProgressWan : (project?.minimumFinalProgressWan ?? 0);
+    const minimum = Number(rawMinimum);
+    return { mode, minimumFinalProgressWan: Number.isFinite(minimum) && minimum > 0 ? minimum : 0 };
+};
+
+/**
+ * 生成参与人有效保底进度：
+ * - 全额结算：历史正进度清零，负进度（炸单）保留；
+ * - 最低进度：按轮次由近到远倒扣历史正进度，轮内按原正进度比例扣减。
+ */
+export const buildGuaranteedEffectiveProgress = (order: any, dispatchesInput?: any[]) => {
+    const dispatches = [...(dispatchesInput ?? order?.dispatches ?? [])].sort(
+        (a, b) => Number(a?.round ?? 0) - Number(b?.round ?? 0),
+    );
+    const archived = dispatches.filter((d) => String(d?.status) === String(DispatchStatus.ARCHIVED));
+    const participantKey = (p: any) => Number.isFinite(Number(p?.id)) && Number(p?.id) > 0 ? `id:${Number(p.id)}` : p;
+    const effective = new Map<any, number>();
+    for (const d of archived) {
+        for (const p of getSettlementParticipants(d)) {
+            effective.set(participantKey(p), Number(p.progressBaseWan ?? 0));
+        }
+    }
+    const policy = resolveGuaranteedSettlementPolicy(order);
+    if (policy.mode === 'FINAL_ROUND_TAKES_ALL') {
+        const transferredProgressWan = [...effective.values()].reduce((sum, value) => sum + Math.max(0, value), 0);
+        for (const [id, value] of effective.entries()) if (value > 0) effective.set(id, 0);
+        return { effective, policy, transferredProgressWan };
+    }
+    if (!(policy.minimumFinalProgressWan > 0)) return { effective, policy, transferredProgressWan: 0 };
+
+    const base = Number(order?.baseAmountWan ?? 0);
+    const archivedNet = [...effective.values()].reduce((sum, value) => sum + value, 0);
+    const inferredFinal = base - archivedNet;
+    let deficit = Math.max(0, policy.minimumFinalProgressWan - inferredFinal);
+    const originalDeficit = deficit;
+
+    for (const d of [...archived].reverse()) {
+        if (deficit <= 1e-9) break;
+        const positive = getSettlementParticipants(d)
+            .map((p) => ({ p, value: Math.max(0, Number(effective.get(participantKey(p)) ?? 0)) }))
+            .filter((item) => item.value > 0);
+        const roundTotal = positive.reduce((sum, item) => sum + item.value, 0);
+        if (!(roundTotal > 0)) continue;
+        const deduction = Math.min(deficit, roundTotal);
+        let allocated = 0;
+        positive.forEach((item, index) => {
+            const share = index === positive.length - 1
+                ? deduction - allocated
+                : deduction * item.value / roundTotal;
+            allocated += share;
+            effective.set(participantKey(item.p), Math.max(0, item.value - share));
+        });
+        deficit -= deduction;
+    }
+    return { effective, policy, transferredProgressWan: originalDeficit - Math.max(0, deficit) };
+};
+
 const splitEvenlyWithResidual = (total: number, count: number) => {
     const safeTotal = roundMix1(Number(total) || 0);
     const safeCount = Math.max(1, Math.floor(Number(count) || 0));
@@ -280,6 +350,7 @@ export const computeBillingGuaranteed = (order: any) => {
     const orderRatio = lastPaidAmount > 0 ? Number(baseAmountWan) / lastPaidAmount : 0;
     const initialDispatcher = getInitialDispatcherSnapshot(order);
     const includeCustomerServiceRate = String(initialDispatcher?.user?.userType || '') === 'CUSTOMER_SERVICE';
+    const guaranteedProgress = buildGuaranteedEffectiveProgress(order, dispatches);
 
     for (const d of dispatches) {
         const active = sortSettlementParticipants(getSettlementParticipants(d));
@@ -345,7 +416,8 @@ export const computeBillingGuaranteed = (order: any) => {
                 // 存单：按本轮 progressBaseWan 占订单保底比例换算
                 // - 正数：按抽成率结算，并从后续可分配池扣减
                 // - 负数：炸单/补单，保留原始负数，不受抽成率影响；同时回灌到后续可分配池
-                const progressBaseWan = Number(p.progressBaseWan ?? 0);
+                const progressKey = Number.isFinite(Number(p?.id)) && Number(p?.id) > 0 ? `id:${Number(p.id)}` : p;
+                const progressBaseWan = Number(guaranteedProgress.effective.get(progressKey) ?? p.progressBaseWan ?? 0);
                 const thisMoney = orderRatio > 0 ? progressBaseWan / orderRatio : 0;
 
                 contributionBaseAmount = thisMoney;

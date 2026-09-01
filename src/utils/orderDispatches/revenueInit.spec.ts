@@ -1,9 +1,83 @@
 import { BillingMode, DispatchStatus } from '@prisma/client';
+import { OrdersService } from '../../orders/orders.service';
 import {
+  buildGuaranteedEffectiveProgress,
   computeBillingGuaranteed,
   computeBillingHours,
   computeBillingMODEPLAY,
 } from './revenueInit';
+
+const guaranteedRound = (id: number, round: number, status: DispatchStatus, progress?: Array<[number, number]>) => ({
+  id, round, status,
+  participants: (progress || [[id * 10, 0]]).map(([participantId, value]) => ({
+    id: participantId, userId: participantId, acceptedAt: new Date('2026-08-31T00:00:00Z'),
+    rejectedAt: null, isActive: status === DispatchStatus.COMPLETED, progressBaseWan: value,
+    user: { name: `玩家${participantId}` },
+  })),
+});
+
+describe('保底单末轮项目级策略', () => {
+  it('最后一组全额结算：历史正收益为 0，炸单负收益保留并回灌末轮', () => {
+    const order = { id: 1, status: 'COMPLETED_PENDING_CONFIRM', baseAmountWan: 1000,
+      settlementBaseAmount: 100, projectSnapshot: { clubRate: 0.2, guaranteedSettlementMode: 'FINAL_ROUND_TAKES_ALL' },
+      dispatches: [guaranteedRound(1, 1, DispatchStatus.ARCHIVED, [[11, 300]]),
+        guaranteedRound(2, 2, DispatchStatus.ARCHIVED, [[21, -100]]),
+        guaranteedRound(3, 3, DispatchStatus.COMPLETED, [[31, 0]])] };
+    const rows = computeBillingGuaranteed(order);
+    expect(rows.map(r => [r.dispatchId, r.contributionBaseAmount, r.finalEarnings])).toEqual([
+      [1, 0, 0], [2, -10, -10], [3, 110, 88],
+    ]);
+    expect(rows[2].clubEarnings).toBe(22);
+  });
+
+  it('全额模式末轮不再被默认中评降为65%，历史零收益参与人不能获得打赏', async () => {
+    const order: any = { id: 11, status: 'COMPLETED_PENDING_CONFIRM', baseAmountWan: 1000,
+      settlementBaseAmount: 100, projectSnapshot: { clubRate: 0.2, billingMode: 'GUARANTEED', guaranteedSettlementMode: 'FINAL_ROUND_TAKES_ALL' },
+      dispatches: [guaranteedRound(11, 1, DispatchStatus.ARCHIVED, [[111, 300]]),
+        guaranteedRound(12, 2, DispatchStatus.COMPLETED, [[121, 0]])] };
+    const rows = computeBillingGuaranteed(order);
+    const service: any = Object.create(OrdersService.prototype);
+    const applied = await service.applyPlayerEvaluationAdjustmentsToSettlements({ order, settlementsToCreate: rows, autoConfirm: true });
+    expect(applied.settlementsToCreate.map((r: any) => [r.dispatchId, r.finalEarnings])).toEqual([[11, 0], [12, 79]]);
+    await expect(service.applyPlayerEvaluationAdjustmentsToSettlements({ order,
+      settlementsToCreate: computeBillingGuaranteed(order), autoConfirm: true, orderTipEnabled: true, orderTipUserIds: [111] }))
+      .rejects.toThrow('不允许打赏');
+  });
+
+  it('600万规则只从倒数第二轮扣足所需进度', () => {
+    const order = { id: 2, status: 'COMPLETED_PENDING_CONFIRM', baseAmountWan: 2000,
+      settlementBaseAmount: 200, projectSnapshot: { clubRate: 0, guaranteedSettlementMode: 'STANDARD', minimumFinalProgressWan: 600 },
+      dispatches: [guaranteedRound(1, 1, DispatchStatus.ARCHIVED, [[11, 900]]),
+        guaranteedRound(2, 2, DispatchStatus.ARCHIVED, [[21, 700]]),
+        guaranteedRound(3, 3, DispatchStatus.COMPLETED, [[31, 0]])] };
+    expect(computeBillingGuaranteed(order).map(r => [r.dispatchId, r.contributionBaseAmount])).toEqual([
+      [1, 90], [2, 50], [3, 60],
+    ]);
+  });
+
+  it('800万规则跨多轮由近到远倒扣，炸单进度不参与扣减', () => {
+    const order = { id: 3, status: 'COMPLETED_PENDING_CONFIRM', baseAmountWan: 1500,
+      settlementBaseAmount: 150, projectSnapshot: { clubRate: 0, guaranteedSettlementMode: 'STANDARD', minimumFinalProgressWan: 800 },
+      dispatches: [guaranteedRound(1, 1, DispatchStatus.ARCHIVED, [[11, 900], [12, -100]]),
+        guaranteedRound(2, 2, DispatchStatus.ARCHIVED, [[21, 500]]),
+        guaranteedRound(3, 3, DispatchStatus.COMPLETED, [[31, 0]])] };
+    const plan = buildGuaranteedEffectiveProgress(order);
+    expect(plan.transferredProgressWan).toBe(600);
+    expect(computeBillingGuaranteed(order).map(r => [r.userId, r.contributionBaseAmount])).toEqual([
+      [11, 80], [12, -10], [21, 0], [31, 80],
+    ]);
+  });
+
+  it('订单快照优先于商品后来修改，老快照缺字段才读取当前商品配置', () => {
+    expect(buildGuaranteedEffectiveProgress({ baseAmountWan: 1000,
+      projectSnapshot: { guaranteedSettlementMode: 'STANDARD', minimumFinalProgressWan: null },
+      project: { guaranteedSettlementMode: 'FINAL_ROUND_TAKES_ALL', minimumFinalProgressWan: 800 }, dispatches: [] }).policy)
+      .toEqual({ mode: 'STANDARD', minimumFinalProgressWan: 0 });
+    expect(buildGuaranteedEffectiveProgress({ baseAmountWan: 1000, projectSnapshot: {},
+      project: { guaranteedSettlementMode: 'STANDARD', minimumFinalProgressWan: 800 }, dispatches: [] }).policy.minimumFinalProgressWan)
+      .toBe(800);
+  });
+});
 
 describe('computeBillingHours', () => {
   it('ignores archived dispatch rounds without settlement participants', () => {

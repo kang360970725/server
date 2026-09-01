@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateGameProjectDto, UpdateGameProjectDto } from './dto/game-project.dto';
 import { OrderType, ProjectStatus, BillingMode } from '@prisma/client';
@@ -11,6 +11,22 @@ export class GameProjectService {
         private prisma: PrismaService,
         private readonly systemConfigService: SystemConfigService,
     ) {}
+
+    private normalizeGuaranteedSettlementPolicy(input: any) {
+        const mode = String(input?.guaranteedSettlementMode || 'STANDARD').trim().toUpperCase();
+        if (!['STANDARD', 'FINAL_ROUND_TAKES_ALL'].includes(mode)) {
+            throw new BadRequestException('保底结算策略无效');
+        }
+        const rawMinimum = input?.minimumFinalProgressWan;
+        const minimum = rawMinimum === null || rawMinimum === undefined || rawMinimum === '' ? null : Number(rawMinimum);
+        if (minimum !== null && (!Number.isFinite(minimum) || minimum < 0)) {
+            throw new BadRequestException('最后一组最低保底进度必须大于或等于 0');
+        }
+        return {
+            guaranteedSettlementMode: mode,
+            minimumFinalProgressWan: mode === 'FINAL_ROUND_TAKES_ALL' ? null : minimum,
+        };
+    }
 
     private buildCategoryNameMap(nodes: any[]): Map<string, string> {
         const map = new Map<string, string>();
@@ -73,6 +89,15 @@ export class GameProjectService {
         if (createGameProjectDto.billingMode) {
             data.billingMode = createGameProjectDto.billingMode as BillingMode;
         }
+        const policy = this.normalizeGuaranteedSettlementPolicy(createGameProjectDto);
+        // 非体验保底商品的业务默认值为 800 万；仍可在项目配置中明确改为其他值或全额模式。
+        if ((createGameProjectDto.billingMode ?? BillingMode.GUARANTEED) === BillingMode.GUARANTEED
+            && String(createGameProjectDto.type) !== 'EXPERIENCE'
+            && policy.guaranteedSettlementMode === 'STANDARD'
+            && policy.minimumFinalProgressWan === null) {
+            policy.minimumFinalProgressWan = 800;
+        }
+        Object.assign(data, policy);
 
         return this.prisma.gameProject.create({ data });
     }
@@ -173,6 +198,15 @@ export class GameProjectService {
         if (updateGameProjectDto.billingMode) {
             data.billingMode = updateGameProjectDto.billingMode as BillingMode;
         }
+        if (updateGameProjectDto.guaranteedSettlementMode !== undefined || updateGameProjectDto.minimumFinalProgressWan !== undefined) {
+            const existing = await this.prisma.gameProject.findUnique({ where: { id },
+                select: { guaranteedSettlementMode: true, minimumFinalProgressWan: true } });
+            Object.assign(data, this.normalizeGuaranteedSettlementPolicy({
+                guaranteedSettlementMode: updateGameProjectDto.guaranteedSettlementMode ?? existing?.guaranteedSettlementMode,
+                minimumFinalProgressWan: updateGameProjectDto.minimumFinalProgressWan !== undefined
+                    ? updateGameProjectDto.minimumFinalProgressWan : existing?.minimumFinalProgressWan,
+            }));
+        }
 
         return this.prisma.gameProject.update({
             where: { id },
@@ -197,7 +231,8 @@ export class GameProjectService {
         }
         return this.prisma.gameProject.findMany({
             where,
-            select: { id: true, name: true, type: true, price: true, baseAmount: true, billingMode: true, category: true },
+            select: { id: true, name: true, type: true, price: true, baseAmount: true, billingMode: true, category: true,
+                guaranteedSettlementMode: true, minimumFinalProgressWan: true },
             orderBy: { id: 'desc' },
             take: 50,
         });
