@@ -5,6 +5,7 @@ const prisma = new PrismaClient();
 
 const STAFF_EXIT_MIGRATION = '20260619152000_add_staff_exit_status';
 const EXCELLENT_STAFF_MIGRATION = '20260813093000_add_excellent_staff_and_renewal_snapshot';
+const ORDER_CUSTOMER_IDENTIFIER_MIGRATION = '20260828161000_add_order_customer_identifier_type';
 
 async function tableExists(tableName) {
   const rows = await prisma.$queryRawUnsafe(
@@ -274,11 +275,66 @@ async function ensureExcellentStaffMigrationState() {
   return true;
 }
 
+async function ensureOrderCustomerIdentifierMigrationState() {
+  const row = await getLatestMigrationState(ORDER_CUSTOMER_IDENTIFIER_MIGRATION);
+  if (!row) {
+    console.log(`[migration-repair] no record found for ${ORDER_CUSTOMER_IDENTIFIER_MIGRATION}, skip`);
+    return false;
+  }
+  if (row.finished_at || row.rolled_back_at) {
+    console.log(`[migration-repair] ${ORDER_CUSTOMER_IDENTIFIER_MIGRATION} already resolved, skip`);
+    return false;
+  }
+
+  console.log(`[migration-repair] repairing failed migration ${ORDER_CUSTOMER_IDENTIFIER_MIGRATION}`);
+  // 该历史迁移错误地使用了 `orders`；生产 schema 的真实映射是 `Order`。
+  // 同时兼容少数 lower_case_table_names 环境，且表名只从固定白名单选择。
+  const orderTable = (await tableExists('Order')) ? 'Order' : ((await tableExists('orders')) ? 'orders' : null);
+  if (!orderTable) {
+    throw new Error('cannot repair customer identifier migration: neither `Order` nor `orders` exists');
+  }
+
+  if (!(await columnExists(orderTable, 'customerIdentifierType'))) {
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE \`${orderTable}\` ADD COLUMN \`customerIdentifierType\` VARCHAR(20) NULL`,
+    );
+  }
+  if (!(await columnExists(orderTable, 'customerOriginalIdentifier'))) {
+    await prisma.$executeRawUnsafe(
+      `ALTER TABLE \`${orderTable}\` ADD COLUMN \`customerOriginalIdentifier\` TEXT NULL`,
+    );
+  }
+  if (await columnExists(orderTable, 'customerGameId')) {
+    await prisma.$executeRawUnsafe(
+      `
+        UPDATE \`${orderTable}\`
+        SET \`customerIdentifierType\` = COALESCE(\`customerIdentifierType\`, 'GAME_ID'),
+            \`customerOriginalIdentifier\` = COALESCE(\`customerOriginalIdentifier\`, \`customerGameId\`)
+        WHERE \`customerIdentifierType\` IS NULL
+           OR \`customerOriginalIdentifier\` IS NULL
+      `,
+    );
+  } else {
+    await prisma.$executeRawUnsafe(
+      `UPDATE \`${orderTable}\` SET \`customerIdentifierType\` = 'GAME_ID' WHERE \`customerIdentifierType\` IS NULL`,
+    );
+  }
+  if (!(await indexExists(orderTable, 'idx_order_customer_identifier_type'))) {
+    await prisma.$executeRawUnsafe(
+      `CREATE INDEX \`idx_order_customer_identifier_type\` ON \`${orderTable}\`(\`customerIdentifierType\`)`,
+    );
+  }
+
+  console.log(`[migration-repair] base SQL repaired for ${ORDER_CUSTOMER_IDENTIFIER_MIGRATION} on table ${orderTable}`);
+  return true;
+}
+
 async function main() {
   const migrationsToResolve = [];
   try {
     if (await ensureStaffExitMigrationState()) migrationsToResolve.push(STAFF_EXIT_MIGRATION);
     if (await ensureExcellentStaffMigrationState()) migrationsToResolve.push(EXCELLENT_STAFF_MIGRATION);
+    if (await ensureOrderCustomerIdentifierMigrationState()) migrationsToResolve.push(ORDER_CUSTOMER_IDENTIFIER_MIGRATION);
   } finally {
     await prisma.$disconnect();
   }

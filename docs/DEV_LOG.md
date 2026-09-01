@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-09-01 ｜发布启动 P3009 修复
+
+- server 镜像构建及推送成功，但生产容器在 `prisma migrate deploy` 阶段被失败记录 `20260828161000_add_order_customer_identifier_type` 阻断，随后健康检查表现为 80 端口拒绝连接。
+- 根因是该历史迁移使用了 `orders` 表名，而 Prisma schema 的真实订单表为 `Order`。扩展启动前 `repair-prisma-failed-migrations.js`：仅在检测到该迁移存在且未完成/未回滚时运行。
+- 修复过程幂等检查真实表名、两个字段和索引，补齐历史订单的标识类型/原始标识，再通过 `prisma migrate resolve --applied` 解除 P3009；已完成、已回滚或不存在该记录的环境均跳过。
+
+---
+
 ## 2026-09-01 ｜保底单最后一组结算策略项目化
 
 - `GameProject` 新增项目级配置：`guaranteedSettlementMode`（`STANDARD` / `FINAL_ROUND_TAKES_ALL`）与 `minimumFinalProgressWan`。商品管理页可直接维护，不以价格作为运行时判断条件。
