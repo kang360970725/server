@@ -79,6 +79,7 @@ export class OrdersController {
             serial: body.serial,
             status: body.status,
             customerGameId: body.customerGameId,
+            orderMonth: body.orderMonth ? String(body.orderMonth).trim() : undefined,
             // ✅ 新增：全局搜索
             keyword: body.keyword?.trim() || undefined,
             projectId: body.projectId != null ? Number(body.projectId) : undefined,
