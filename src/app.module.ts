@@ -36,6 +36,7 @@ import { QuestionnaireModule } from './questionnaire/questionnaire.module';
 import { EquipmentRentalFeeModule } from './equipment-rental-fee/equipment-rental-fee.module';
 import { ExcellentStaffModule } from './excellent-staff/excellent-staff.module';
 import { RentalOrdersModule } from './rental-orders/rental-orders.module';
+import { StaffActivityModule } from './staff-activity/staff-activity.module';
 
 
 @Module({
@@ -70,6 +71,7 @@ import { RentalOrdersModule } from './rental-orders/rental-orders.module';
         EquipmentRentalFeeModule,
         ExcellentStaffModule,
         RentalOrdersModule,
+        StaffActivityModule,
   ],
     controllers: [AppController],
     providers: [AppService, PrismaService,

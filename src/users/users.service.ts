@@ -65,6 +65,9 @@ export class UsersService {
   }
 
   async autoFreezeDormantStaffUsers(userIds?: number[]) {
+    // 长期未接单自动冻结已停用，由活跃度考核替代。
+    return new Set<number>();
+    /* istanbul ignore next */
     const idSet = Array.from(new Set((userIds || []).map((item) => Number(item || 0)).filter((item) => item > 0)));
     const users = await this.prisma.user.findMany({
       where: {

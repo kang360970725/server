@@ -10,6 +10,9 @@ export class UsersScheduler {
 
   @Cron('0 0 6 * * *', { timeZone: 'Asia/Shanghai' })
   async autoFreezeDormantStaffDaily() {
+    this.logger.debug('[staff-auto-freeze] disabled; activity assessment replaces dormant freezing');
+    return;
+    /* istanbul ignore next */
     try {
       const frozenIds = await this.usersService.autoFreezeDormantStaffUsers();
       if (frozenIds.size > 0) {

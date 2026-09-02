@@ -40,6 +40,7 @@ import { PenaltiesService } from '../penalties/penalties.service';
 import { SystemConfigService } from '../system-config/system-config.service';
 import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
 import { WechatPayService } from '../mini/wechat-pay.service';
+import { shouldRefreshActivityAfterSettlement, StaffActivityService } from '../staff-activity/staff-activity.service';
 
 type OrderCreateScene = 'ADMIN' | 'MINIAPP' | 'OFFICIAL_ACCOUNT';
 type CreateOrderContext = {
@@ -81,6 +82,7 @@ export class OrdersService {
         private systemConfigService: SystemConfigService,
         private staffRuleEngineService: StaffRuleEngineService,
         private wechatPayService: WechatPayService,
+        private staffActivityService: StaffActivityService,
   ) {
   }
 
@@ -3197,6 +3199,9 @@ export class OrdersService {
                     where: {id: {in: userIds}},
                     data: {workStatus: 'IDLE' as any},
                 });
+                if (shouldRefreshActivityAfterSettlement(Boolean(options.forceByAdmin))) {
+                    await this.staffActivityService.markCompletedForUsersTx(tx, userIds, now);
+                }
                 // ✅ 7) 写日志：记录“谁、什么时候、存的什么”
                 await this.logOrderAction(
                     operatorId,
@@ -4567,7 +4572,6 @@ export class OrdersService {
                     staffDormantFreezeBaseAt: null,
                 },
             });
-
             await tx.orderDispatch.update({
                 where: { id: dispatchId },
                 data: {
@@ -4652,7 +4656,6 @@ export class OrdersService {
                 where: { id: { in: participantUserIds } },
                 data: { workStatus: 'WORKING' as any },
             });
-
             await this.logOrderAction(operatorId, dispatch.orderId, 'ADMIN_ROLLBACK_DISPATCH_TO_ACCEPTED', {
                 dispatchId,
                 fromStatus: DispatchStatus.ARCHIVED,
@@ -6963,6 +6966,8 @@ export class OrdersService {
             where: {id: participant.id},
             data: {acceptedAt: new Date()},
         });
+
+        await this.staffActivityService.pauseOnSelfAcceptTx(this.prisma as any, userId, new Date());
 
         await this.prisma.user.update({
             where: {id: userId},

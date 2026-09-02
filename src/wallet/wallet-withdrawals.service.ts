@@ -86,6 +86,9 @@ export class WalletWithdrawalsService {
     }
 
     private async autoFreezeDormantStaffIfNeeded(userId: number, tx: any) {
+        // 长期未接单自动冻结已停用。
+        return tx.user.findUnique({ where: { id: Number(userId) } });
+        /* istanbul ignore next */
         const user = await tx.user.findUnique({
             where: { id: Number(userId) },
             select: {

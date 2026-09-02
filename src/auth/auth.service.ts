@@ -103,6 +103,9 @@ export class AuthService {
   }
 
   private async autoFreezeDormantStaffIfNeeded(user: any) {
+    // 长期未接单自动冻结已停用。
+    return user;
+    /* istanbul ignore next */
     if (
       String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN &&
       !isDispatchMonitoredStaff(user)

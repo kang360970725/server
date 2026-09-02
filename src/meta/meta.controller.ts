@@ -155,6 +155,7 @@ export class MetaController {
                 MEMBER_RECHARGE_REFUND: '会员充值退款',
                 STAFF_EXIT_RELEASE: '退店解冻转可用',
                 STAFF_EXIT_CLEAR: '退店一键清零',
+                STAFF_ACTIVITY_PENALTY: '活跃度考核扣款',
 
                 WITHDRAW_RESERVE: '提现预扣',
                 WITHDRAW_RELEASE: '提现退回',
@@ -169,6 +170,7 @@ export class MetaController {
                 DEPOSIT_REFUND: '保证金退还',
                 STAFF_EXIT_RELEASE: '退店转出保证金',
                 STAFF_EXIT_CLEAR: '退店清零保证金',
+                ACTIVITY_PENALTY: '活跃度考核扣保证金',
             },
 
             WithdrawalChannel: {

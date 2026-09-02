@@ -97,6 +97,11 @@ model User {
   staffDormantFreezeBaseAt    DateTime?
   staffCooldownUntil          DateTime?
   staffExitedAt               DateTime?
+  activityAssessmentEnabled   Boolean                    @default(true)
+  activityAssessmentStartedAt DateTime                   @default(now())
+  activityLastCompletedAt     DateTime?
+  activityNextChargeAt        DateTime?
+  activityTimerPaused         Boolean                    @default(false)
   dispatchedOrders            Order[]                    @relation("OrderDispatcher")
   initiallyDispatchedOrders   Order[]                    @relation("OrderInitialDispatcher")
   customerOrders              Order[]                    @relation("OrderCustomer")
@@ -138,6 +143,8 @@ model User {
   penaltyAppeals              PenaltyAppeal[]            @relation("PenaltyAppealUser")
   reviewedPenaltyAppeals      PenaltyAppeal[]            @relation("PenaltyAppealReviewer")
   penaltyFundFlows            PenaltyFundFlow[]
+  staffLeaves                 StaffLeave[]
+  staffActivityCharges        StaffActivityCharge[]
   userCoupons                 UserCoupon[]
   chestRedeemedCodes          ChestRedeemCode[]          @relation("ChestRedeemByUser")
   chestAccount                ChestUserAccount?
@@ -1910,6 +1917,7 @@ enum WalletBizType {
   MEMBER_RECHARGE_REFUND
   STAFF_EXIT_RELEASE
   STAFF_EXIT_CLEAR
+  STAFF_ACTIVITY_PENALTY
 }
 
 enum WithdrawalStatus {
@@ -1975,6 +1983,54 @@ enum DepositBizType {
   DEPOSIT_REFUND
   STAFF_EXIT_RELEASE
   STAFF_EXIT_CLEAR
+  ACTIVITY_PENALTY
+}
+
+enum StaffLeaveStatus {
+  SCHEDULED
+  ACTIVE
+  COMPLETED
+  EARLY_ENDED
+  CANCELED
+}
+
+model StaffLeave {
+  id          Int              @id @default(autoincrement())
+  userId      Int
+  days        Int
+  startAt     DateTime
+  endAt       DateTime
+  actualEndAt DateTime?
+  status      StaffLeaveStatus @default(SCHEDULED)
+  reason      String?          @db.VarChar(255)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status, startAt, endAt], map: "idx_staff_leave_user_status_time")
+  @@index([status, startAt, endAt], map: "idx_staff_leave_status_time")
+  @@map("staff_leaves")
+}
+
+model StaffActivityCharge {
+  id                Int      @id @default(autoincrement())
+  userId            Int
+  scheduledAt       DateTime
+  inactivityHours   Int
+  rateTier          Int
+  expectedAmount    Decimal  @db.Decimal(10, 2)
+  availableDeducted Decimal  @default(0) @db.Decimal(10, 2)
+  depositDeducted   Decimal  @default(0) @db.Decimal(10, 2)
+  walletTxId        Int?
+  depositTxId       Int?
+  exitTriggered     Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, scheduledAt], map: "uniq_staff_activity_charge_schedule")
+  @@index([createdAt], map: "idx_staff_activity_charge_created")
+  @@index([exitTriggered, createdAt], map: "idx_staff_activity_charge_exit")
+  @@map("staff_activity_charges")
 }
 
 enum MemberRechargeOrderStatus {
@@ -2082,6 +2138,7 @@ enum PenaltyFundBizType {
   APPEAL_REFUND
   /// 人工调整（预留）
   MANUAL_ADJUST
+  ACTIVITY_DEDUCT
 }
 
 //业绩记录表

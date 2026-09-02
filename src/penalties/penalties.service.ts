@@ -77,6 +77,7 @@ export class PenaltiesService {
     PENALTY_DEDUCT: '罚单扣款入池',
     APPEAL_REFUND: '申诉退款出池',
     MANUAL_ADJUST: '人工调整',
+    ACTIVITY_DEDUCT: '活跃度扣罚',
   };
 
   private enrichRuleLabel<T extends { category: PenaltyRuleCategory }>(row: T) {
