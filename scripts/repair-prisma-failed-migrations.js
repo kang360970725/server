@@ -6,6 +6,7 @@ const prisma = new PrismaClient();
 const STAFF_EXIT_MIGRATION = '20260619152000_add_staff_exit_status';
 const EXCELLENT_STAFF_MIGRATION = '20260813093000_add_excellent_staff_and_renewal_snapshot';
 const ORDER_CUSTOMER_IDENTIFIER_MIGRATION = '20260828161000_add_order_customer_identifier_type';
+const STAFF_ACTIVITY_MIGRATION = '20260902100000_add_staff_activity_assessment';
 
 async function tableExists(tableName) {
   const rows = await prisma.$queryRawUnsafe(
@@ -329,14 +330,60 @@ async function ensureOrderCustomerIdentifierMigrationState() {
   return true;
 }
 
+async function shouldRollBackFailedStaffActivityMigration() {
+  const row = await getLatestMigrationState(STAFF_ACTIVITY_MIGRATION);
+  if (!row) {
+    console.log(`[migration-repair] no record found for ${STAFF_ACTIVITY_MIGRATION}, skip`);
+    return false;
+  }
+  if (row.finished_at || row.rolled_back_at) {
+    console.log(`[migration-repair] ${STAFF_ACTIVITY_MIGRATION} already resolved, skip`);
+    return false;
+  }
+
+  const hasPartialSchema =
+    (await columnExists('users', 'activityAssessmentEnabled')) ||
+    (await columnExists('users', 'activityAssessmentStartedAt')) ||
+    (await columnExists('users', 'activityLastCompletedAt')) ||
+    (await columnExists('users', 'activityNextChargeAt')) ||
+    (await columnExists('users', 'activityTimerPaused')) ||
+    (await tableExists('staff_leaves')) ||
+    (await tableExists('staff_activity_charges'));
+
+  if (hasPartialSchema) {
+    throw new Error(`cannot automatically roll back ${STAFF_ACTIVITY_MIGRATION}: partial schema objects already exist`);
+  }
+
+  console.log(`[migration-repair] failed ${STAFF_ACTIVITY_MIGRATION} has no partial schema, resolving as rolled back`);
+  return true;
+}
+
 async function main() {
   const migrationsToResolve = [];
+  const migrationsToRollBack = [];
   try {
     if (await ensureStaffExitMigrationState()) migrationsToResolve.push(STAFF_EXIT_MIGRATION);
     if (await ensureExcellentStaffMigrationState()) migrationsToResolve.push(EXCELLENT_STAFF_MIGRATION);
     if (await ensureOrderCustomerIdentifierMigrationState()) migrationsToResolve.push(ORDER_CUSTOMER_IDENTIFIER_MIGRATION);
+    if (await shouldRollBackFailedStaffActivityMigration()) migrationsToRollBack.push(STAFF_ACTIVITY_MIGRATION);
   } finally {
     await prisma.$disconnect();
+  }
+
+  for (const migrationName of migrationsToRollBack) {
+    console.log(`[migration-repair] resolving ${migrationName} as rolled back`);
+    execFileSync(
+      'npx',
+      [
+        'prisma',
+        'migrate',
+        'resolve',
+        '--schema=./prisma/schema.prisma',
+        '--rolled-back',
+        migrationName,
+      ],
+      { stdio: 'inherit' },
+    );
   }
 
   if (!migrationsToResolve.length) return;

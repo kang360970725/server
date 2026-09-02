@@ -1,4 +1,4 @@
-ALTER TABLE `User`
+ALTER TABLE `users`
   ADD COLUMN `activityAssessmentEnabled` BOOLEAN NOT NULL DEFAULT true,
   ADD COLUMN `activityAssessmentStartedAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   ADD COLUMN `activityLastCompletedAt` DATETIME(3) NULL,
@@ -20,7 +20,7 @@ CREATE TABLE `staff_leaves` (
   `status` ENUM('SCHEDULED','ACTIVE','COMPLETED','EARLY_ENDED','CANCELED') NOT NULL DEFAULT 'SCHEDULED',
   `reason` VARCHAR(255) NULL, `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), `updatedAt` DATETIME(3) NOT NULL,
   INDEX `idx_staff_leave_user_status_time` (`userId`,`status`,`startAt`,`endAt`), INDEX `idx_staff_leave_status_time` (`status`,`startAt`,`endAt`),
-  PRIMARY KEY (`id`), CONSTRAINT `staff_leaves_userId_fkey` FOREIGN KEY (`userId`) REFERENCES `User`(`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  PRIMARY KEY (`id`), CONSTRAINT `staff_leaves_userId_fkey` FOREIGN KEY (`userId`) REFERENCES `users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE `staff_activity_charges` (
@@ -30,5 +30,5 @@ CREATE TABLE `staff_activity_charges` (
   `walletTxId` INTEGER NULL, `depositTxId` INTEGER NULL, `exitTriggered` BOOLEAN NOT NULL DEFAULT false,
   `createdAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   UNIQUE INDEX `uniq_staff_activity_charge_schedule` (`userId`,`scheduledAt`), INDEX `idx_staff_activity_charge_created` (`createdAt`), INDEX `idx_staff_activity_charge_exit` (`exitTriggered`,`createdAt`),
-  PRIMARY KEY (`id`), CONSTRAINT `staff_activity_charges_userId_fkey` FOREIGN KEY (`userId`) REFERENCES `User`(`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  PRIMARY KEY (`id`), CONSTRAINT `staff_activity_charges_userId_fkey` FOREIGN KEY (`userId`) REFERENCES `users`(`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
