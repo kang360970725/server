@@ -1359,6 +1359,21 @@ export class WalletWithdrawalsService {
                     });
                 }
 
+                let reviewEligibility: { canApprove: boolean; reason: string; postWithdrawalTotalBalance: number };
+                try {
+                    const funding = await inspectWalletFundingTx(this.prisma as any, r.userId, r.id);
+                    reviewEligibility = funding.spendableAssets >= 0
+                        ? { canApprove: true, reason: '可放行', postWithdrawalTotalBalance: funding.spendableAssets }
+                        : { canApprove: false, reason: '提现后有效资产不足以覆盖欠款', postWithdrawalTotalBalance: funding.spendableAssets };
+                } catch (error: any) {
+                    reviewEligibility = {
+                        canApprove: false,
+                        reason: String(error?.message || '资金校验未通过'),
+                        postWithdrawalTotalBalance:
+                            Number(wallet?.availableBalance || 0) + Number(wallet?.earningFrozenBalance || 0),
+                    };
+                }
+
                 return {
                     ...r,
                     wallet: wallet || {
@@ -1368,6 +1383,7 @@ export class WalletWithdrawalsService {
                         withdrawFrozenBalance: 0,
                     },
                     withdrawQrCodeUrl: withdrawQrCodeUrl || null,
+                    reviewEligibility,
                     wechatAutoTransfer: await this.getWechatAutoEligibilitySnapshot(r.userId),
                 };
             }),

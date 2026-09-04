@@ -2339,7 +2339,9 @@ export class UsersService {
             workOnlineExpiresAt: this.buildPlayerOnlineLeaseExpiresAt(),
             offlineJoinedAt: null,
           }
-          : {}),
+          : nextWorkStatus === PlayerWorkStatus.RESTING
+            ? { workOnlineExpiresAt: null }
+            : {}),
       },
       select: { id: true, name: true, phone: true, workStatus: true },
     });
@@ -2351,6 +2353,7 @@ export class UsersService {
         id,
         userType: UserType.STAFF,
         workMode: 'ONLINE',
+        workStatus: { not: PlayerWorkStatus.RESTING },
       },
       data: {
         workOnlineExpiresAt: this.buildPlayerOnlineLeaseExpiresAt(),
@@ -2434,6 +2437,7 @@ export class UsersService {
     if (onlyOnline) {
       where.workMode = 'ONLINE';
       where.workOnlineExpiresAt = { gt: leaseNow };
+      where.workStatus = onlyIdle ? PlayerWorkStatus.IDLE : { not: PlayerWorkStatus.RESTING };
     }
 
     if (keyword) {

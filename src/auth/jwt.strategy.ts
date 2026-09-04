@@ -193,7 +193,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     const isActiveStaff = isStaff && String(user?.staffEmploymentStatus || StaffEmploymentStatus.ACTIVE) === StaffEmploymentStatus.ACTIVE;
     const isOnline = String(user.workMode || '').toUpperCase() === 'ONLINE';
 
-    if (isActiveStaff && isOnline) {
+    if (isActiveStaff && isOnline && user.workStatus !== PlayerWorkStatus.RESTING) {
       if (this.autoOfflineDisabled) {
         if (leaseExpiresAt && leaseExpiresAt > leaseNow) {
           const nextExpiresAt = new Date(leaseNow.getTime() + 2 * 60 * 60 * 1000);

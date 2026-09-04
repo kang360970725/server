@@ -291,12 +291,12 @@ export class AuthService {
         data: {
           lastLoginAt: new Date(),
           workMode: 'ONLINE',
-          workOnlineExpiresAt: leaseExpiresAt,
+          workOnlineExpiresAt: user.workStatus === PlayerWorkStatus.RESTING ? null : leaseExpiresAt,
           offlineJoinedAt: null,
         },
       });
       user.workMode = 'ONLINE';
-      user.workOnlineExpiresAt = leaseExpiresAt;
+      user.workOnlineExpiresAt = user.workStatus === PlayerWorkStatus.RESTING ? null : leaseExpiresAt;
       user.offlineJoinedAt = null;
     }
     if (!isActiveStaff) {

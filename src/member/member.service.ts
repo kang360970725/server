@@ -14,6 +14,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { WechatPayService } from '../mini/wechat-pay.service';
 import { SystemConfigService } from '../system-config/system-config.service';
+import { normalizeRechargeCouponBenefits } from './member-recharge-benefits';
 
 type PrismaTx = PrismaClient | Prisma.TransactionClient;
 
@@ -93,20 +94,7 @@ export class MemberService {
   }
 
   private normalizeRechargeCouponBenefits(input: any) {
-    const list = Array.isArray(input) ? input : [];
-    const normalized = list
-      .map((item: any) => ({
-        templateId: Number(item?.templateId || 0),
-        count: Math.max(1, Math.floor(Number(item?.count || 1))),
-      }))
-      .filter((item) => Number.isFinite(item.templateId) && item.templateId > 0)
-      .slice(0, 20);
-
-    const uniq = new Map<number, { templateId: number; count: number }>();
-    for (const item of normalized) {
-      uniq.set(item.templateId, item);
-    }
-    return Array.from(uniq.values());
+    return normalizeRechargeCouponBenefits(input);
   }
 
   private normalizeOptionalDate(input: any) {
