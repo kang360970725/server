@@ -1,6 +1,9 @@
-import {BadRequestException, Body, Controller, Post} from '@nestjs/common';
+import {BadRequestException, Body, Controller, Post, UploadedFile, UseInterceptors} from '@nestjs/common';
+import {FileInterceptor} from '@nestjs/platform-express';
 import * as crypto from 'crypto';
 import {SystemConfigService} from '../system-config/system-config.service';
+
+const COS = require('cos-nodejs-sdk-v5');
 
 @Controller('uploads')
 export class CommonUploadController {
@@ -19,6 +22,63 @@ export class CommonUploadController {
     ]);
 
     private readonly allowedScenes = new Set(['cover', 'rich', 'image', 'file', 'avatar']);
+
+    @Post('file')
+    @UseInterceptors(FileInterceptor('file', {limits: {fileSize: 8 * 1024 * 1024}}))
+    async uploadFile(
+        @UploadedFile() file: any,
+        @Body() body: {module?: string; scene?: string},
+    ) {
+        if (!file?.buffer?.length) throw new BadRequestException('请选择需要上传的文件');
+
+        const moduleKey = String(body?.module || 'general').trim();
+        const scene = String(body?.scene || 'file').trim();
+        if (!this.allowedModules.has(moduleKey)) {
+            throw new BadRequestException(`不支持的上传模块：${moduleKey}`);
+        }
+        if (!this.allowedScenes.has(scene)) {
+            throw new BadRequestException(`不支持的上传场景：${scene}`);
+        }
+        if (scene === 'avatar' && !String(file.mimetype || '').startsWith('image/')) {
+            throw new BadRequestException('头像仅支持图片格式');
+        }
+
+        const config = await this.systemConfigService.getCosUploadConfig();
+        const secretId = String(config.secretId || '').trim();
+        const secretKey = String(config.secretKey || '').trim();
+        const bucket = String(config.bucket || '').trim();
+        const region = String(config.region || '').trim();
+        const cdnDomain = String(config.cdnDomain || '').trim();
+        if (!secretId || !secretKey || !bucket || !region) {
+            throw new BadRequestException('缺少 COS 上传配置');
+        }
+
+        const rawName = String(file.originalname || 'file').trim();
+        const safeName = rawName.replace(/[^\w.\-]/g, '_').slice(-80) || 'file';
+        const ext = safeName.includes('.') ? safeName.split('.').pop() : 'bin';
+        const date = new Date();
+        const dateKey = `${date.getFullYear()}${`${date.getMonth() + 1}`.padStart(2, '0')}${`${date.getDate()}`.padStart(2, '0')}`;
+        const cloudPath = `uploads/${moduleKey}/${scene}/${dateKey}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        const cos = new COS({SecretId: secretId, SecretKey: secretKey});
+
+        await new Promise<void>((resolve, reject) => {
+            cos.putObject({
+                Bucket: bucket,
+                Region: region,
+                Key: cloudPath,
+                Body: file.buffer,
+                ContentType: file.mimetype || 'application/octet-stream',
+            }, (error: any) => error ? reject(error) : resolve());
+        }).catch((error: any) => {
+            throw new BadRequestException(`COS 上传失败：${error?.message || error?.code || '未知错误'}`);
+        });
+
+        const originUrl = `https://${bucket}.cos.${region}.myqcloud.com/${cloudPath}`;
+        const fileUrl = cdnDomain
+            ? `https://${cdnDomain.replace(/^https?:\/\//, '').replace(/\/+$/, '')}/${cloudPath}`
+            : originUrl;
+        return {fileUrl, cloudPath};
+    }
 
     @Post('info')
     async getUploadInfo(

@@ -16,6 +16,15 @@ export const shouldAutoExitForActivity = (available: number, deposit: number, ex
 
 export const isActivityAssessmentPaused = (timerPaused: boolean) => timerPaused;
 
+export const isActivityAssessmentEmploymentStatus = (status: StaffEmploymentStatus) =>
+  status === StaffEmploymentStatus.ACTIVE || status === StaffEmploymentStatus.FROZEN;
+
+export const isActivityAssessmentAccountStatus = (status: UserStatus) =>
+  status === UserStatus.ACTIVE || status === UserStatus.FROZEN;
+
+export const getInitialActivityNextChargeAt = (lastCompletedAt: Date | null, assessmentStartedAt: Date) =>
+  new Date((lastCompletedAt || assessmentStartedAt).getTime() + INITIAL_GRACE);
+
 export const shouldRefreshActivityAfterSettlement = (forceByAdmin: boolean) => !forceByAdmin;
 
 @Injectable()
@@ -120,11 +129,36 @@ export class StaffActivityService {
     }
   }
 
+  private async initializeMissingSchedules() {
+    const users = await this.prisma.user.findMany({
+      where: {
+        userType: UserType.STAFF,
+        status: { in: [UserStatus.ACTIVE, UserStatus.FROZEN] },
+        staffEmploymentStatus: { in: [StaffEmploymentStatus.ACTIVE, StaffEmploymentStatus.FROZEN] },
+        activityTimerPaused: false,
+        activityAssessmentEnabled: true,
+        activityNextChargeAt: null,
+      },
+      select: { id: true, activityLastCompletedAt: true, activityAssessmentStartedAt: true },
+      take: 500,
+    });
+    if (!users.length) return;
+    await this.prisma.$transaction(users.map(user => this.prisma.user.updateMany({
+      where: { id: user.id, activityNextChargeAt: null },
+      data: {
+        activityNextChargeAt: getInitialActivityNextChargeAt(
+          user.activityLastCompletedAt,
+          user.activityAssessmentStartedAt,
+        ),
+      },
+    })));
+  }
+
   private async chargeOne(userId: number, now: Date) {
     await this.prisma.$transaction(async tx => {
-      await tx.$queryRawUnsafe('SELECT id FROM `User` WHERE id = ? FOR UPDATE', userId);
+      await tx.$queryRawUnsafe('SELECT id FROM `users` WHERE id = ? FOR UPDATE', userId);
       const user = await tx.user.findUnique({ where: { id: userId } });
-      if (!user || !user.activityAssessmentEnabled || user.staffEmploymentStatus !== StaffEmploymentStatus.ACTIVE || isActivityAssessmentPaused(user.activityTimerPaused) || !user.activityNextChargeAt || user.activityNextChargeAt > now) return;
+      if (!user || !user.activityAssessmentEnabled || !isActivityAssessmentEmploymentStatus(user.staffEmploymentStatus) || !isActivityAssessmentAccountStatus(user.status) || isActivityAssessmentPaused(user.activityTimerPaused) || !user.activityNextChargeAt || user.activityNextChargeAt > now) return;
       const leave = await tx.staffLeave.findFirst({ where: { userId, status: { in: [StaffLeaveStatus.SCHEDULED, StaffLeaveStatus.ACTIVE] }, startAt: { lte: now }, endAt: { gte: now } } });
       if (leave) return;
       const scheduledAt = user.activityNextChargeAt;
@@ -156,8 +190,8 @@ export class StaffActivityService {
     const now = new Date();
     try {
       await this.refreshLeaves(now);
-      await this.prisma.user.updateMany({ where: { userType: UserType.STAFF, staffEmploymentStatus: StaffEmploymentStatus.ACTIVE, activityTimerPaused: false, activityAssessmentEnabled: true, activityNextChargeAt: null }, data: { activityNextChargeAt: new Date(now.getTime() + INITIAL_GRACE), activityAssessmentStartedAt: now } });
-      const due = await this.prisma.user.findMany({ where: { userType: UserType.STAFF, status: UserStatus.ACTIVE, staffEmploymentStatus: StaffEmploymentStatus.ACTIVE, activityTimerPaused: false, activityAssessmentEnabled: true, activityNextChargeAt: { lte: now } }, select: { id: true }, take: 500 });
+      await this.initializeMissingSchedules();
+      const due = await this.prisma.user.findMany({ where: { userType: UserType.STAFF, status: { in: [UserStatus.ACTIVE, UserStatus.FROZEN] }, staffEmploymentStatus: { in: [StaffEmploymentStatus.ACTIVE, StaffEmploymentStatus.FROZEN] }, activityTimerPaused: false, activityAssessmentEnabled: true, activityNextChargeAt: { lte: now } }, select: { id: true }, take: 500 });
       for (const user of due) {
         try {
           await this.chargeOne(user.id, now);
