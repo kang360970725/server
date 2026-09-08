@@ -4424,6 +4424,9 @@ export class OrdersService {
 
             // ✅ 5) 退款回滚会员成长值与订单奖励积分
             await this.rollbackOrderMemberBenefitsTx(tx, orderWithPayment, refundAmount);
+
+            // 退款后及时同步订单财务快照，避免原成本继续占用月度利润。
+            await this.rebuildPerformanceAndFinanceByOrderId({ tx, orderId });
         });
 
         // 5) 退款后处罚（不阻断退款主流程）
@@ -9184,9 +9187,7 @@ export class OrdersService {
          *   （如果你后续希望“平台实收=0，赠送成本单独体现”，可以再拆）
          */
         const receivableAmount = this.toDecimal2(Number(order?.receivableAmount ?? 0));
-        const paidAmount = this.toDecimal2(
-            Number(order?.isGifted ? order?.receivableAmount ?? 0 : order?.paidAmount ?? 0),
-        );
+        const paidAmount = this.toDecimal2(Number(order?.isGifted ? 0 : order?.paidAmount ?? 0));
         const settlementBaseAmount = this.toDecimal2(this.getSettlementBaseAmountFromOrder(order));
 
         /**
@@ -9194,9 +9195,9 @@ export class OrdersService {
          * - 先用 应收 - 实收 兜底
          * - 后续接优惠券/活动减免后，再拆到 couponDiscountAmount / otherDiscountAmount
          */
-        const discountAmount = this.toDecimal2(
-            Math.max(0, receivableAmount - paidAmount),
-        );
+        const discountAmount = this.toDecimal2(Number(order?.discountAmount ?? Math.max(0, receivableAmount - paidAmount)));
+        const couponDiscountAmount = this.toDecimal2(Number(order?.couponDiscountAmount ?? 0));
+        const otherDiscountAmount = this.toDecimal2(Math.max(0, discountAmount - couponDiscountAmount));
 
         /**
          * 当前投诉 / 售后尚未正式接业务逻辑，先写默认 0
@@ -9245,8 +9246,8 @@ export class OrdersService {
             paidAmount,
             settlementBaseAmount,
             discountAmount,
-            couponDiscountAmount: 0,
-            otherDiscountAmount: 0,
+            couponDiscountAmount,
+            otherDiscountAmount,
 
             playerCostAmount,
             csCostAmount,
@@ -9309,6 +9310,8 @@ export class OrdersService {
                 updatedAt: true,
                 paymentTime: true,
                 isGifted: true,
+                discountAmount: true,
+                couponDiscountAmount: true,
                 status: true,
                 projectId: true,
                 // 如果当前 Order 没这个字段，就删掉

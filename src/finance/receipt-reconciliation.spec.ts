@@ -1,5 +1,5 @@
 import { receiptRange, reconcileReceipts, ReceiptItem, shanghaiReceiptDay } from './receipt-reconciliation';
-import { FinanceService } from './finance.service';
+import { FinanceService, mergeFinanceCashFlowSummary } from './finance.service';
 import { recordOrderSupplementTx } from './order-receipts.util';
 
 const receipt = (extra: Partial<ReceiptItem> = {}): ReceiptItem => ({ receiptId: 'ORDER:1', kind: 'INITIAL',
@@ -50,6 +50,25 @@ describe('收款日统计', () => {
 });
 
 describe('FinanceService 收款数据读取', () => {
+  it('月度净营收包含会员充值，并按退款发生日冲减', () => {
+    const result = mergeFinanceCashFlowSummary(
+      { fulfillmentCostTotal: 120 },
+      { allOrderCount: 3, allPaidAmountTotal: 1000, orderPaidAmountTotal: 700, rechargeAmountTotal: 300, rechargeCount: 2 },
+      80,
+      1,
+    );
+    expect(result).toMatchObject({
+      orderCount: 3,
+      paidAmountTotal: 1000,
+      rechargeAmountTotal: 300,
+      rechargeCount: 2,
+      refundAmountTotal: 80,
+      refundCount: 1,
+      netRevenueAmountTotal: 920,
+      grossProfitAmountTotal: 800,
+    });
+  });
+
   it('历史订单兼容、快照不重复累计、充值只用实付不计赠送', async () => {
     const tx: any = {
       order: { findMany: jest.fn().mockResolvedValue([

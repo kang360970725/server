@@ -22,5 +22,13 @@ export class ManualCreateOfflineFeeBillDto {
 
   @IsOptional()
   @IsString()
+  periodStart?: string;
+
+  @IsOptional()
+  @IsString()
+  periodEnd?: string;
+
+  @IsOptional()
+  @IsString()
   remark?: string;
 }

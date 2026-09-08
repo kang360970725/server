@@ -37,6 +37,18 @@ describe('OfflineFeeService', () => {
     );
   });
 
+  it('rejects an offline fee period whose end date is before its start date', async () => {
+    const service = new OfflineFeeService({} as any);
+    await expect(service.manualCreateBill({
+      userId: 7,
+      month: '2026-09',
+      amount: 100,
+      periodStart: '2026-09-20',
+      periodEnd: '2026-09-01',
+      dueAt: '2026-09-20',
+    })).rejects.toThrow('费用周期结束日期不能早于开始日期');
+  });
+
   it('does not create or return withdrawal guard bills for exited staff', async () => {
     const tx: any = {
       user: {

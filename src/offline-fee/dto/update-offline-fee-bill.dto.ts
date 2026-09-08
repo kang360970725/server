@@ -21,5 +21,13 @@ export class UpdateOfflineFeeBillDto {
 
   @IsOptional()
   @IsString()
+  periodStart?: string;
+
+  @IsOptional()
+  @IsString()
+  periodEnd?: string;
+
+  @IsOptional()
+  @IsString()
   remark?: string;
 }

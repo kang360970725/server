@@ -6,6 +6,28 @@ import { FinanceDashboardTrendDto } from './dto/finance-dashboard-trend.dto';
 import { FinanceDashboardCostStructureDto } from './dto/finance-dashboard-cost-structure.dto';
 import { FinanceRecordListDto } from './dto/finance-record-list.dto';
 
+export function mergeFinanceCashFlowSummary(base: any, receipt: any, refundAmount: any, refundCount: any) {
+    const round2 = (value: any) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+    const paidAmountTotal = round2(receipt?.allPaidAmountTotal);
+    const refundAmountTotal = round2(refundAmount);
+    const netRevenueAmountTotal = round2(paidAmountTotal - refundAmountTotal);
+    const grossProfitAmountTotal = round2(netRevenueAmountTotal - Number(base?.fulfillmentCostTotal || 0));
+    return {
+        ...base,
+        orderCount: Number(receipt?.allOrderCount || 0),
+        paidAmountTotal,
+        orderPaidAmountTotal: round2(receipt?.orderPaidAmountTotal),
+        rechargeAmountTotal: round2(receipt?.rechargeAmountTotal),
+        rechargeCount: Number(receipt?.rechargeCount || 0),
+        refundAmountTotal,
+        refundCount: Number(refundCount || 0),
+        netRevenueAmountTotal,
+        grossProfitAmountTotal,
+        grossProfitRate: netRevenueAmountTotal > 0 ? round2((grossProfitAmountTotal / netRevenueAmountTotal) * 100) : 0,
+        cashFlowSummaryApplied: true,
+    };
+}
+
 @Injectable()
 export class FinanceService {
     constructor(private readonly prisma: PrismaService) {}
@@ -811,6 +833,33 @@ export class FinanceService {
             }),
         ]);
 
+        const baseSummary = this.formatSummary(agg, total);
+        const hasDimensionFilter = Boolean(
+            dto.billingMode || dto.orderType || dto.projectId || dto.bizLine || dto.customerUserId ||
+            typeof dto.isComplained === 'boolean' || typeof dto.isAfterSale === 'boolean' ||
+            typeof dto.isCancelled === 'boolean' || dto.status,
+        );
+        let summary: any = baseSummary;
+        if (!hasDimensionFilter) {
+            const reconciliation = await this.dashboardReconciliation({ startDate: dto.startDate, endDate: dto.endDate });
+            const range = receiptRange({ startDate: dto.startDate, endDate: dto.endDate });
+            const refundAgg = await this.prisma.orderRefund.aggregate({
+                where: {
+                    status: 'SUCCESS',
+                    channel: { not: 'BALANCE' },
+                    refundedAt: { gte: range.startAt, lt: range.endAt },
+                },
+                _sum: { amount: true },
+                _count: { _all: true },
+            });
+            summary = mergeFinanceCashFlowSummary(
+                baseSummary,
+                reconciliation.data.summary,
+                refundAgg?._sum?.amount,
+                refundAgg?._count?._all,
+            );
+        }
+
         return {
             success: true,
             data: {
@@ -823,7 +872,7 @@ export class FinanceService {
                 total,
                 page,
                 pageSize,
-                summary: this.formatSummary(agg, total),
+                summary,
             },
         };
     }

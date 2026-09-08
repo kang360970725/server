@@ -530,7 +530,10 @@ export class OfflineFeeService {
     const userId = Number(dto.userId);
     const month = String(dto.month || '').trim();
     const amount = this.normalizeManualAmount(dto.amount ?? dto.performanceBaseAmount);
-    const { start, end } = this.getMonthRange(month);
+    const monthRange = this.getMonthRange(month);
+    const start = this.parseDateOnly(dto.periodStart, '费用周期开始日期') || monthRange.start;
+    const end = this.parseDateOnly(dto.periodEnd, '费用周期结束日期') || monthRange.end;
+    if (end < start) throw new BadRequestException('费用周期结束日期不能早于开始日期');
     const dueAt = this.parseDateTime(dto.dueAt) || end;
     const remark = String(dto.remark || '').trim() || null;
 
@@ -655,6 +658,11 @@ export class OfflineFeeService {
     const billId = Number(dto.billId);
     const amount = this.normalizeManualAmount(dto.amount ?? dto.performanceBaseAmount);
     const dueAt = dto.dueAt !== undefined ? this.parseDateTime(dto.dueAt) : undefined;
+    const periodStart = dto.periodStart !== undefined ? this.parseDateOnly(dto.periodStart, '费用周期开始日期') : undefined;
+    const periodEnd = dto.periodEnd !== undefined ? this.parseDateOnly(dto.periodEnd, '费用周期结束日期') : undefined;
+    if (periodStart && periodEnd && periodEnd < periodStart) {
+      throw new BadRequestException('费用周期结束日期不能早于开始日期');
+    }
     const remark = dto.remark !== undefined ? (String(dto.remark || '').trim() || null) : undefined;
 
     return this.prisma.$transaction(async (tx) => {
@@ -676,6 +684,8 @@ export class OfflineFeeService {
           remainingAmount: remaining,
           status,
           ...(dueAt !== undefined ? { dueAt } : {}),
+          ...(periodStart !== undefined ? { periodStart } : {}),
+          ...(periodEnd !== undefined ? { periodEnd } : {}),
           ...(remark !== undefined ? { remark } : {}),
           generatedAt: new Date(),
         },
