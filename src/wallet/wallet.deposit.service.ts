@@ -455,10 +455,19 @@ export class WalletDepositService {
             const statusWhere = inactive
                 ? { in: ['EXITED', 'BLACKLISTED'] }
                 : { notIn: ['EXITED', 'BLACKLISTED'] };
+            const scopedTransactionRows = operatorKey
+                ? allRows.filter((row) => {
+                    if (operatorKey === 'SYSTEM') return !row.operatorId;
+                    const operatorId = Number(operatorKey.replace(/^OPERATOR_/, ''));
+                    return operatorId > 0 && row.operatorId === operatorId;
+                })
+                : allRows;
+            const scopedUserIds = Array.from(new Set(scopedTransactionRows.map((row) => row.userId)));
             const staffUsers = await this.prisma.user.findMany({
                 where: {
                     userType: 'STAFF',
                     staffEmploymentStatus: statusWhere as any,
+                    ...(operatorKey ? { id: { in: scopedUserIds } } : {}),
                     ...(search ? {
                         OR: [
                             { name: { contains: search } },
@@ -479,7 +488,7 @@ export class WalletDepositService {
                 orderBy: [{ id: 'desc' }],
             });
             const transactionMap = new Map<number, any[]>();
-            for (const row of allRows) {
+            for (const row of scopedTransactionRows) {
                 if (!transactionMap.has(row.userId)) transactionMap.set(row.userId, []);
                 transactionMap.get(row.userId)!.push(row);
             }
