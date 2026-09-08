@@ -149,13 +149,14 @@ export class WalletController {
 
         const operatorId = req.user?.userId;
 
-        const { userId, amount, remark } = body;
+        const { userId, amount, remark, manualSource } = body;
 
         return this.walletDepositService.manualDeposit({
             userId: Number(userId),
             amount: Number(amount),
             remark,
             operatorId,
+            manualSource,
         });
     }
 
@@ -190,6 +191,7 @@ export class WalletController {
             employmentStatus: query.employmentStatus,
             depositState: query.depositState,
             manualOnly: String(query.manualOnly || '').trim().toLowerCase() === 'true',
+            staffScope: query.staffScope,
         });
     }
 

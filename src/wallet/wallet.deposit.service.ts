@@ -213,12 +213,21 @@ export class WalletDepositService {
         amount: number;
         remark?: string;
         operatorId?: number;
+        manualSource?: string;
     }) {
 
         const { userId, amount, remark, operatorId } = params;
+        const manualSource = String(params.manualSource || '').trim().toUpperCase();
+        const normalizedRemark = String(remark || '').trim();
 
         if (!amount || amount <= 0) {
             throw new BadRequestException('金额非法');
+        }
+        if (!['OFFLINE_PAYMENT', 'BALANCE_ADJUSTMENT', 'HISTORICAL_CORRECTION', 'OTHER'].includes(manualSource)) {
+            throw new BadRequestException('请选择保证金录入来源');
+        }
+        if (!normalizedRemark) {
+            throw new BadRequestException('请填写保证金录入原因');
         }
 
         return this.prisma.$transaction(async (tx) => {
@@ -241,8 +250,9 @@ export class WalletDepositService {
                     userId,
                     amount,
                     bizType: 'MANUAL_DEPOSIT',
-                    remark: remark || '',
+                    remark: normalizedRemark,
                     operatorId: operatorId ?? null,
+                    manualSource,
                 },
             });
 
@@ -358,6 +368,7 @@ export class WalletDepositService {
         employmentStatus?: string;
         depositState?: string;
         manualOnly?: boolean;
+        staffScope?: string;
     }) {
         const page = Math.max(1, Number(params.page || 1));
         const limit = Math.min(100, Math.max(1, Number(params.limit || 20)));
@@ -368,27 +379,33 @@ export class WalletDepositService {
         const transactionRows = legacyTableExists
             ? await this.prisma.$queryRawUnsafe<any[]>(
                 `
-                    SELECT userId, amount, bizType, operatorId, createdAt
+                    SELECT id, userId, amount, bizType, remark, operatorId, manualSource, createdAt
                     FROM wallet_deposit_transactions
                     UNION ALL
-                    SELECT userId, amount, bizType, operatorId, createdAt
+                    SELECT id, userId, amount, bizType, remark, operatorId, NULL AS manualSource, createdAt
                     FROM WalletDepositTransaction
                 `,
             )
             : await this.prisma.walletDepositTransaction.findMany({
                 select: {
                     userId: true,
+                    id: true,
                     amount: true,
                     bizType: true,
+                    remark: true,
                     operatorId: true,
+                    manualSource: true,
                     createdAt: true,
                 },
             });
 
         const allRows = (transactionRows || []).map((row) => ({
             userId: Number(row.userId),
+            id: Number(row.id),
             amount: this.round2(row.amount),
             bizType: String(row.bizType || ''),
+            remark: String(row.remark || ''),
+            manualSource: String(row.manualSource || ''),
             operatorId: row.operatorId === null || row.operatorId === undefined ? null : Number(row.operatorId),
             createdAt: row.createdAt,
         }));
@@ -432,6 +449,81 @@ export class WalletDepositService {
         };
         const formatName = (user?: { name?: string | null; realName?: string | null; phone?: string | null }) =>
             user?.realName || user?.name || user?.phone || '';
+
+        if (params.staffScope) {
+            const inactive = String(params.staffScope).toUpperCase() === 'INACTIVE';
+            const statusWhere = inactive
+                ? { in: ['EXITED', 'BLACKLISTED'] }
+                : { notIn: ['EXITED', 'BLACKLISTED'] };
+            const staffUsers = await this.prisma.user.findMany({
+                where: {
+                    userType: 'STAFF',
+                    staffEmploymentStatus: statusWhere as any,
+                    ...(search ? {
+                        OR: [
+                            { name: { contains: search } },
+                            { realName: { contains: search } },
+                            { phone: { contains: search } },
+                            ...(/^\d+$/.test(search) ? [{ id: Number(search) }] : []),
+                        ],
+                    } : {}),
+                },
+                select: {
+                    id: true,
+                    name: true,
+                    realName: true,
+                    phone: true,
+                    staffEmploymentStatus: true,
+                    walletAccount: { select: { depositBalance: true } },
+                },
+                orderBy: [{ id: 'desc' }],
+            });
+            const transactionMap = new Map<number, any[]>();
+            for (const row of allRows) {
+                if (!transactionMap.has(row.userId)) transactionMap.set(row.userId, []);
+                transactionMap.get(row.userId)!.push(row);
+            }
+            const auditRows = staffUsers.map((user: any) => {
+                const transactions = (transactionMap.get(Number(user.id)) || [])
+                    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+                    .map((row) => {
+                        const operator = row.operatorId ? operatorMap.get(row.operatorId) : null;
+                        return {
+                            ...row,
+                            operatorName: operator ? formatName(operator) : '系统',
+                            operatorPhone: operator?.phone || '',
+                            reasonMissing: row.bizType === 'MANUAL_DEPOSIT' && !row.remark,
+                            sourceMissing: row.bizType === 'MANUAL_DEPOSIT' && !row.manualSource,
+                        };
+                    });
+                return {
+                    userId: user.id,
+                    name: user.name,
+                    realName: user.realName,
+                    phone: user.phone,
+                    staffEmploymentStatus: user.staffEmploymentStatus,
+                    currentDepositBalance: this.round2(user.walletAccount?.depositBalance),
+                    transactionNetAmount: this.round2(transactions.reduce((sum, row) => sum + Number(row.amount || 0), 0)),
+                    transactionCount: transactions.length,
+                    unexplainedCount: transactions.filter((row) => row.reasonMissing || row.sourceMissing).length,
+                    latestAt: transactions[0]?.createdAt || null,
+                    transactions,
+                };
+            });
+            const start = (page - 1) * limit;
+            return {
+                mode: 'STAFF_AUDIT',
+                data: auditRows.slice(start, start + limit),
+                total: auditRows.length,
+                summary: {
+                    staffCount: auditRows.length,
+                    currentDepositBalance: this.round2(auditRows.reduce((sum, row) => sum + row.currentDepositBalance, 0)),
+                    transactionNetAmount: this.round2(auditRows.reduce((sum, row) => sum + row.transactionNetAmount, 0)),
+                    transactionCount: auditRows.reduce((sum, row) => sum + row.transactionCount, 0),
+                    unexplainedCount: auditRows.reduce((sum, row) => sum + row.unexplainedCount, 0),
+                },
+            };
+        }
 
         if (operatorKey) {
             const detailRows = activeRows.filter((row) => {

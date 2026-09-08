@@ -1650,6 +1650,7 @@ model WalletDepositTransaction {
   bizType    DepositBizType
   remark     String?        @db.VarChar(255)
   operatorId Int?
+  manualSource String?        @db.VarChar(32)
   createdAt  DateTime       @default(now())
   user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
 
