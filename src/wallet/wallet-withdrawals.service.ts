@@ -1315,6 +1315,7 @@ export class WalletWithdrawalsService {
                             id: true,
                             name: true,
                             realName: true,
+                            staffEmploymentStatus: true,
                             withdrawQrCodeKey: true,
                         },
                     },

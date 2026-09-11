@@ -7,6 +7,9 @@ import { ManualCreateOfflineFeeBillDto } from './dto/manual-create-offline-fee-b
 import { UpdateOfflineFeeBillDto } from './dto/update-offline-fee-bill.dto';
 
 const WITHDRAWAL_GUARD_WINDOW_DAYS = 3;
+const MONTHLY_BILLING_DAY = 20;
+const HOUR = 60 * 60 * 1000;
+const DAY = 24 * 60 * 60 * 1000;
 const BILLABLE_STAFF_EMPLOYMENT_STATUSES = [
   StaffEmploymentStatus.ACTIVE,
   StaffEmploymentStatus.FROZEN,
@@ -80,20 +83,11 @@ export class OfflineFeeService {
     return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
   }
 
-  private getCurrentMonth(ref = new Date()) {
-    return this.formatMonth(ref);
-  }
-
-  private getChinaDateAtUtcMidnight(ref = new Date(), offsetDays = 0) {
-    const chinaRef = new Date(ref.getTime() + 8 * 60 * 60 * 1000);
-    return new Date(Date.UTC(
-      chinaRef.getUTCFullYear(),
-      chinaRef.getUTCMonth(),
-      chinaRef.getUTCDate() + offsetDays,
-      0,
-      0,
-      0,
-    ));
+  private formatShanghaiMonth(value: any) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    const chinaDate = new Date(date.getTime() + 8 * HOUR);
+    return `${chinaDate.getUTCFullYear()}-${String(chinaDate.getUTCMonth() + 1).padStart(2, '0')}`;
   }
 
   private getContractStartDate(contract: any) {
@@ -112,20 +106,37 @@ export class OfflineFeeService {
 
   private getContractDueAtForMonth(contract: any, monthInput: string) {
     const [year, mon] = this.normalizeMonth(monthInput).split('-').map(Number);
-    const startDate = this.getContractStartDate(contract);
-    const billingDay = Math.max(1, Math.min(31, Number(startDate?.getUTCDate() || 20)));
     const monthLastDay = new Date(Date.UTC(year, mon, 0)).getUTCDate();
-    return new Date(Date.UTC(year, mon - 1, Math.min(billingDay, monthLastDay), 0, 0, 0));
+    const fixedDueAt = new Date(Date.UTC(year, mon - 1, Math.min(MONTHLY_BILLING_DAY, monthLastDay), 0, 0, 0));
+    const startDate = this.getContractStartDate(contract);
+    return startDate && startDate > fixedDueAt ? startDate : fixedDueAt;
+  }
+
+  private getContractBillTerms(contract: any, month: string) {
+    const { start: monthStart, end: monthEnd } = this.getMonthRange(month);
+    const contractStart = this.getContractStartDate(contract);
+    const contractEnd = this.getContractEndDate(contract);
+    const periodStart = contractStart && contractStart > monthStart ? contractStart : monthStart;
+    const periodEnd = contractEnd && contractEnd < monthEnd ? contractEnd : monthEnd;
+    if (periodEnd < periodStart) return null;
+    const daysInMonth = monthEnd.getUTCDate();
+    const billableDays = Math.floor((periodEnd.getTime() - periodStart.getTime()) / DAY) + 1;
+    const amount = Math.max(0.01, this.toFixed2(Number(contract.monthlyAmount || 0) * billableDays / daysInMonth));
+    const configuredDueAt = this.getContractDueAtForMonth(contract, month);
+    const dueAt = configuredDueAt > periodEnd ? periodEnd : configuredDueAt;
+    return {
+      periodStart,
+      periodEnd,
+      daysInMonth,
+      billableDays,
+      amount,
+      dueAt,
+    };
   }
 
   private isContractEffectiveForMonth(contract: any, month: string) {
     if (String(contract?.status || '') !== 'ACTIVE') return false;
-    const dueAt = this.getContractDueAtForMonth(contract, month);
-    const startDate = this.getContractStartDate(contract);
-    const endDate = this.getContractEndDate(contract);
-    if (startDate && dueAt < startDate) return false;
-    if (endDate && dueAt > endDate) return false;
-    return true;
+    return Boolean(this.getContractBillTerms(contract, month));
   }
 
   private async writeLogTx(db: PrismaTx, params: {
@@ -293,16 +304,6 @@ export class OfflineFeeService {
     }
   }
 
-  // 人工录入/人工编辑后，会将 generatedAt 更新为当前时间；
-  // 自动任务不会改 generatedAt。由此可识别“该账单曾被人工干预”。
-  private isManualAdjustedBill(existing?: {
-    createdAt?: Date | null;
-    generatedAt?: Date | null;
-  } | null) {
-    if (!existing?.createdAt || !existing?.generatedAt) return false;
-    return existing.generatedAt.getTime() - existing.createdAt.getTime() > 1000;
-  }
-
   async generateBillsForMonth(month: string, operatorId?: number) {
     return this.prisma.$transaction(async (tx) => this.generateBillsForMonthTx(tx as any, month, operatorId));
   }
@@ -313,7 +314,6 @@ export class OfflineFeeService {
     operatorId?: number,
     options?: { dueFrom?: Date; dueTo?: Date },
   ) {
-    const { start, end } = this.getMonthRange(month);
     const contracts = await (db as any).offlineFeeContract.findMany({
       where: {
         status: 'ACTIVE',
@@ -328,42 +328,22 @@ export class OfflineFeeService {
 
     for (const contract of contracts) {
       if (!this.isContractEffectiveForMonth(contract, month)) continue;
-      const dueAt = this.getContractDueAtForMonth(contract, month);
+      const terms = this.getContractBillTerms(contract, month);
+      if (!terms) continue;
+      const { dueAt, periodStart, periodEnd, amount } = terms;
       if (options?.dueFrom && dueAt < options.dueFrom) continue;
       if (options?.dueTo && dueAt > options.dueTo) continue;
-      const amount = this.normalizeManualAmount(contract.monthlyAmount);
       const existing = await (db as any).offlineFeeBill.findUnique({
         where: { userId_billMonth: { userId: contract.userId, billMonth: month } },
         select: { id: true, paidAmount: true, status: true },
       });
-      if (existing && !['UNPAID', 'PARTIAL'].includes(String(existing.status || ''))) continue;
-      const paid = Number(existing?.paidAmount || 0);
-      const finalRemaining = this.toFixed2(Math.max(0, amount - paid));
-      const finalStatus = finalRemaining <= 0 ? 'PAID' : paid > 0 ? 'PARTIAL' : 'UNPAID';
-      const bill = existing
-        ? await (db as any).offlineFeeBill.update({
-          where: { id: existing.id },
-          data: {
-            periodStart: start,
-            periodEnd: end,
-            performanceBaseAmount: amount,
-            rate: 1,
-            minAmount: 0,
-            capAmount: amount,
-            shouldPayAmount: amount,
-            remainingAmount: finalRemaining,
-            status: finalStatus,
-            dueAt,
-            remark: String(contract.remark || '').trim() || '线下管理费',
-            generatedAt: new Date(),
-          },
-        })
-        : await (db as any).offlineFeeBill.create({
+      if (existing) continue;
+      const bill = await (db as any).offlineFeeBill.create({
           data: {
             userId: contract.userId,
             billMonth: month,
-            periodStart: start,
-            periodEnd: end,
+            periodStart,
+            periodEnd,
             performanceBaseAmount: amount,
             rate: 1,
             minAmount: 0,
@@ -380,9 +360,9 @@ export class OfflineFeeService {
         });
       await this.writeLogTx(db, {
         operatorId,
-        action: existing ? 'OFFLINE_FEE_BILL_GENERATE_UPDATE' : 'OFFLINE_FEE_BILL_GENERATE_CREATE',
+        action: 'OFFLINE_FEE_BILL_GENERATE_CREATE',
         targetId: bill.id,
-        oldData: existing,
+        oldData: null,
         newData: bill,
         remark: `按配置生成线下管理费账单 ${month}`,
       });
@@ -392,21 +372,160 @@ export class OfflineFeeService {
     return { month, affected };
   }
 
-  @Cron('0 0 * * *', { timeZone: 'Asia/Shanghai' })
+  @Cron('0 5 0 * * *', { timeZone: 'Asia/Shanghai' })
   async cronGenerateUpcomingBills() {
     const now = new Date();
-    const dueFrom = this.getChinaDateAtUtcMidnight(now);
-    const dueTo = new Date(this.getChinaDateAtUtcMidnight(now, WITHDRAWAL_GUARD_WINDOW_DAYS + 1).getTime() - 1);
-    const months = new Set<string>();
-    for (let offset = 0; offset <= WITHDRAWAL_GUARD_WINDOW_DAYS; offset += 1) {
-      const date = this.getChinaDateAtUtcMidnight(now, offset);
-      months.add(this.formatMonth(date));
+    const chinaNow = new Date(now.getTime() + 8 * HOUR);
+    if (chinaNow.getUTCDate() < MONTHLY_BILLING_DAY) return;
+    const month = `${chinaNow.getUTCFullYear()}-${String(chinaNow.getUTCMonth() + 1).padStart(2, '0')}`;
+    await this.prisma.$transaction(async (tx) => this.generateBillsForMonthTx(tx as any, month));
+  }
+
+  async repairExistingBills(apply: boolean, operatorId?: number) {
+    const bills = await (this.prisma as any).offlineFeeBill.findMany({
+      where: {
+        createdBy: null,
+        status: { in: ['UNPAID', 'PARTIAL', 'PAID'] },
+      },
+      include: {
+        user: { select: { id: true, name: true, realName: true, phone: true } },
+      },
+      orderBy: [{ billMonth: 'desc' }, { id: 'desc' }],
+    });
+    const userIds = Array.from(new Set(bills.map((bill: any) => Number(bill.userId))));
+    const billIds = bills.map((bill: any) => Number(bill.id));
+    const [contracts, manualEditLogs, existingMonthBills] = await Promise.all([
+      userIds.length ? (this.prisma as any).offlineFeeContract.findMany({
+          where: { userId: { in: userIds } },
+          orderBy: [{ startDate: 'desc' }, { id: 'desc' }],
+        }) : [],
+      billIds.length ? (this.prisma as any).userLog.findMany({
+        where: {
+          targetType: 'OFFLINE_FEE_BILL',
+          targetId: { in: billIds },
+          action: 'OFFLINE_FEE_BILL_UPDATE',
+        },
+        select: { targetId: true },
+      }) : [],
+      userIds.length ? (this.prisma as any).offlineFeeBill.findMany({
+        where: { userId: { in: userIds } },
+        select: { id: true, userId: true, billMonth: true },
+      }) : [],
+    ]);
+    const manuallyEditedBillIds = new Set(manualEditLogs.map((row: any) => Number(row.targetId)));
+    const contractsByUser = new Map<number, any[]>();
+    for (const contract of contracts) {
+      const userId = Number(contract.userId);
+      if (!contractsByUser.has(userId)) contractsByUser.set(userId, []);
+      contractsByUser.get(userId)!.push(contract);
     }
-    for (const month of months) {
-      await this.prisma.$transaction(async (tx) => (
-        this.generateBillsForMonthTx(tx as any, month, undefined, { dueFrom, dueTo })
-      ));
+    const billsByUserMonth = new Map<string, number>();
+    for (const bill of existingMonthBills) {
+      billsByUserMonth.set(`${Number(bill.userId)}:${String(bill.billMonth)}`, Number(bill.id));
     }
+
+    const candidates: any[] = [];
+    for (const bill of bills) {
+      if (manuallyEditedBillIds.has(Number(bill.id))) continue;
+      const oldBillMonth = String(bill.billMonth);
+      const generatedMonth = this.formatShanghaiMonth(bill.generatedAt || bill.createdAt);
+      // 旧逻辑曾在当月 20 日生成次月账单。系统自动账单的生成月份早于
+      // 账单月份时，按生成当月重新归属；人工账单和人工改过的账单不参与。
+      const billMonth = generatedMonth && generatedMonth < oldBillMonth
+        ? generatedMonth
+        : oldBillMonth;
+      const contract = (contractsByUser.get(Number(bill.userId)) || [])
+        .find((item) => this.getContractBillTerms(item, billMonth));
+      if (!contract) continue;
+      const terms = this.getContractBillTerms(contract, billMonth);
+      if (!terms) continue;
+      const oldAmount = this.toFixed2(bill.shouldPayAmount);
+      const paidAmount = this.toFixed2(bill.paidAmount);
+      const amountChanged = oldAmount !== terms.amount;
+      const periodChanged = this.toDateOnlyString(bill.periodStart) !== this.toDateOnlyString(terms.periodStart)
+        || this.toDateOnlyString(bill.periodEnd) !== this.toDateOnlyString(terms.periodEnd);
+      const dueChanged = this.toDateOnlyString(bill.dueAt) !== this.toDateOnlyString(terms.dueAt);
+      const monthChanged = oldBillMonth !== billMonth;
+      if (!amountChanged && !periodChanged && !dueChanged && !monthChanged) continue;
+      const conflictingBillId = monthChanged
+        ? billsByUserMonth.get(`${Number(bill.userId)}:${billMonth}`)
+        : null;
+      let blockedReason: string | null = null;
+      if (conflictingBillId && conflictingBillId !== Number(bill.id)) {
+        blockedReason = '校正后月份已有账单，需人工合并';
+      } else if (paidAmount > terms.amount) {
+        blockedReason = '已缴金额大于校正后应缴金额，需人工退款处理';
+      }
+      candidates.push({
+        billId: bill.id,
+        userId: bill.userId,
+        user: bill.user,
+        oldBillMonth,
+        billMonth,
+        oldPeriodStart: this.toDateOnlyString(bill.periodStart),
+        oldPeriodEnd: this.toDateOnlyString(bill.periodEnd),
+        periodStart: this.toDateOnlyString(terms.periodStart),
+        periodEnd: this.toDateOnlyString(terms.periodEnd),
+        oldDueAt: this.toDateOnlyString(bill.dueAt),
+        dueAt: this.toDateOnlyString(terms.dueAt),
+        oldAmount,
+        amount: terms.amount,
+        paidAmount,
+        billableDays: terms.billableDays,
+        daysInMonth: terms.daysInMonth,
+        blockedReason,
+      });
+    }
+
+    if (apply) {
+      const applicable = candidates.filter((item) => !item.blockedReason);
+      await this.prisma.$transaction(async (tx) => {
+        for (const item of applicable) {
+          const remainingAmount = this.toFixed2(Math.max(0, item.amount - item.paidAmount));
+          const status = remainingAmount <= 0 ? 'PAID' : item.paidAmount > 0 ? 'PARTIAL' : 'UNPAID';
+          const oldBill = await (tx as any).offlineFeeBill.findUnique({ where: { id: item.billId } });
+          const updated = await (tx as any).offlineFeeBill.update({
+            where: { id: item.billId },
+            data: {
+              billMonth: item.billMonth,
+              periodStart: this.parseDateOnly(item.periodStart),
+              periodEnd: this.parseDateOnly(item.periodEnd),
+              dueAt: this.parseDateOnly(item.dueAt),
+              performanceBaseAmount: item.amount,
+              rate: 1,
+              capAmount: item.amount,
+              shouldPayAmount: item.amount,
+              remainingAmount,
+              status,
+            },
+          });
+          await this.writeLogTx(tx as any, {
+            operatorId,
+            action: 'OFFLINE_FEE_BILL_PRORATION_REPAIR',
+            targetId: item.billId,
+            oldData: oldBill,
+            newData: updated,
+            remark: `历史线下费用归属及金额校正：${item.oldBillMonth} -> ${item.billMonth}，${item.billableDays}/${item.daysInMonth} 天`,
+          });
+        }
+      });
+      return {
+        applied: applicable.length,
+        blocked: candidates.length - applicable.length,
+        candidates,
+      };
+    }
+    return {
+      applied: 0,
+      blocked: candidates.filter((item) => item.blockedReason).length,
+      candidates,
+    };
+  }
+
+  private toDateOnlyString(value: any) {
+    if (!value) return '';
+    const date = new Date(value);
+    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
   }
 
   async listBills(query: QueryOfflineFeeBillsDto) {

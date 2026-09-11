@@ -59,6 +59,22 @@ export class OfflineFeeController {
     return this.service.generateBillsForMonth(body.month, Number.isFinite(operatorId) ? operatorId : undefined);
   }
 
+  @Post('bills/repair-preview')
+  @UseGuards(PermissionsGuard)
+  @Permissions(FINANCE_OFFLINE_FEES_PAGE, FINANCE_RECORDS_PAGE)
+  async repairPreview() {
+    return this.service.repairExistingBills(false);
+  }
+
+  @Post('bills/repair-apply')
+  @UseGuards(PermissionsGuard)
+  @Permissions(FINANCE_OFFLINE_FEES_PAGE, FINANCE_RECORDS_PAGE)
+  async repairApply(@Body() body: { confirmed?: boolean }, @Req() req: any) {
+    if (body?.confirmed !== true) throw new BadRequestException('校正历史账单前请先确认');
+    const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.repairExistingBills(true, Number.isFinite(operatorId) ? operatorId : undefined);
+  }
+
   @Post('staff/offline-options')
   @UseGuards(PermissionsGuard)
   @Permissions(FINANCE_OFFLINE_FEES_PAGE, FINANCE_RECORDS_PAGE)
