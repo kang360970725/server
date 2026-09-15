@@ -93,9 +93,24 @@ export class StaffActivityService {
     const shanghai = new Date(now.getTime() + 8 * HOUR);
     const start = new Date(Date.UTC(shanghai.getUTCFullYear(), shanghai.getUTCMonth(), shanghai.getUTCDate()) - 8 * HOUR);
     const end = new Date(start.getTime() + DAY);
-    const rows = await this.prisma.staffActivityCharge.findMany({ where: { createdAt: { gte: start, lt: end } } });
+    const [rows, totals] = await Promise.all([
+      this.prisma.staffActivityCharge.findMany({ where: { createdAt: { gte: start, lt: end } } }),
+      this.prisma.staffActivityCharge.aggregate({
+        _count: true,
+        _sum: { availableDeducted: true, depositDeducted: true },
+      }),
+    ]);
     const users = new Set(rows.map(x => x.userId));
-    return { userCount: users.size, chargeCount: rows.length, expectedAmount: rows.reduce((s, x) => s + Number(x.expectedAmount), 0), availableDeducted: rows.reduce((s, x) => s + Number(x.availableDeducted), 0), depositDeducted: rows.reduce((s, x) => s + Number(x.depositDeducted), 0), exitCount: rows.filter(x => x.exitTriggered).length };
+    return {
+      userCount: users.size,
+      chargeCount: rows.length,
+      expectedAmount: rows.reduce((s, x) => s + Number(x.expectedAmount), 0),
+      availableDeducted: rows.reduce((s, x) => s + Number(x.availableDeducted), 0),
+      depositDeducted: rows.reduce((s, x) => s + Number(x.depositDeducted), 0),
+      exitCount: rows.filter(x => x.exitTriggered).length,
+      totalChargeCount: totals._count,
+      totalPenaltyAmount: Number(totals._sum.availableDeducted || 0) + Number(totals._sum.depositDeducted || 0),
+    };
   }
 
   async setAssessmentEnabled(userId: number, enabled: boolean) {

@@ -3,7 +3,7 @@ import { randomInt } from 'node:crypto';
 import { PrismaService } from '../prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { inspectWalletFundingTx } from '../wallet/wallet-funding.util';
-import { CreateAdminRentalOrderDto, SettleAdminRentalOrderDto } from './dto/admin-rental-order.dto';
+import { CreateAdminRentalOrderDto, ReconcileAdminRentalOrderDto, SettleAdminRentalOrderDto } from './dto/admin-rental-order.dto';
 import { dateOnly, money, settleAmounts, shanghaiDay, startDateFor, textField, todayRange } from './rental-order.rules';
 
 class RentalSerialCollision extends Error {}
@@ -138,6 +138,30 @@ export class RentalOrdersService {
     });
   }
 
+  async reconcile(id: number, input: ReconcileAdminRentalOrderDto, operatorId: number) {
+    return this.prisma.$transaction(async (tx) => {
+      const order = await this.lockOrder(tx, this.id(id));
+      if (order.reconciledAt) throw new BadRequestException('该租号订单已经核销，请勿重复操作');
+      if (order.status !== 'SETTLED') throw new BadRequestException('仅已结算的租号订单可以核销');
+      this.checkVersion(order, input.version);
+      const reconciliationAmount = Number(order.actualAmount);
+      if (!Number.isFinite(reconciliationAmount) || reconciliationAmount < 0) {
+        throw new BadRequestException('订单实际费用异常，无法核销');
+      }
+      const reconciliationRemark = textField(input.remark, '核销备注', false, 2000)
+        || '商行垫付款已实际转付，确认核销';
+      const updated = await tx.rentalOrder.update({ where: { id: order.id }, data: {
+        reconciledBy: operatorId,
+        reconciledAt: new Date(),
+        reconciliationAmount,
+        reconciliationRemark,
+        version: { increment: 1 },
+      } });
+      await this.log(tx, operatorId, updated, 'RENTAL_ORDER_RECONCILE');
+      return updated;
+    });
+  }
+
   async detail(id: number) {
     const order = await this.prisma.rentalOrder.findUnique({ where: { id: this.id(id) } });
     if (!order) throw new NotFoundException('租号订单不存在');
@@ -145,12 +169,13 @@ export class RentalOrdersService {
       sourceId: order.id, sourceType: { in: ['RENTAL_ORDER_PREPAY', 'RENTAL_ORDER_DEPOSIT', 'RENTAL_ORDER_REFUND',
         'RENTAL_ORDER_EXCESS_CHARGE', 'RENTAL_ORDER_VOID_REFUND'] },
     }, orderBy: { id: 'asc' } });
-    const operatorIds = [...new Set([order.createdBy, order.settledBy, order.voidedBy].filter((id): id is number => id != null))];
+    const operatorIds = [...new Set([order.createdBy, order.settledBy, order.voidedBy, order.reconciledBy].filter((id): id is number => id != null))];
     const operators = await this.prisma.user.findMany({ where: { id: { in: operatorIds } }, select: { id: true, name: true } });
     const names = new Map(operators.map((user) => [user.id, user.name]));
     const operatorName = (id: number | null) => id == null ? null : (names.get(id) || '未知操作人');
     return { ...order, transactions, createdByName: operatorName(order.createdBy),
-      settledByName: operatorName(order.settledBy), voidedByName: operatorName(order.voidedBy) };
+      settledByName: operatorName(order.settledBy), voidedByName: operatorName(order.voidedBy),
+      reconciledByName: operatorName(order.reconciledBy) };
   }
   async list(query: any) {
     const page = Math.max(1, Math.floor(Number(query.page) || 1));
@@ -161,6 +186,11 @@ export class RentalOrdersService {
       where.status = query.status;
     }
     if (query.staffUserId) where.staffUserId = this.id(query.staffUserId);
+    if (query.reconciled === 'true' || query.reconciled === 'false') {
+      // 核销只属于已结算订单，“待核销”不应把所有进行中订单一并查出。
+      where.status = 'SETTLED';
+      where.reconciledAt = query.reconciled === 'true' ? { not: null } : null;
+    }
     if (query.search) {
       const search = textField(query.search, '查询内容', false, 100);
       where.OR = [{ serialNo: { contains: search } }, { accountSourceNo: { contains: search } }, { staffNameSnapshot: { contains: search } }];

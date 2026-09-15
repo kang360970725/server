@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, Logger, Post, Query, Req } from '@nestjs/common';
 import { AuthService } from '../auth/auth.service';
 import { Public } from '../auth/decorators/public.decorator';
 import { miniOk } from './mini.response';
@@ -10,6 +10,7 @@ import { MemberService } from '../member/member.service';
 @ApiTags('mini-auth')
 @Controller('mini/auth')
 export class MiniAuthController {
+  private readonly logger = new Logger(MiniAuthController.name);
   constructor(
     private readonly authService: AuthService,
     private readonly prisma: PrismaService,
@@ -72,63 +73,85 @@ export class MiniAuthController {
       },
     },
   })
-  async wechatLogin(@Body() body: { code: string }) {
-    const code = String(body?.code || '').trim();
-    if (!code) return miniOk({ success: false, message: '缺少微信登录 code' }, '缺少微信登录 code');
-    let wx: any;
-    try {
-      wx = await this.memberService.exchangeWechatCode(code);
-    } catch (e: any) {
-      return miniOk({ success: false, message: e?.message || '微信授权失败' }, e?.message || '微信授权失败');
-    }
-
-    let user = await this.memberService.findUserByWechatBinding(wx.appId, wx.openId);
-    if (!user) {
-      let pseudoPhone = wx.pseudoPhone;
-      const exists = await this.prisma.user.findUnique({ where: { phone: pseudoPhone } });
-      if (exists) {
-        user = exists;
-      } else {
-        const hashed = await bcrypt.hash(`wx_${wx.openId}_${Date.now()}`, 10);
-        user = await this.prisma.user.create({
-          data: {
-            phone: pseudoPhone,
-            password: hashed,
-            name: `微信用户${wx.openId.slice(-4)}`,
-            userType: 'REGISTERED_USER',
-          },
-        });
-      }
-    }
-
-    await this.prisma.$transaction(async (tx) => {
-      await this.memberService.ensureUserAssets(user.id, tx as any);
-      await this.memberService.upsertWechatBinding({
-        userId: user.id,
-        appId: wx.appId,
-        openId: wx.openId,
-        unionId: wx.unionId,
-        sessionKey: wx.sessionKey,
-      }, tx as any);
-      await tx.user.update({
-        where: { id: user.id },
-        data: { lastLoginAt: new Date() },
+  async wechatLogin(@Body() body: { code: string }, @Req() req: any) {
+    const traceId = `wxlogin_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const startedAt = Date.now();
+    let stage = 'validate_code';
+    let maskedOpenId: string | null = null;
+    let userId: number | null = null;
+    const log = (level: 'log' | 'warn' | 'error', event: string, extra: Record<string, unknown> = {}) => {
+      const payload = JSON.stringify({
+        event: `mini_wechat_login_${event}`,
+        traceId,
+        stage,
+        durationMs: Date.now() - startedAt,
+        method: req?.method,
+        path: req?.originalUrl || req?.url,
+        userAgent: String(req?.headers?.['user-agent'] || '').slice(0, 180),
+        openIdMasked: maskedOpenId,
+        userId,
+        ...extra,
       });
-    });
+      this.logger[level](payload);
+    };
 
-    const token = this.authService.refreshAccessToken({
-      id: user.id,
-      phone: user.phone,
-      name: user.name || `微信用户${user.id}`,
-    }, { mini: true });
-    const profile = await this.authService.getUserWithPermissions(user.id);
-    return miniOk({
-      success: true,
-      access_token: token.access_token,
-      openid: wx.openId,
-      unionid: wx.unionId || null,
-      user: profile,
-    });
+    const code = String(body?.code || '').trim();
+    log('log', 'started', { hasCode: Boolean(code), codeLength: code.length });
+    if (!code) {
+      log('warn', 'rejected', { reason: 'missing_code' });
+      return miniOk({ success: false, message: '缺少微信登录 code' }, '缺少微信登录 code');
+    }
+
+    try {
+      stage = 'exchange_wechat_code';
+      const wx: any = await this.memberService.exchangeWechatCode(code);
+      maskedOpenId = wx?.openId ? `${String(wx.openId).slice(0, 4)}***${String(wx.openId).slice(-4)}` : null;
+      log('log', 'wechat_session_ready', { appIdSuffix: String(wx?.appId || '').slice(-6), hasOpenId: Boolean(wx?.openId), hasUnionId: Boolean(wx?.unionId), hasSessionKey: Boolean(wx?.sessionKey) });
+
+      stage = 'find_wechat_binding';
+      let user = await this.memberService.findUserByWechatBinding(wx.appId, wx.openId);
+      log('log', 'binding_checked', { bindingFound: Boolean(user) });
+      if (!user) {
+        stage = 'find_pseudo_phone';
+        const pseudoPhone = wx.pseudoPhone;
+        const exists = await this.prisma.user.findUnique({ where: { phone: pseudoPhone } });
+        if (exists) {
+          user = exists;
+          log('log', 'pseudo_user_reused', { reusedUserId: exists.id });
+        } else {
+          stage = 'create_user';
+          const hashed = await bcrypt.hash(`wx_${wx.openId}_${Date.now()}`, 10);
+          user = await this.prisma.user.create({ data: { phone: pseudoPhone, password: hashed, name: `微信用户${wx.openId.slice(-4)}`, userType: 'REGISTERED_USER' } });
+          log('log', 'user_created', { createdUserId: user.id });
+        }
+      }
+      userId = Number(user.id);
+
+      stage = 'persist_login_transaction';
+      await this.prisma.$transaction(async (tx) => {
+        await this.memberService.ensureUserAssets(user.id, tx as any);
+        await this.memberService.upsertWechatBinding({ userId: user.id, appId: wx.appId, openId: wx.openId, unionId: wx.unionId, sessionKey: wx.sessionKey }, tx as any);
+        await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+      });
+      log('log', 'login_persisted');
+
+      stage = 'issue_access_token';
+      const token = this.authService.refreshAccessToken({ id: user.id, phone: user.phone, name: user.name || `微信用户${user.id}` }, { mini: true });
+      stage = 'load_user_profile';
+      const profile = await this.authService.getUserWithPermissions(user.id);
+      stage = 'completed';
+      log('log', 'succeeded', { profileCompleted: Boolean((profile as any)?.profileCompleted), expiresInSeconds: token.expiresInSeconds });
+      return miniOk({ success: true, access_token: token.access_token, openid: wx.openId, unionid: wx.unionId || null, user: profile });
+    } catch (e: any) {
+      log('error', 'failed', {
+        errorName: String(e?.name || e?.constructor?.name || 'Error'),
+        errorCode: String(e?.code || e?.response?.errorcode || ''),
+        status: Number(e?.status || e?.statusCode || e?.response?.statusCode || 0) || undefined,
+        message: String(e?.message || e?.response?.message || '微信授权失败').slice(0, 500),
+        stack: String(e?.stack || '').split('\n').slice(0, 12).join('\n'),
+      });
+      return miniOk({ success: false, message: e?.message || '微信授权失败', traceId }, e?.message || '微信授权失败');
+    }
   }
 
   @Get('me')

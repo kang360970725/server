@@ -144,10 +144,18 @@ export class SystemConfigService implements OnModuleInit {
     GOODS_CATEGORY_TREE: 'goods_category_tree',
     GOODS_TAG_LIST: 'goods_tag_list',
     STAFF_RULE_ENGINE_V1: 'staff_rule_engine_v1',
+    MINI_MEMBER_SIGNIN_POINTS: 'mini_member_signin_points',
   } as const;
 
   async ensureDefaults() {
     const defaults = [
+      {
+        key: SystemConfigService.KEYS.MINI_MEMBER_SIGNIN_POINTS,
+        value: '1',
+        valueType: 'NUMBER',
+        remark: '小程序会员每日签到赠送积分；积分具有消费价值，请谨慎调整',
+        enabled: true,
+      },
       {
         key: SystemConfigService.KEYS.OFFLINE_FEE_RATE,
         value: '0.1',

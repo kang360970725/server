@@ -6,7 +6,8 @@ import { AdminRentalOrdersController } from './admin-rental-orders.controller';
 describe('admin rental permissions', () => {
   it.each([
     ['list', 'rental-orders:page'], ['detail', 'rental-orders:page'],
-    ['create', 'rental-orders:create:button'], ['settle', 'rental-orders:settle:button'], ['void', 'rental-orders:void:button'],
+    ['create', 'rental-orders:create:button'], ['settle', 'rental-orders:settle:button'],
+    ['reconcile', 'rental-orders:reconcile:button'], ['void', 'rental-orders:void:button'],
   ])('%s requires its own permission', (method, permission) => {
     const handler = AdminRentalOrdersController.prototype[method];
     expect(Reflect.getMetadata('permissions', handler)).toEqual([permission]);

@@ -3,7 +3,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import { RentalOrdersService } from './rental-orders.service';
-import { CreateAdminRentalOrderDto, SettleAdminRentalOrderDto } from './dto/admin-rental-order.dto';
+import { CreateAdminRentalOrderDto, ReconcileAdminRentalOrderDto, SettleAdminRentalOrderDto } from './dto/admin-rental-order.dto';
 
 // 未来自助端使用独立controller与DTO，不开放管理端代扣权限。
 @Controller('admin/rental-orders')
@@ -31,6 +31,11 @@ export class AdminRentalOrdersController {
   @Permissions('rental-orders:settle:button')
   settle(@Param('id', ParseIntPipe) id: number, @Body() body: SettleAdminRentalOrderDto, @Req() req: any) {
     return this.service.settle(id, body, this.operator(req));
+  }
+  @Post(':id/reconcile')
+  @Permissions('rental-orders:reconcile:button')
+  reconcile(@Param('id', ParseIntPipe) id: number, @Body() body: ReconcileAdminRentalOrderDto, @Req() req: any) {
+    return this.service.reconcile(id, body, this.operator(req));
   }
   @Post(':id/void')
   @Permissions('rental-orders:void:button')

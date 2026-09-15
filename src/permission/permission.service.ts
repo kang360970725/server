@@ -222,7 +222,7 @@ export class PermissionService {
             create: { key: 'rental-orders:page', name: '租号订单', module: 'rental-orders', type: PermissionType.PAGE, parentId: menu?.id },
             update: { name: '租号订单', type: PermissionType.PAGE, parentId: menu?.id },
         });
-        for (const [action, name] of [['create', '创建租号订单'], ['settle', '结算租号订单'], ['void', '废除租号订单']]) {
+        for (const [action, name] of [['create', '创建租号订单'], ['settle', '结算租号订单'], ['reconcile', '核销租号订单'], ['void', '废除租号订单']]) {
             const key = `rental-orders:${action}:button`;
             await this.prisma.permission.upsert({ where: { key },
                 create: { key, name, module: 'rental-orders', type: PermissionType.BUTTON, parentId: page.id },

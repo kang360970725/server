@@ -66,4 +66,25 @@ describe('staff activity policy', () => {
       123,
     );
   });
+
+  it('returns all-time actual activity penalties separately from today statistics', async () => {
+    const prisma = {
+      staffActivityCharge: {
+        findMany: jest.fn().mockResolvedValue([
+          { userId: 1, expectedAmount: 10, availableDeducted: 6, depositDeducted: 4, exitTriggered: false },
+        ]),
+        aggregate: jest.fn().mockResolvedValue({
+          _count: 8,
+          _sum: { availableDeducted: 42, depositDeducted: 18 },
+        }),
+      },
+    };
+    const service = new StaffActivityService(prisma as any);
+
+    await expect(service.getTodayStats(new Date('2026-09-15T04:00:00.000Z'))).resolves.toMatchObject({
+      chargeCount: 1,
+      totalChargeCount: 8,
+      totalPenaltyAmount: 60,
+    });
+  });
 });

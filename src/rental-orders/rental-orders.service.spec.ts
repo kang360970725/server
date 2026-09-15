@@ -143,6 +143,20 @@ describe('RentalOrdersService', () => {
     expect(result.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     expect(f.state().transactions).toHaveLength(3);
   });
+  it('reconciles only a settled order and snapshots the actual transferred amount', async () => {
+    const f = fixture(); const order = await f.service.create(createInput(), 3);
+    await expect(f.service.reconcile(order.id, { version: 0 }, 9)).rejects.toThrow('已结算');
+    const settled = await f.service.settle(order.id, settleInput({ lossAmount: 120, lossDetail: '损耗' }), 3);
+    const reconciled = await f.service.reconcile(order.id, { version: settled.version, remark: '银行转账凭证 001' }, 9);
+    expect(reconciled).toMatchObject({
+      reconciledBy: 9,
+      reconciliationAmount: 1120,
+      reconciliationRemark: '银行转账凭证 001',
+    });
+    expect(reconciled.reconciledAt).toBeInstanceOf(Date);
+    await expect(f.service.reconcile(order.id, { version: reconciled.version }, 9)).rejects.toThrow('已经核销');
+    expect(f.state().logs.map((x: any) => x.action)).toContain('RENTAL_ORDER_RECONCILE');
+  });
   it('resolves operator names in one query without returning personal fields', async () => {
     const prisma: any = {
       rentalOrder: { findUnique: jest.fn().mockResolvedValue({ id: 1, createdBy: 3, settledBy: 4, voidedBy: null }) },

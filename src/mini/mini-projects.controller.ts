@@ -1,4 +1,4 @@
-import { BadRequestException, Controller, Get, Param, ParseIntPipe, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
 import { ProjectStatus } from '@prisma/client';
 import { ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { PrismaService } from '../prisma/prisma.service';
@@ -33,6 +33,47 @@ export class MiniProjectsController {
       if (id && name) map.set(id, name);
     });
     return map;
+  }
+
+  private normalizeSearchKeyword(value: unknown) {
+    return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 30);
+  }
+
+  @Get('search/hot')
+  @Public()
+  async hotSearches() {
+    const since = new Date(Date.now() - 30 * 86400000);
+    const rows = await this.prisma.miniSearchKeywordStat.findMany({
+      where: { lastSearchedAt: { gte: since }, resultCount: { gt: 0 } },
+      orderBy: [{ searchCount: 'desc' }, { lastSearchedAt: 'desc' }], take: 12,
+      select: { displayKeyword: true, searchCount: true },
+    });
+    if (rows.length) return miniOk(rows.map((x) => ({ keyword: x.displayKeyword, count: x.searchCount })));
+    const products = await this.prisma.gameProject.findMany({where:{status:ProjectStatus.ACTIVE,showInMenuList:true},orderBy:{id:'desc'},take:8,select:{name:true}});
+    return miniOk(products.map((x) => ({keyword:x.name,count:0})));
+  }
+
+  @Get('search/suggest')
+  @Public()
+  async searchSuggestions(@Query('keyword') raw: string) {
+    const keyword=this.normalizeSearchKeyword(raw); if(!keyword) return miniOk([]);
+    const [products, hot]=await Promise.all([
+      this.prisma.gameProject.findMany({where:{status:ProjectStatus.ACTIVE,showInMenuList:true,name:{contains:keyword}},orderBy:{id:'desc'},take:6,select:{name:true}}),
+      this.prisma.miniSearchKeywordStat.findMany({where:{displayKeyword:{contains:keyword},resultCount:{gt:0}},orderBy:{searchCount:'desc'},take:4,select:{displayKeyword:true}}),
+    ]);
+    return miniOk(Array.from(new Set([...products.map((x)=>x.name),...hot.map((x)=>x.displayKeyword)])).slice(0,8));
+  }
+
+  @Post('search/record')
+  @Public()
+  async recordSearch(@Body() body:any) {
+    const displayKeyword=this.normalizeSearchKeyword(body?.keyword);
+    if(displayKeyword.length<2) return miniOk({recorded:false});
+    const resultCount=await this.prisma.gameProject.count({where:{status:ProjectStatus.ACTIVE,showInMenuList:true,OR:[{name:{contains:displayKeyword}},{description:{contains:displayKeyword}},{gameType:{contains:displayKeyword}},{category:{contains:displayKeyword}},{projectType:{contains:displayKeyword}}]}});
+    if(resultCount<=0) return miniOk({recorded:false});
+    const keyword=displayKeyword.toLocaleLowerCase('zh-CN');
+    await this.prisma.miniSearchKeywordStat.upsert({where:{keyword},update:{displayKeyword,searchCount:{increment:1},resultCount,lastSearchedAt:new Date()},create:{keyword,displayKeyword,searchCount:1,resultCount,lastSearchedAt:new Date()}});
+    return miniOk({recorded:true});
   }
 
   private async getProjectRatingStats(projectIds: number[]) {
@@ -137,6 +178,18 @@ export class MiniProjectsController {
     const gameType = String(query?.gameType || '').trim();
     const projectType = String(query?.projectType || '').trim();
     const keyword = String(query?.keyword || '').trim();
+    let matchedCategoryIds: string[] = [];
+    let matchedTagIds: string[] = [];
+    if (keyword) {
+      const [tree, tags] = await Promise.all([this.systemConfigService.getGoodsCategoryTree(), this.systemConfigService.getGoodsTagList()]);
+      const lower = keyword.toLowerCase();
+      const walk = (nodes: any[]) => (nodes || []).forEach((node) => {
+        if (String(node?.name || '').toLowerCase().includes(lower)) matchedCategoryIds.push(String(node.id));
+        if (Array.isArray(node?.children)) walk(node.children);
+      });
+      walk(Array.isArray(tree) ? tree : []);
+      matchedTagIds = (Array.isArray(tags) ? tags : []).filter((tag) => String(tag?.name || '').toLowerCase().includes(lower)).map((tag) => String(tag.id));
+    }
 
     // 兼容前端以分类名筛选（一级/二级都可能传），避免必须精确匹配单字段
     if (category) {
@@ -159,7 +212,12 @@ export class MiniProjectsController {
       });
     }
     if (keyword) {
-      and.push({ name: { contains: keyword } });
+      and.push({ OR: [
+        { name: { contains: keyword } }, { description: { contains: keyword } },
+        { gameType: { contains: keyword } }, { category: { contains: keyword } }, { projectType: { contains: keyword } },
+        ...(matchedCategoryIds.length ? [{gameType:{in:matchedCategoryIds}},{category:{in:matchedCategoryIds}}] : []),
+        ...matchedTagIds.map((id) => ({projectType:{contains:id}})),
+      ] });
     }
     if (and.length) {
       where.AND = and;

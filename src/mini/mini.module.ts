@@ -16,10 +16,13 @@ import { MiniHomeController } from './mini-home.controller';
 import { WechatPayService } from './wechat-pay.service';
 import { MemberModule } from '../member/member.module';
 import { MiniMemberController } from './mini-member.controller';
+import { MiniEngagementController } from './mini-engagement.controller';
+import { MiniEngagementService } from './mini-engagement.service';
+import { MemberEngagementAdminController } from './member-engagement-admin.controller';
 
 @Module({
   imports: [AuthModule, OrdersModule, WalletModule, CouponsModule, SystemConfigModule, NotificationsModule, MemberModule],
-  controllers: [MiniAuthController, MiniOrdersController, MiniWalletController, MiniCouponsController, MiniProjectsController, MiniHomeController, MiniAnnouncementsController, MiniMemberController],
-  providers: [PrismaService, WechatPayService],
+  controllers: [MiniAuthController, MiniOrdersController, MiniWalletController, MiniCouponsController, MiniProjectsController, MiniHomeController, MiniAnnouncementsController, MiniMemberController, MiniEngagementController, MemberEngagementAdminController],
+  providers: [PrismaService, WechatPayService, MiniEngagementService],
 })
 export class MiniModule {}

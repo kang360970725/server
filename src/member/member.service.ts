@@ -216,7 +216,7 @@ export class MemberService {
       where: { userId: Number(input.userId) },
       data: {
         annualContribution,
-        levelCode: String(levelConfig?.code || 'NONE'),
+        levelCode: String(levelConfig?.code || 'V0'),
       },
     });
 
@@ -229,7 +229,7 @@ export class MemberService {
         newData: {
           change: growthValue,
           annualContribution: Number(updated?.annualContribution || 0),
-          levelCode: String(updated?.levelCode || 'NONE'),
+          levelCode: String(updated?.levelCode || 'V0'),
         } as any,
         remark: input.remark ? String(input.remark).slice(0, 255) : '会员成长值增加',
       },
@@ -411,8 +411,8 @@ export class MemberService {
     await db.memberLevelConfig.createMany({
       data: [
         {
-          code: 'NONE',
-          name: '普通会员',
+          code: 'V0',
+          name: '初见会员',
           sortOrder: 0,
           minRechargeAmount: 0,
           minAnnualContribution: 0,
@@ -430,6 +430,9 @@ export class MemberService {
           enabled: true,
           isDefault: false,
         },
+        { code:'V4', name:'铂金会员', sortOrder:400, minRechargeAmount:3000, minAnnualContribution:0, benefits:['铂金会员名片','专属客服优先响应'], enabled:true, isDefault:false },
+        { code:'V5', name:'钻石会员', sortOrder:500, minRechargeAmount:6000, minAnnualContribution:0, benefits:['钻石动态主题','稀有成就展示'], enabled:true, isDefault:false },
+        { code:'V6', name:'星耀会员', sortOrder:600, minRechargeAmount:10000, minAnnualContribution:0, benefits:['星耀专属名片','最高等级身份标识'], enabled:true, isDefault:false },
         {
           code: 'V2',
           name: '黄金会员',
@@ -484,7 +487,7 @@ export class MemberService {
       data: {
         userId,
         memberCode: await this.generateMemberCode(tx),
-        levelCode: String(defaultLevel?.code || 'NONE'),
+        levelCode: String(defaultLevel?.code || 'V0'),
       },
     });
   }
@@ -908,7 +911,7 @@ export class MemberService {
       await this.prisma.memberProfile.update({
         where: { userId: profile.userId },
         data: {
-          levelCode: String(resolved?.code || 'NONE'),
+          levelCode: String(resolved?.code || 'V0'),
         },
       });
     }
@@ -1105,7 +1108,7 @@ export class MemberService {
           totalRechargeAmount,
           annualContribution,
           lastRechargeAt: new Date(),
-          levelCode: String(levelConfig?.code || 'NONE'),
+          levelCode: String(levelConfig?.code || 'V0'),
         },
       });
 
@@ -1233,7 +1236,7 @@ export class MemberService {
         where: { userId },
         data: {
           annualContribution: nextAnnualContribution,
-          levelCode: String(levelConfig?.code || 'NONE'),
+          levelCode: String(levelConfig?.code || 'V0'),
         },
       });
 
@@ -1285,7 +1288,7 @@ export class MemberService {
       member: {
         ...(profile || {}),
         levelName: currentLevel?.name || profile?.levelCode || '普通会员',
-        levelCode: profile?.levelCode || 'NONE',
+        levelCode: profile?.levelCode || 'V0',
         rights: currentLevel?.benefits || [],
       },
       points: pointAccount || null,

@@ -8,31 +8,47 @@ datasource db {
 }
 
 model GameProject {
-  id                       Int             @id @default(autoincrement())
+  id                       Int                     @id @default(autoincrement())
   name                     String
   price                    Float
   originPrice              Float?
   type                     OrderType
-  gameType                 String?         @db.VarChar(64)
-  projectType              String?         @db.Text
-  category                 String?         @db.VarChar(64)
-  richContent              String?         @db.LongText
-  showInMenuList           Boolean         @default(true)
+  gameType                 String?                 @db.VarChar(64)
+  projectType              String?                 @db.Text
+  category                 String?                 @db.VarChar(64)
+  richContent              String?                 @db.LongText
+  showInMenuList           Boolean                 @default(true)
   /// 计费模式：小时单 / 保底单/ 玩法单（你已落地）
-  billingMode              BillingMode     @default(GUARANTEED)
+  billingMode              BillingMode             @default(GUARANTEED)
   baseAmount               Float?
   /// 保底单结算策略：STANDARD / FINAL_ROUND_TAKES_ALL
-  guaranteedSettlementMode String          @default("STANDARD") @db.VarChar(32)
+  guaranteedSettlementMode String                  @default("STANDARD") @db.VarChar(32)
   /// 最后一组最低保底进度（万）；为空或 0 表示不启用倒推补足
   minimumFinalProgressWan  Float?
   clubRate                 Float?
   coverImage               String?
   description              String?
-  status                   ProjectStatus   @default(ACTIVE)
-  createdAt                DateTime        @default(now())
-  updatedAt                DateTime        @updatedAt
+  status                   ProjectStatus           @default(ACTIVE)
+  createdAt                DateTime                @default(now())
+  updatedAt                DateTime                @updatedAt
   orders                   Order[]
   reviews                  ProductReview[]
+  memberFavorites          MemberProjectFavorite[]
+  memberViews              MemberProjectView[]
+}
+
+model MiniSearchKeywordStat {
+  id             Int      @id @default(autoincrement())
+  keyword        String   @unique @db.VarChar(64)
+  displayKeyword String   @db.VarChar(64)
+  searchCount    Int      @default(0)
+  resultCount    Int      @default(0)
+  lastSearchedAt DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([lastSearchedAt, searchCount], map: "idx_mini_search_hot")
+  @@map("mini_search_keyword_stats")
 }
 
 model Role {
@@ -157,6 +173,11 @@ model User {
   memberPointAccount          MemberPointAccount?
   memberPointTransactions     MemberPointTransaction[]
   memberRechargeOrders        MemberRechargeOrder[]
+  memberCheckins              MemberCheckin[]
+  memberProjectFavorites      MemberProjectFavorite[]
+  memberProjectViews          MemberProjectView[]
+  memberAchievements          MemberAchievement[]
+  staffPublicCard             StaffPublicCard?
   createdQuestionnaires       Questionnaire[]            @relation("QuestionnaireCreator")
   questionnaireSubmissions    QuestionnaireSubmission[]
 
@@ -739,6 +760,83 @@ model MemberGameCard {
   @@index([userId, gameCategoryId], map: "idx_member_game_card_user_category")
   @@index([userId, isPrimary], map: "idx_member_game_card_user_primary")
   @@map("member_game_cards")
+}
+
+model MemberCheckin {
+  id          Int      @id @default(autoincrement())
+  userId      Int
+  checkinDate DateTime @db.Date
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, checkinDate], map: "uniq_member_checkin_user_date")
+  @@index([userId, createdAt], map: "idx_member_checkin_user_time")
+  @@map("member_checkins")
+}
+
+model MemberProjectFavorite {
+  id        Int         @id @default(autoincrement())
+  userId    Int
+  projectId Int
+  createdAt DateTime    @default(now())
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project   GameProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, projectId], map: "uniq_member_favorite_user_project")
+  @@index([userId, createdAt], map: "idx_member_favorite_user_time")
+  @@map("member_project_favorites")
+}
+
+model MemberProjectView {
+  id           Int         @id @default(autoincrement())
+  userId       Int
+  projectId    Int
+  viewedOn     DateTime    @db.Date
+  viewCount    Int         @default(1)
+  lastViewedAt DateTime    @default(now())
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project      GameProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, projectId, viewedOn], map: "uniq_member_view_user_project_day")
+  @@index([userId, lastViewedAt], map: "idx_member_view_user_time")
+  @@map("member_project_views")
+}
+
+model MemberAchievement {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  code       String   @db.VarChar(64)
+  unlockedAt DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, code], map: "uniq_member_achievement_user_code")
+  @@index([userId, unlockedAt], map: "idx_member_achievement_user_time")
+  @@map("member_achievements")
+}
+
+model StaffPublicCard {
+  id           Int       @id @default(autoincrement())
+  userId       Int       @unique
+  displayName  String    @db.VarChar(64)
+  avatarUrl    String?   @db.VarChar(500)
+  slogan       String?   @db.VarChar(120)
+  bio          String?   @db.Text
+  gameTags     Json?
+  skillTags    Json?
+  serviceYears Int       @default(0)
+  status       String    @default("DRAFT") @db.VarChar(24)
+  reviewRemark String?   @db.VarChar(255)
+  submittedAt  DateTime?
+  reviewedAt   DateTime?
+  reviewedBy   Int?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, submittedAt], map: "idx_staff_public_card_review")
+  @@map("staff_public_cards")
 }
 
 model MemberLevelConfig {
@@ -1560,12 +1658,17 @@ model RentalOrder {
   voidedBy                   Int?
   voidedAt                   DateTime?
   voidReason                 String?           @db.Text
+  reconciledBy               Int?
+  reconciledAt               DateTime?
+  reconciliationAmount       Decimal?          @db.Decimal(12, 2)
+  reconciliationRemark       String?           @db.Text
   version                    Int               @default(0)
 
   @@index([staffUserId, createdAt])
   @@index([status, forcedSettlementDate])
   @@index([createdAt])
   @@index([settledAt])
+  @@index([reconciledAt])
   @@map("rental_orders")
 }
 
@@ -1644,15 +1747,15 @@ model WalletAnomalyIgnore {
 }
 
 model WalletDepositTransaction {
-  id         Int            @id @default(autoincrement())
-  userId     Int
-  amount     Decimal        @db.Decimal(10, 2)
-  bizType    DepositBizType
-  remark     String?        @db.VarChar(255)
-  operatorId Int?
+  id           Int            @id @default(autoincrement())
+  userId       Int
+  amount       Decimal        @db.Decimal(10, 2)
+  bizType      DepositBizType
+  remark       String?        @db.VarChar(255)
+  operatorId   Int?
   manualSource String?        @db.VarChar(32)
-  createdAt  DateTime       @default(now())
-  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt    DateTime       @default(now())
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@map("wallet_deposit_transactions")

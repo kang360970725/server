@@ -2235,6 +2235,98 @@ export class UsersService {
     return { message: '用户删除成功' };
   }
 
+  async getMiniappWechatBindingForTest(userId: number) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        name: true,
+        phone: true,
+        avatar: true,
+        userType: true,
+        status: true,
+        createdAt: true,
+        wechatBindings: {
+          where: { platform: 'MINIAPP' },
+          orderBy: [{ lastLoginAt: 'desc' }, { updatedAt: 'desc' }],
+          select: {
+            id: true,
+            platform: true,
+            appId: true,
+            openId: true,
+            unionId: true,
+            nickname: true,
+            lastBindAt: true,
+            lastLoginAt: true,
+          },
+        },
+      },
+    });
+    if (!user) throw new NotFoundException('用户不存在');
+    const latestBinding = user.wechatBindings[0];
+    const phone = String(user.phone || '').trim();
+    const name = String(user.name || '').trim();
+    const profileCompleted = Boolean(
+      phone &&
+      !phone.startsWith('wx_') &&
+      (String(latestBinding?.nickname || '').trim() || (name && !name.startsWith('微信用户'))) &&
+      String(user.avatar || '').trim(),
+    );
+    return {
+      ...user,
+      profileCompleted,
+      wechatBindings: user.wechatBindings.map((item) => ({
+        ...item,
+        openId: item.openId ? `${item.openId.slice(0, 8)}***${item.openId.slice(-4)}` : '',
+        unionId: item.unionId ? `${item.unionId.slice(0, 8)}***${item.unionId.slice(-4)}` : null,
+      })),
+    };
+  }
+
+  async clearMiniappWechatBindingForTest(userId: number, operatorId: number) {
+    const before = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        name: true,
+        phone: true,
+        wechatBindings: {
+          where: { platform: 'MINIAPP' },
+          select: { id: true, platform: true, appId: true, openId: true, unionId: true, lastBindAt: true, lastLoginAt: true },
+        },
+      },
+    });
+    if (!before) throw new NotFoundException('用户不存在');
+    if (!before.wechatBindings.length) throw new BadRequestException('该用户没有小程序微信绑定');
+
+    const result = await this.prisma.userWechatBinding.deleteMany({
+      where: { userId, platform: 'MINIAPP' },
+    });
+    await this.createUserLog(
+      operatorId,
+      userId,
+      'CLEAR_MINIAPP_WECHAT_BINDING_FOR_TEST',
+      'USER_WECHAT_BINDING',
+      {
+        user: { id: before.id, name: before.name, phone: before.phone },
+        bindings: before.wechatBindings.map((item) => ({
+          ...item,
+          openId: item.openId ? `${item.openId.slice(0, 8)}***${item.openId.slice(-4)}` : '',
+          unionId: item.unionId ? `${item.unionId.slice(0, 8)}***${item.unionId.slice(-4)}` : null,
+        })),
+      },
+      { bindings: [] },
+      null,
+      '测试工具清除小程序微信绑定',
+    );
+    return {
+      success: true,
+      deletedCount: result.count,
+      userId,
+      message: '小程序微信绑定已清除；请同时清除小程序端登录缓存后再测试首次授权',
+    };
+  }
+
   // 修改：使用 include 而不是 select
   private getUserIncludeFields() {
     return {

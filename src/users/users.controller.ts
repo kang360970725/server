@@ -117,6 +117,20 @@ export class UsersController {
     return this.usersService.getAvailableRatings();
   }
 
+  @Get('test-tools/:id/miniapp-wechat-binding')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:wechat-binding-test:page')
+  getMiniappWechatBindingForTest(@Param('id', ParseIntPipe) id: number) {
+    return this.usersService.getMiniappWechatBindingForTest(id);
+  }
+
+  @Delete('test-tools/:id/miniapp-wechat-binding')
+  @UseGuards(PermissionsGuard)
+  @Permissions('system:wechat-binding-test:page')
+  clearMiniappWechatBindingForTest(@Param('id', ParseIntPipe) id: number, @Request() req: any) {
+    return this.usersService.clearMiniappWechatBindingForTest(id, req.user.userId);
+  }
+
   @Get(':id')
   @UseGuards(PermissionsGuard)
   @Permissions(...UsersController.userManagePermissions)

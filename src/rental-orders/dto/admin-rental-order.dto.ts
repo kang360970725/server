@@ -18,3 +18,7 @@ export class SettleAdminRentalOrderDto {
   abnormalCompensationRemark?: string;
   ownerSettlementAmount: number;
 }
+export class ReconcileAdminRentalOrderDto {
+  version: number;
+  remark?: string;
+}
