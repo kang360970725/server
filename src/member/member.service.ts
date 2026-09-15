@@ -10,6 +10,7 @@ import {
   WechatBindingPlatform,
 } from '@prisma/client';
 import { createHash } from 'crypto';
+import { get as httpGet } from 'http';
 import { get as httpsGet } from 'https';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
@@ -34,7 +35,9 @@ export class MemberService {
 
   private requestWechatJson(url: string, timeoutMs = 8000): Promise<any> {
     return new Promise((resolve, reject) => {
-      const request = httpsGet(url, { family: 4, timeout: timeoutMs, headers: { Accept: 'application/json' } }, (response) => {
+      const requestUrl = new URL(url);
+      const requestGet = requestUrl.protocol === 'http:' ? httpGet : httpsGet;
+      const request = requestGet(url, { family: 4, timeout: timeoutMs, headers: { Accept: 'application/json' } }, (response) => {
         const chunks: Buffer[] = [];
         response.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
         response.on('end', () => {
@@ -61,6 +64,22 @@ export class MemberService {
       });
       request.on('error', reject);
     });
+  }
+
+  private getWechatApiBaseUrl() {
+    const configured = String(process.env.WECHAT_API_BASE_URL || '').trim().replace(/\/$/, '');
+    if (configured) {
+      const parsed = new URL(configured);
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.hostname !== 'api.weixin.qq.com') {
+        throw new BadRequestException('WECHAT_API_BASE_URL 必须指向 api.weixin.qq.com');
+      }
+      return configured;
+    }
+
+    const isWechatCloudRun =
+      String(process.env.NODE_ENV || '').toLowerCase() === 'production' &&
+      Boolean(String(process.env.TCB_ENV_ID || '').trim());
+    return isWechatCloudRun ? 'http://api.weixin.qq.com' : 'https://api.weixin.qq.com';
   }
 
   private toAmount(value: Prisma.Decimal | number | string | null | undefined) {
@@ -1678,7 +1697,7 @@ export class MemberService {
       throw new BadRequestException('未配置微信登录参数');
     }
 
-    const url = `https://api.weixin.qq.com/sns/jscode2session?appid=${encodeURIComponent(appid)}&secret=${encodeURIComponent(secret)}&js_code=${encodeURIComponent(code)}&grant_type=authorization_code`;
+    const url = `${this.getWechatApiBaseUrl()}/sns/jscode2session?appid=${encodeURIComponent(appid)}&secret=${encodeURIComponent(secret)}&js_code=${encodeURIComponent(code)}&grant_type=authorization_code`;
     const data: any = await this.requestWechatJson(url);
     const openId = String(data?.openid || '').trim();
     if (!openId) {
