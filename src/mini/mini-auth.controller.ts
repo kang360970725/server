@@ -146,6 +146,11 @@ export class MiniAuthController {
       log('error', 'failed', {
         errorName: String(e?.name || e?.constructor?.name || 'Error'),
         errorCode: String(e?.code || e?.response?.errorcode || ''),
+        causeCode: String(e?.cause?.code || ''),
+        causeErrno: String(e?.cause?.errno || ''),
+        causeSyscall: String(e?.cause?.syscall || ''),
+        causeHost: String(e?.cause?.hostname || '').slice(0, 120),
+        causeMessage: String(e?.cause?.message || '').slice(0, 500),
         status: Number(e?.status || e?.statusCode || e?.response?.statusCode || 0) || undefined,
         message: String(e?.message || e?.response?.message || '微信授权失败').slice(0, 500),
         stack: String(e?.stack || '').split('\n').slice(0, 12).join('\n'),

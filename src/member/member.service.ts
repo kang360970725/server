@@ -10,6 +10,7 @@ import {
   WechatBindingPlatform,
 } from '@prisma/client';
 import { createHash } from 'crypto';
+import { get as httpsGet } from 'https';
 import { PrismaService } from '../prisma/prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { WechatPayService } from '../mini/wechat-pay.service';
@@ -29,6 +30,37 @@ export class MemberService {
 
   private getDb(tx?: PrismaTx) {
     return (tx as any) ?? this.prisma;
+  }
+
+  private requestWechatJson(url: string, timeoutMs = 8000): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const request = httpsGet(url, { family: 4, timeout: timeoutMs, headers: { Accept: 'application/json' } }, (response) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        response.on('end', () => {
+          const statusCode = Number(response.statusCode || 0);
+          const raw = Buffer.concat(chunks).toString('utf8');
+          if (statusCode < 200 || statusCode >= 300) {
+            const error: any = new Error(`微信接口 HTTP ${statusCode || 'unknown'}`);
+            error.code = `WECHAT_HTTP_${statusCode || 'UNKNOWN'}`;
+            return reject(error);
+          }
+          try { resolve(JSON.parse(raw)); }
+          catch (cause: any) {
+            const error: any = new Error('微信接口返回内容无法解析');
+            error.code = 'WECHAT_INVALID_JSON';
+            error.cause = cause;
+            reject(error);
+          }
+        });
+      });
+      request.on('timeout', () => {
+        const error: any = new Error(`微信接口连接超时（${timeoutMs}ms）`);
+        error.code = 'WECHAT_REQUEST_TIMEOUT';
+        request.destroy(error);
+      });
+      request.on('error', reject);
+    });
   }
 
   private toAmount(value: Prisma.Decimal | number | string | null | undefined) {
@@ -1647,8 +1679,7 @@ export class MemberService {
     }
 
     const url = `https://api.weixin.qq.com/sns/jscode2session?appid=${encodeURIComponent(appid)}&secret=${encodeURIComponent(secret)}&js_code=${encodeURIComponent(code)}&grant_type=authorization_code`;
-    const resp = await fetch(url);
-    const data: any = await resp.json();
+    const data: any = await this.requestWechatJson(url);
     const openId = String(data?.openid || '').trim();
     if (!openId) {
       throw new BadRequestException(data?.errmsg || '微信授权失败');
