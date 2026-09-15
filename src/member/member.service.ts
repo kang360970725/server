@@ -1801,7 +1801,7 @@ export class MemberService {
     const apiBaseUrl = this.getWechatApiBaseUrl();
     if (apiBaseUrl.startsWith('http://')) {
       const phoneResp = await fetch(
-        `${apiBaseUrl}/wxa/business/getuserphonenumber?from_appid=${encodeURIComponent(appId)}`,
+        `${apiBaseUrl}/wxa/business/getuserphonenumber`,
         {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

@@ -377,13 +377,6 @@ export class MiniSubscribeMessageService {
       const query: string[] = [];
       if (accessToken) {
         query.push(`access_token=${encodeURIComponent(accessToken)}`);
-      } else if (this.isWechatCloudRun()) {
-        const appId = await this.systemConfigService.getString(
-          SystemConfigService.KEYS.WECHAT_MINI_APPID,
-          String(process.env.WECHAT_MINI_APPID || process.env.WECHAT_PAY_APPID || '').trim(),
-        );
-        if (!appId) throw new Error('缺少微信小程序 AppID，无法指定云调用主体');
-        query.push(`from_appid=${encodeURIComponent(appId)}`);
       }
       const requestQuery = query.length ? `?${query.join('&')}` : '';
       const resp = await fetch(
