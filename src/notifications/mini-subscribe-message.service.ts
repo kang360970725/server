@@ -46,6 +46,23 @@ export class MiniSubscribeMessageService {
   private readonly logger = new Logger(MiniSubscribeMessageService.name);
   private accessTokenCache: { value: string; expiresAt: number } | null = null;
 
+  private isWechatCloudRun() {
+    return String(process.env.NODE_ENV || '').toLowerCase() === 'production'
+      && Boolean(String(process.env.TCB_ENV_ID || '').trim());
+  }
+
+  private getWechatApiBaseUrl() {
+    const configured = String(process.env.WECHAT_API_BASE_URL || '').trim().replace(/\/$/, '');
+    if (configured) {
+      const parsed = new URL(configured);
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.hostname !== 'api.weixin.qq.com') {
+        throw new Error('WECHAT_API_BASE_URL 必须指向 api.weixin.qq.com');
+      }
+      return configured;
+    }
+    return this.isWechatCloudRun() ? 'http://api.weixin.qq.com' : 'https://api.weixin.qq.com';
+  }
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly systemConfigService: SystemConfigService,
@@ -202,6 +219,8 @@ export class MiniSubscribeMessageService {
   }
 
   private async getMiniAccessToken() {
+    if (this.isWechatCloudRun()) return '';
+
     const now = Date.now();
     if (this.accessTokenCache && this.accessTokenCache.expiresAt > now + 60_000) {
       return this.accessTokenCache.value;
@@ -223,7 +242,7 @@ export class MiniSubscribeMessageService {
     }
 
     const tokenResp = await fetch(
-      `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${encodeURIComponent(appId)}&secret=${encodeURIComponent(appSecret)}`,
+      `${this.getWechatApiBaseUrl()}/cgi-bin/token?grant_type=client_credential&appid=${encodeURIComponent(appId)}&secret=${encodeURIComponent(appSecret)}`,
     );
     const tokenData: any = await tokenResp.json();
     const accessToken = String(tokenData?.access_token || '').trim();
@@ -355,8 +374,9 @@ export class MiniSubscribeMessageService {
 
     try {
       const accessToken = await this.getMiniAccessToken();
+      const accessTokenQuery = accessToken ? `?access_token=${encodeURIComponent(accessToken)}` : '';
       const resp = await fetch(
-        `https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token=${encodeURIComponent(accessToken)}`,
+        `${this.getWechatApiBaseUrl()}/cgi-bin/message/subscribe/send${accessTokenQuery}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

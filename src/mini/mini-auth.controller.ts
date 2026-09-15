@@ -286,21 +286,46 @@ export class MiniAuthController {
     @Body() body: { nickname?: string; avatarUrl?: string; phoneCode?: string },
   ) {
     const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
-    const result: any = await this.memberService.completeMiniProfile(uid, body || {});
-    const finalUserId = Number(result?.userId || uid);
-    const profile = await this.authService.getUserWithPermissions(finalUserId);
-    const token =
-      finalUserId !== uid
-        ? this.authService.refreshAccessToken({
-            id: finalUserId,
-            phone: String((profile as any)?.phone || '').trim(),
-            name: String((profile as any)?.name || '').trim(),
-          }, { mini: true })
-        : null;
-    return miniOk({
-      ...profile,
-      access_token: token?.access_token,
-      merged: Boolean(result?.merged),
-    }, result?.merged ? '资料已完善，账号已合并' : '资料已完善');
+    const traceId = `wxprofile_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      const result: any = await this.memberService.completeMiniProfile(uid, body || {});
+      const finalUserId = Number(result?.userId || uid);
+      const profile = await this.authService.getUserWithPermissions(finalUserId);
+      const token =
+        finalUserId !== uid
+          ? this.authService.refreshAccessToken({
+              id: finalUserId,
+              phone: String((profile as any)?.phone || '').trim(),
+              name: String((profile as any)?.name || '').trim(),
+            }, { mini: true })
+          : null;
+      this.logger.log(JSON.stringify({
+        event: 'mini_profile_complete_success',
+        traceId,
+        userId: uid,
+        finalUserId,
+        merged: Boolean(result?.merged),
+      }));
+      return miniOk({
+        ...profile,
+        access_token: token?.access_token,
+        merged: Boolean(result?.merged),
+      }, result?.merged ? '资料已完善，账号已合并' : '资料已完善');
+    } catch (e: any) {
+      this.logger.error(JSON.stringify({
+        event: 'mini_profile_complete_failed',
+        traceId,
+        userId: uid || null,
+        hasNickname: Boolean(String(body?.nickname || '').trim()),
+        hasAvatarUrl: Boolean(String(body?.avatarUrl || '').trim()),
+        hasPhoneCode: Boolean(String(body?.phoneCode || '').trim()),
+        errorName: String(e?.name || ''),
+        errorCode: String(e?.code || e?.cause?.code || ''),
+        message: String(e?.message || '资料完善失败').slice(0, 500),
+        causeMessage: String(e?.cause?.message || '').slice(0, 500),
+        stack: String(e?.stack || '').split('\n').slice(0, 12).join('\n'),
+      }));
+      throw e;
+    }
   }
 }

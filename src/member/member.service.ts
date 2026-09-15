@@ -1798,8 +1798,23 @@ export class MemberService {
       throw new BadRequestException('未配置微信登录参数');
     }
 
+    const apiBaseUrl = this.getWechatApiBaseUrl();
+    if (apiBaseUrl.startsWith('http://')) {
+      const phoneResp = await fetch(`${apiBaseUrl}/wxa/business/getuserphonenumber`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: String(code || '').trim() }),
+      });
+      const phoneData: any = await phoneResp.json();
+      const phoneNumber = String(phoneData?.phone_info?.phoneNumber || '').trim();
+      if (!phoneResp.ok || !phoneNumber) {
+        throw new BadRequestException(phoneData?.errmsg || `获取微信手机号失败（HTTP ${phoneResp.status}）`);
+      }
+      return phoneNumber;
+    }
+
     const tokenResp = await fetch(
-      `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid=${encodeURIComponent(appId)}&secret=${encodeURIComponent(appSecret)}`,
+      `${apiBaseUrl}/cgi-bin/token?grant_type=client_credential&appid=${encodeURIComponent(appId)}&secret=${encodeURIComponent(appSecret)}`,
     );
     const tokenData: any = await tokenResp.json();
     const accessToken = String(tokenData?.access_token || '').trim();
@@ -1808,7 +1823,7 @@ export class MemberService {
     }
 
     const phoneResp = await fetch(
-      `https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token=${encodeURIComponent(accessToken)}`,
+      `${apiBaseUrl}/wxa/business/getuserphonenumber?access_token=${encodeURIComponent(accessToken)}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
