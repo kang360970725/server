@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import { UpsertSystemConfigDto } from './dto/upsert-system-config.dto';
 import { ProjectStatus, UserType } from '@prisma/client';
@@ -136,6 +136,7 @@ export class SystemConfigService implements OnModuleInit {
     COS_CDN_DOMAIN: 'cos_cdn_domain',
     ORDER_SOURCE_OPTIONS: 'order_source_options',
     ORDER_RENEWAL_BONUS_RULES: 'order_renewal_bonus_rules',
+    ORDER_ARCHIVE_INSTRUCTIONS: 'order_archive_instructions',
     MINIAPP_HOME_CONFIG: 'miniapp_home_config',
     MINIAPP_HOME_CONFIG_DRAFT: 'miniapp_home_config_draft',
     MINIAPP_HOME_CONFIG_PUBLISHED: 'miniapp_home_config_published',
@@ -677,6 +678,12 @@ export class SystemConfigService implements OnModuleInit {
         remark: '小程序协议维护列表',
       },
       {
+        key: SystemConfigService.KEYS.ORDER_ARCHIVE_INSTRUCTIONS,
+        value: '<p><strong>存单前请确认：</strong></p><ol><li>客户准确游戏ID已核对无误；</li><li>进度、时长及扣时信息填写准确；</li><li>如有异常，请在备注中说明。</li></ol>',
+        valueType: 'STRING',
+        remark: '服务者存单弹窗说明（富文本，由店长或客服主管维护）',
+      },
+      {
         key: SystemConfigService.KEYS.GOODS_CATEGORY_TREE,
         value: JSON.stringify([]),
         valueType: 'JSON',
@@ -752,6 +759,30 @@ export class SystemConfigService implements OnModuleInit {
     const row = await this.getRawByKey(key);
     if (!row || !row.enabled) return String(fallback || '').trim();
     return String(row.value || '').trim() || String(fallback || '').trim();
+  }
+
+  async getOrderArchiveInstructions() {
+    return {
+      content: await this.getString(SystemConfigService.KEYS.ORDER_ARCHIVE_INSTRUCTIONS, ''),
+    };
+  }
+
+  async upsertOrderArchiveInstructions(content: any) {
+    const value = String(content || '').trim();
+    const plainText = value.replace(/<[^>]*>/g, '').replace(/&nbsp;/gi, ' ').trim();
+    if (!plainText) throw new BadRequestException('存单说明不能为空');
+    if (value.length > 60000) throw new BadRequestException('存单说明内容过长，请控制在60000字符以内');
+    return this.prisma.systemConfig.upsert({
+      where: { key: SystemConfigService.KEYS.ORDER_ARCHIVE_INSTRUCTIONS },
+      update: { value, valueType: 'STRING', enabled: true },
+      create: {
+        key: SystemConfigService.KEYS.ORDER_ARCHIVE_INSTRUCTIONS,
+        value,
+        valueType: 'STRING',
+        enabled: true,
+        remark: '服务者存单弹窗说明（富文本，由店长或客服主管维护）',
+      },
+    });
   }
 
   async getBoolean(key: string, fallback = false) {

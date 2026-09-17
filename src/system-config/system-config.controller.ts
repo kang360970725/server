@@ -34,6 +34,20 @@ export class SystemConfigController {
     return this.service.upsert(dto);
   }
 
+  @Post('order/archive-instructions/get')
+  @UseGuards(JwtAuthGuard)
+  async getOrderArchiveInstructions() {
+    await this.service.ensureDefaults();
+    return this.service.getOrderArchiveInstructions();
+  }
+
+  @Post('order/archive-instructions/upsert')
+  @UseGuards(JwtAuthGuard, PermissionsGuard)
+  @Permissions('orders:archive-instructions:page')
+  async upsertOrderArchiveInstructions(@Body() body: { content?: string }) {
+    return this.service.upsertOrderArchiveInstructions(body?.content);
+  }
+
   @Post('miniapp/home-config/get')
   @UseGuards(JwtAuthGuard, PermissionsGuard)
   @Permissions(MINIAPP_HOME_PAGE, LEGACY_SYSTEM_ADMIN_PAGE)

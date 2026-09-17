@@ -69,6 +69,8 @@ const ORDER_SOURCE_DEFAULTS = [
     { value: 'OFFICIAL_ACCOUNT', label: '公众号下单', enabled: true },
 ];
 
+export const isValidCustomerGameId = (value: any) => /^\d+$/.test(String(value || '').trim());
+
 @Injectable()
 export class OrdersService {
     private readonly logger = new Logger(OrdersService.name);
@@ -3103,7 +3105,11 @@ export class OrdersService {
                 const pendingCustomerGameId = String(dto?.customerGameId || '').trim();
                 const requiresCustomerGameId = String((dispatch.order as any)?.customerIdentifierType || 'GAME_ID') === 'ALIAS';
                 const existingCustomerGameId = String((dispatch.order as any)?.customerGameId || '').trim();
-                if (requiresCustomerGameId && !existingCustomerGameId && !pendingCustomerGameId) {
+                const existingCustomerGameIdValid = isValidCustomerGameId(existingCustomerGameId);
+                if (pendingCustomerGameId && !isValidCustomerGameId(pendingCustomerGameId)) {
+                    throw new BadRequestException('客户准确游戏ID只能填写纯数字，请核对后重试');
+                }
+                if (requiresCustomerGameId && !existingCustomerGameIdValid && !pendingCustomerGameId) {
                     throw new BadRequestException('该订单由昵称/房间号派单，请先补齐客户准确游戏ID后再存单或结单');
                 }
 
@@ -3206,7 +3212,9 @@ export class OrdersService {
                     where: {id: dispatch.orderId},
                     data: {
                         status: dispatchStatus === 'COMPLETED' ? OrderStatus.COMPLETED_PENDING_CONFIRM : OrderStatus.ARCHIVED,
-                        ...(pendingCustomerGameId && !existingCustomerGameId ? { customerGameId: pendingCustomerGameId } : {}),
+                        ...(pendingCustomerGameId && pendingCustomerGameId !== existingCustomerGameId
+                            ? { customerGameId: pendingCustomerGameId }
+                            : {}),
                     },
                 });
 

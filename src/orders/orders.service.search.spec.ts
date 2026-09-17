@@ -1,6 +1,16 @@
-import { OrdersService } from './orders.service';
+import { isValidCustomerGameId, OrdersService } from './orders.service';
 
 describe('OrdersService customer identifier search', () => {
+  it.each([
+    ['123456789', true],
+    [' 001234 ', true],
+    ['猫猫123', false],
+    ['123-456', false],
+    ['', false],
+  ])('validates supplemented game ID %j', (value, expected) => {
+    expect(isValidCustomerGameId(value)).toBe(expected);
+  });
+
   const createService = () => {
     const prisma = {
       order: {
