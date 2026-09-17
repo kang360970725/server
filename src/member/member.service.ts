@@ -399,10 +399,10 @@ export class MemberService {
         {
           key: 'gameNickname',
           label: '游戏昵称',
-          required: false,
-          requiredLabel: '选填',
+          required: true,
+          requiredLabel: '必填',
           inputType: 'text',
-          placeholder: '请输入游戏昵称',
+          placeholder: '请输入游戏昵称，同一游戏内不可重复',
         },
       ],
     };
@@ -508,7 +508,7 @@ export class MemberService {
     });
   }
 
-  private async resolveLevelConfig(totalRechargeAmount: number, annualContribution: number, tx?: PrismaTx) {
+  private async resolveLevelConfig(totalRechargeAmount: number, _annualContribution = 0, tx?: PrismaTx) {
     const db = this.getDb(tx);
     await this.ensureDefaultLevelConfigs(tx);
     const configs = await db.memberLevelConfig.findMany({
@@ -518,10 +518,7 @@ export class MemberService {
 
     let matched = configs.find((item: any) => item.isDefault) || configs[0] || null;
     for (const config of configs) {
-      if (
-        totalRechargeAmount >= this.toAmount(config.minRechargeAmount) &&
-        annualContribution >= Number(config.minAnnualContribution || 0)
-      ) {
+      if (totalRechargeAmount >= this.toAmount(config.minRechargeAmount)) {
         matched = config;
       }
     }
@@ -878,7 +875,7 @@ export class MemberService {
     return this.toLevelView(created);
   }
 
-  private async assertLevelThresholdAdjustable(levelId: number, nextThresholdRecharge: number, nextThresholdContribution: number) {
+  private async assertLevelThresholdAdjustable(levelId: number, nextThresholdRecharge: number) {
     const current = await this.prisma.memberLevelConfig.findUnique({ where: { id: levelId } });
     if (!current) throw new NotFoundException('会员等级不存在');
 
@@ -895,10 +892,7 @@ export class MemberService {
     const matchedCount = await this.prisma.memberProfile.count({
       where: {
         levelCode: current.code,
-        OR: [
-          { totalRechargeAmount: { gte: nextThresholdRecharge } as any },
-          { annualContribution: { gte: nextThresholdContribution } },
-        ],
+        totalRechargeAmount: { gte: nextThresholdRecharge } as any,
       },
     });
     if (matchedCount > 0) {
@@ -915,7 +909,7 @@ export class MemberService {
     const nextContribution = data?.minAnnualContribution !== undefined ? Math.max(0, Math.floor(Number(data.minAnnualContribution || 0))) : Number(current.minAnnualContribution || 0);
 
     if (data?.minRechargeAmount !== undefined || data?.minAnnualContribution !== undefined) {
-      await this.assertLevelThresholdAdjustable(id, nextRecharge, nextContribution);
+      await this.assertLevelThresholdAdjustable(id, nextRecharge);
     }
 
     const updated = await this.prisma.memberLevelConfig.update({
@@ -947,6 +941,7 @@ export class MemberService {
   async refreshMemberLevels() {
     await this.ensureDefaultLevelConfigs();
     const profiles = await this.prisma.memberProfile.findMany({
+      where: { manualLevelCode: null },
       select: {
         userId: true,
         totalRechargeAmount: true,
@@ -981,7 +976,7 @@ export class MemberService {
         title: String(data?.title || `充${amount}元`).trim().slice(0, 64),
         amount,
         bonusAmount: this.round2(Number(data?.bonusAmount || 0)),
-        giftPoints: Math.max(0, Math.floor(Number(data?.giftPoints || 0))),
+        giftPoints: 0,
         giftGrowthValue: Math.max(0, Math.floor(Number(data?.giftGrowthValue || 0))),
         couponBenefits: couponBenefits.length ? (couponBenefits as any) : null,
         couponText: data?.couponText ? String(data.couponText).trim().slice(0, 120) : null,
@@ -1149,9 +1144,7 @@ export class MemberService {
 
       const profile = await tx.memberProfile.findUnique({ where: { userId: order.userId } });
       const totalRechargeAmount = this.round2(this.toAmount(profile?.totalRechargeAmount) + this.toAmount(order.payAmount));
-      const annualContribution = Number(profile?.annualContribution || 0)
-        + Math.max(0, Math.floor(this.toAmount(order.payAmount)))
-        + Math.max(0, Math.floor(Number((order as any)?.giftGrowthValue || 0)));
+      const annualContribution = Number(profile?.annualContribution || 0);
       const levelConfig = await this.resolveLevelConfig(totalRechargeAmount, annualContribution, tx as any);
       await tx.memberProfile.update({
         where: { userId: order.userId },
@@ -1159,7 +1152,7 @@ export class MemberService {
           totalRechargeAmount,
           annualContribution,
           lastRechargeAt: new Date(),
-          levelCode: String(levelConfig?.code || 'V0'),
+          levelCode: String(profile?.manualLevelCode || levelConfig?.code || 'V0'),
         },
       });
 
@@ -1170,7 +1163,7 @@ export class MemberService {
           bizType: MemberPointBizType.RECHARGE_GIFT,
           sourceType: 'MEMBER_RECHARGE_ORDER',
           sourceId: order.id,
-          remark: `充值赠送积分 ${order.giftPoints}`,
+          remark: `历史充值方案赠送积分 ${order.giftPoints}`,
         }, tx as any);
       }
 
@@ -1303,6 +1296,50 @@ export class MemberService {
         },
       });
 
+      return updated;
+    });
+  }
+
+  async adjustMemberLevel(input: { userId: number; levelCode?: string | null; remark?: string }, operatorId?: number) {
+    const userId = Number(input?.userId || 0);
+    if (!userId) throw new BadRequestException('userId 必填');
+    const requested = String(input?.levelCode || '').trim().toUpperCase();
+    const automatic = !requested || requested === 'AUTO';
+    const remark = String(input?.remark || '').trim().slice(0, 255);
+    if (!remark) throw new BadRequestException('请填写等级调整原因');
+
+    return this.prisma.$transaction(async (tx) => {
+      await this.ensureUserAssets(userId, tx as any);
+      const profile = await tx.memberProfile.findUnique({ where: { userId } });
+      if (!profile) throw new NotFoundException('会员档案不存在');
+      let nextCode = requested;
+      if (automatic) {
+        const resolved = await this.resolveLevelConfig(this.toAmount(profile.totalRechargeAmount), 0, tx as any);
+        nextCode = String(resolved?.code || 'V0');
+      } else {
+        const target = await tx.memberLevelConfig.findUnique({ where: { code: requested } });
+        if (!target || !target.enabled) throw new BadRequestException('目标会员等级不存在或未启用');
+      }
+      const updated = await tx.memberProfile.update({
+        where: { userId },
+        data: {
+          levelCode: nextCode,
+          manualLevelCode: automatic ? null : nextCode,
+          levelAdjustedAt: new Date(),
+          levelAdjustRemark: remark,
+        },
+      });
+      await tx.userLog.create({
+        data: {
+          userId: operatorId || userId,
+          action: 'ADMIN_ADJUST_MEMBER_LEVEL',
+          targetType: 'MEMBER_PROFILE',
+          targetId: Number(updated.id),
+          oldData: { levelCode: profile.levelCode, manualLevelCode: profile.manualLevelCode } as any,
+          newData: { levelCode: nextCode, manualLevelCode: automatic ? null : nextCode, memberUserId: userId } as any,
+          remark,
+        },
+      });
       return updated;
     });
   }
@@ -1440,6 +1477,7 @@ export class MemberService {
     if (!gameCategoryId) throw new BadRequestException('请选择所属游戏');
     if (!gameUniqueId) throw new BadRequestException('请输入游戏数字ID');
     if (!this.isGameNumericId(gameUniqueId)) throw new BadRequestException('请填写正确的游戏数字ID');
+    if (!gameNickname) throw new BadRequestException('请输入游戏昵称');
 
     const categories = await this.listMiniGameCategories();
     const category = categories.find((item) => item.id === gameCategoryId);
@@ -1465,6 +1503,18 @@ export class MemberService {
       );
     }
 
+    const existingNickname = await this.prisma.memberGameCard.findFirst({
+      where: { gameCategoryId, gameNickname },
+      select: { id: true, userId: true },
+    });
+    if (existingNickname) {
+      throw new BadRequestException(
+        Number(existingNickname.userId) === Number(userId)
+          ? '该游戏昵称已绑定到你的游戏名片'
+          : '该游戏昵称已被其他会员绑定',
+      );
+    }
+
     const [sameGameCount, hasPrimary] = await Promise.all([
       this.prisma.memberGameCard.count({
         where: { userId, gameCategoryId },
@@ -1480,7 +1530,7 @@ export class MemberService {
 
     const shouldSetPrimary = requestedPrimary || hasPrimary <= 0;
 
-    return this.prisma.$transaction(async (tx) => {
+    const created = await this.prisma.$transaction(async (tx) => {
       if (shouldSetPrimary) {
         await tx.memberGameCard.updateMany({
           where: { userId, isPrimary: true },
@@ -1501,6 +1551,44 @@ export class MemberService {
 
       return this.toMiniGameCardView(created);
     });
+    await this.linkMemberOrdersByGameCards(userId);
+    return created;
+  }
+
+  async linkMemberOrdersByGameCards(userId: number) {
+    const normalizedUserId = Number(userId || 0);
+    if (!normalizedUserId) return { linkedCount: 0 };
+    const cards = await this.prisma.memberGameCard.findMany({
+      where: { userId: normalizedUserId },
+      select: { gameCategoryId: true, gameUniqueId: true, gameNickname: true },
+    });
+    let linkedCount = 0;
+    for (const card of cards) {
+      const identifiers = [
+        this.normalizeGameUniqueId(card.gameUniqueId),
+        this.normalizeGameNickname(card.gameNickname),
+      ].filter(Boolean);
+      if (!identifiers.length) continue;
+      const projects = await this.prisma.gameProject.findMany({
+        where: { gameType: this.normalizeGameCategoryId(card.gameCategoryId) },
+        select: { id: true },
+      });
+      const projectIds = projects.map((item) => Number(item.id)).filter(Boolean);
+      if (!projectIds.length) continue;
+      const result = await this.prisma.order.updateMany({
+        where: {
+          customerUserId: null,
+          projectId: { in: projectIds },
+          OR: [
+            { customerGameId: { in: identifiers } },
+            { customerOriginalIdentifier: { in: identifiers } },
+          ],
+        },
+        data: { customerUserId: normalizedUserId },
+      });
+      linkedCount += Number(result.count || 0);
+    }
+    return { linkedCount };
   }
 
   async listAdminGameCards(userId: number) {

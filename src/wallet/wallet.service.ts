@@ -248,6 +248,7 @@ export class WalletService {
         tx?: PrismaTx;
     }) {
         const runner = async (tx: PrismaTx) => {
+            const cancelledHoldIds = await this.cancelInvalidFrozenHoldsTx(tx, params.userId);
             const audit = await this.inspectWalletAccountState(params.userId, tx as any);
             const preview = await this.buildWalletRepairPreviewItem(audit, { reason: params.reason });
             const repair = preview.repairPreview;
@@ -326,6 +327,7 @@ export class WalletService {
                 ...preview,
                 applied: true,
                 operatorId: params.operatorId || null,
+                cancelledHoldIds,
                 transactions: createdTxs.map((row: any) => ({
                     id: row.id,
                     direction: row.direction,
@@ -342,6 +344,74 @@ export class WalletService {
             return runner(params.tx);
         }
         return this.prisma.$transaction(async (tx) => runner(tx as any));
+    }
+
+    /**
+     * 清理不能再代表“待解冻正收益”的历史冻结单。
+     *
+     * 典型来源是冻结期内重算：旧正收益被 OUT 冲正后，历史实现既保留了
+     * 旧收益 hold，又给 OUT 冲正流水创建了 hold。钱包余额虽然能通过重放
+     * 修正，但提现资金校验仍会因 hold 与收益冻结分桶不一致而阻断。
+     */
+    private async cancelInvalidFrozenHoldsTx(tx: PrismaTx, userId: number) {
+        const frozenHolds: any[] = await (tx as any).walletHold.findMany({
+            where: { userId, status: WalletHoldStatus.FROZEN },
+            select: {
+                id: true,
+                earningTxId: true,
+                earningTx: {
+                    select: {
+                        userId: true,
+                        direction: true,
+                        status: true,
+                    },
+                },
+            },
+        });
+
+        if (!frozenHolds.length) return [] as number[];
+
+        const earningTxIds = frozenHolds
+            .map((hold: any) => Number(hold.earningTxId || 0))
+            .filter((id: number) => id > 0);
+        const reversalRows: any[] = earningTxIds.length
+            ? await (tx as any).walletTransaction.findMany({
+                where: {
+                    userId,
+                    bizType: WalletBizType.SETTLEMENT_REVERSAL,
+                    direction: WalletDirection.OUT,
+                    status: { not: WalletTxStatus.REVERSED },
+                    sourceId: { in: earningTxIds },
+                },
+                select: { sourceId: true },
+            })
+            : [];
+        const reversedSourceIds = new Set<number>(
+            reversalRows.map((row: any) => Number(row.sourceId || 0)).filter((id: number) => id > 0),
+        );
+
+        const invalidHoldIds = frozenHolds
+            .filter((hold: any) => {
+                const earningTx = hold.earningTx;
+                return !earningTx ||
+                    Number(earningTx.userId) !== userId ||
+                    String(earningTx.direction) !== WalletDirection.IN ||
+                    String(earningTx.status) !== WalletTxStatus.FROZEN ||
+                    reversedSourceIds.has(Number(hold.earningTxId));
+            })
+            .map((hold: any) => Number(hold.id));
+
+        if (!invalidHoldIds.length) return [] as number[];
+
+        await (tx as any).walletHold.updateMany({
+            where: { id: { in: invalidHoldIds }, status: WalletHoldStatus.FROZEN },
+            data: {
+                status: WalletHoldStatus.CANCELLED,
+                releasedAt: new Date(),
+            },
+        });
+
+        return invalidHoldIds;
     }
 
     private async collectWalletRepairRollbackCandidates(params?: {
@@ -3832,7 +3902,9 @@ export class WalletService {
         };
 
         const syncHold = async (earningTxId: number, status: WalletTxStatus) => {
-            if (status === 'FROZEN') {
+            // hold 只表示未来可解冻的正收益。OUT 冲正即使作用于冻结分桶，
+            // 也不能创建正数 hold，否则解冻任务会把冲正金额再次发放给用户。
+            if (status === 'FROZEN' && direction === 'IN') {
                 const resolvedUnlockAt = resolveUnlockAt();
                 return tx.walletHold.upsert({
                     where: { earningTxId },
@@ -3855,12 +3927,32 @@ export class WalletService {
             }
 
             if (existingHold) {
-                await tx.walletHold.delete({
+                await tx.walletHold.update({
                     where: { id: existingHold.id },
+                    data: {
+                        status: WalletHoldStatus.CANCELLED,
+                        releasedAt: new Date(),
+                    },
                 });
             }
 
             return null;
+        };
+
+        const cancelReversedSourceHold = async () => {
+            if (String(bizType) !== WalletBizType.SETTLEMENT_REVERSAL || direction !== WalletDirection.OUT) {
+                return;
+            }
+            await tx.walletHold.updateMany({
+                where: {
+                    earningTxId: sourceId,
+                    status: WalletHoldStatus.FROZEN,
+                },
+                data: {
+                    status: WalletHoldStatus.CANCELLED,
+                    releasedAt: new Date(),
+                },
+            });
         };
 
         let earningTxId: number;
@@ -3894,6 +3986,7 @@ export class WalletService {
 
             if (String(existedBySource.status) === String(targetStatus)) {
                 hold = await syncHold(earningTxId, targetStatus);
+                await cancelReversedSourceHold();
 
                 return {
                     reused: true,
@@ -3939,6 +4032,7 @@ export class WalletService {
             });
 
             hold = await syncHold(earningTxId, targetStatus);
+            await cancelReversedSourceHold();
         } else {
             const earningTx = await tx.walletTransaction.create({
                 data: {
@@ -3970,6 +4064,7 @@ export class WalletService {
             });
 
             hold = await syncHold(earningTxId, targetStatus);
+            await cancelReversedSourceHold();
         }
 
         return {

@@ -29,10 +29,7 @@ export class MiniOrdersController {
   private ownOrderWhere(uid: number, id?: number) {
     return {
       ...(id ? { id } : {}),
-      OR: [
-        { customerUserId: uid },
-        { dispatcherId: uid },
-      ],
+      customerUserId: uid,
     } as any;
   }
 

@@ -96,6 +96,17 @@ export class MemberController {
     });
   }
 
+  @Post('level/adjust')
+  @Permissions('users:member:level-adjust:button')
+  adjustMemberLevel(@Req() req: any, @Body() body: any) {
+    this.assertButtonPermission(req, 'users:member:level-adjust:button', '当前角色无权调整会员等级');
+    return this.memberService.adjustMemberLevel({
+      userId: Number(body?.userId || 0),
+      levelCode: body?.levelCode == null ? null : String(body.levelCode),
+      remark: body?.remark ? String(body.remark) : undefined,
+    }, Number(req?.user?.userId || 0) || undefined);
+  }
+
   @Post('recharge/manual')
   @Permissions('users:member:recharge:button')
   manualRecharge(@Req() req: any, @Body() body: any) {

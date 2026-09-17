@@ -129,7 +129,8 @@ export class OrdersService {
     }
 
     private getOrderRewardPointsByPaidAmount(paidAmount: number) {
-        return Math.max(0, Math.floor(round2(Math.max(0, Number(paidAmount || 0))) / 10));
+        void paidAmount;
+        return 0;
     }
 
     private getMemberGrowthValueByPaidAmount(paidAmount: number) {
@@ -171,7 +172,7 @@ export class OrdersService {
     private async resolveMemberLevelCodeTx(
         tx: any,
         totalRechargeAmount: number,
-        annualContribution: number,
+        _annualContribution: number,
         fallbackLevelCode = 'NONE',
     ) {
         const configs = await tx.memberLevelConfig.findMany({
@@ -183,10 +184,7 @@ export class OrdersService {
 
         let matched = configs.find((item: any) => item.isDefault) || configs[0];
         for (const config of configs) {
-            if (
-                totalRechargeAmount >= Number(config?.minRechargeAmount || 0) &&
-                annualContribution >= Number(config?.minAnnualContribution || 0)
-            ) {
+            if (totalRechargeAmount >= Number(config?.minRechargeAmount || 0)) {
                 matched = config;
             }
         }
@@ -200,19 +198,20 @@ export class OrdersService {
         const benefitBaseAmount = this.resolveMemberBenefitBaseAmount(order);
         if (benefitBaseAmount <= 0) return;
 
-        const growthValue = this.getMemberGrowthValueByPaidAmount(benefitBaseAmount);
+        const growthValue = 0;
         const earnedPoints = this.getOrderRewardPointsByPaidAmount(benefitBaseAmount);
 
         const currentProfile = await tx.memberProfile.findUnique({ where: { userId } });
         const totalRechargeAmount = Number(currentProfile?.totalRechargeAmount || 0);
         const nextTotalConsumeAmount = round2(Number(currentProfile?.totalConsumeAmount || 0) + benefitBaseAmount);
-        const nextAnnualContribution = Number(currentProfile?.annualContribution || 0) + growthValue;
-        const nextLevelCode = await this.resolveMemberLevelCodeTx(
+        const nextAnnualContribution = Number(currentProfile?.annualContribution || 0);
+        const automaticLevelCode = await this.resolveMemberLevelCodeTx(
             tx,
             totalRechargeAmount,
             nextAnnualContribution,
             String(currentProfile?.levelCode || 'NONE'),
         );
+        const nextLevelCode = String(currentProfile?.manualLevelCode || automaticLevelCode);
 
         if (currentProfile) {
             await tx.memberProfile.update({
@@ -289,20 +288,21 @@ export class OrdersService {
         ));
         if (benefitBaseAmount <= 0) return;
 
-        const growthValue = this.getMemberGrowthValueByPaidAmount(benefitBaseAmount);
+        const growthValue = 0;
         const earnedPoints = this.getOrderRewardPointsByPaidAmount(benefitBaseAmount);
 
         const currentProfile = await tx.memberProfile.findUnique({ where: { userId } });
         if (currentProfile) {
             const totalRechargeAmount = Number(currentProfile?.totalRechargeAmount || 0);
             const nextTotalConsumeAmount = Math.max(0, round2(Number(currentProfile?.totalConsumeAmount || 0) - benefitBaseAmount));
-            const nextAnnualContribution = Math.max(0, Number(currentProfile?.annualContribution || 0) - growthValue);
-            const nextLevelCode = await this.resolveMemberLevelCodeTx(
+            const nextAnnualContribution = Number(currentProfile?.annualContribution || 0);
+            const automaticLevelCode = await this.resolveMemberLevelCodeTx(
                 tx,
                 totalRechargeAmount,
                 nextAnnualContribution,
                 String(currentProfile?.levelCode || 'NONE'),
             );
+            const nextLevelCode = String(currentProfile?.manualLevelCode || automaticLevelCode);
 
             await tx.memberProfile.update({
                 where: { userId },
@@ -4448,7 +4448,7 @@ export class OrdersService {
                 groupStatusAfter: 'REVERSED',
             });
 
-            // ✅ 5) 退款回滚会员成长值与订单奖励积分
+            // ✅ 5) 退款回滚订单奖励积分（会员等级仅由储值或后台人工调整）
             await this.rollbackOrderMemberBenefitsTx(tx, orderWithPayment, refundAmount);
 
             // 退款后及时同步订单财务快照，避免原成本继续占用月度利润。
@@ -4525,10 +4525,6 @@ export class OrdersService {
                 where: { userId: Number((order as any)?.customerUserId || 0) },
                 select: { availablePoints: true },
             });
-            const profile = await this.prisma.memberProfile.findUnique({
-                where: { userId: Number((order as any)?.customerUserId || 0) },
-                select: { annualContribution: true },
-            });
             const benefitRollbackAmount = round2(Math.min(
                 this.resolveMemberBenefitBaseAmount(order),
                 Number(refundAmount || 0) >= Number((order as any)?.paidAmount || 0)
@@ -4536,13 +4532,12 @@ export class OrdersService {
                     : Number(refundAmount || 0),
             ));
             const points = this.getOrderRewardPointsByPaidAmount(benefitRollbackAmount);
-            const growthValue = this.getMemberGrowthValueByPaidAmount(benefitRollbackAmount);
             if (Number((order as any)?.customerUserId || 0) > 0) {
                 await this.miniSubscribeMessageService.pushMemberAssetMessage({
                     userId: Number((order as any).customerUserId),
                     assetType: '退款回退资产',
-                    changeAmount: `积分-${points} / 成长值-${growthValue}`,
-                    balanceAfter: `积分余额 ${Number(pointAccount?.availablePoints || 0)} / 成长值 ${Number(profile?.annualContribution || 0)}`,
+                    changeAmount: `积分-${points}`,
+                    balanceAfter: `积分余额 ${Number(pointAccount?.availablePoints || 0)}`,
                     targetType: 'ORDER',
                     targetId: Number(orderId),
                     pageQuery: { id: Number(orderId) },
@@ -6262,22 +6257,17 @@ export class OrdersService {
                         where: { userId: Number(orderAfter.customerUserId) },
                         select: { availablePoints: true },
                     });
-                    const profile = await this.prisma.memberProfile.findUnique({
-                        where: { userId: Number(orderAfter.customerUserId) },
-                        select: { annualContribution: true },
-                    });
                     const benefitBaseAmount = this.resolveMemberBenefitBaseAmount(orderAfter);
                     const points = this.getOrderRewardPointsByPaidAmount(benefitBaseAmount);
-                    const growthValue = this.getMemberGrowthValueByPaidAmount(benefitBaseAmount);
                     await this.miniSubscribeMessageService.pushMemberAssetMessage({
                         userId: Number(orderAfter.customerUserId),
                         assetType: '订单奖励已到账',
-                        changeAmount: `积分+${points} / 成长值+${growthValue}`,
-                        balanceAfter: `积分余额 ${Number(pointAccount?.availablePoints || 0)} / 成长值 ${Number(profile?.annualContribution || 0)}`,
+                        changeAmount: `积分+${points}`,
+                        balanceAfter: `积分余额 ${Number(pointAccount?.availablePoints || 0)}`,
                         targetType: 'ORDER',
                         targetId: Number(orderAfter.id),
                         pageQuery: { id: orderAfter.id },
-                        remark: `订单完成后已发放积分与会员成长值`,
+                        remark: `订单完成后已发放积分`,
                     });
                 }
             } catch (e: any) {

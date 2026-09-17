@@ -369,7 +369,7 @@ export class SystemConfigService implements OnModuleInit {
           memberAsset: {
             enabled: false,
             title: '会员资产变动提醒',
-            description: '用于提醒积分到账、成长值变动、退款回退等会员资产变化',
+            description: '用于提醒积分到账、退款回退和钱包资产变化',
             templateId: '',
             page: '/pages/membership/index',
             fields: {

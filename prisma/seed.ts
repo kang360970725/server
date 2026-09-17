@@ -114,7 +114,7 @@ async function main() {
         { key: 'users:member:delete:button', name: '删除会员', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:member:page' },
         { key: 'users:member:recharge:button', name: '会员手动充值', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:member:page' },
         { key: 'users:member:coupon-grant:button', name: '会员手动发券', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:member:page' },
-        { key: 'users:member:growth-adjust:button', name: '调整会员成长值', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:member:page' },
+        { key: 'users:member:level-adjust:button', name: '调整会员等级', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:member:page' },
         { key: 'users:member:game-card:button', name: '维护会员游戏名片', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:member:page' },
         { key: 'users:staff:create:button', name: '新增服务者', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:staff:page' },
         { key: 'users:staff:edit:button', name: '编辑服务者资料', module: 'users', type: PermissionType.BUTTON, parentKey: 'users:staff:page' },

@@ -735,6 +735,9 @@ model MemberProfile {
   totalRechargeAmount Decimal   @default(0.00) @db.Decimal(12, 2)
   totalConsumeAmount  Decimal   @default(0.00) @db.Decimal(12, 2)
   annualContribution  Int       @default(0)
+  manualLevelCode     String?   @db.VarChar(32)
+  levelAdjustedAt     DateTime?
+  levelAdjustRemark   String?   @db.VarChar(255)
   lastRechargeAt      DateTime?
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -757,6 +760,7 @@ model MemberGameCard {
   user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([gameCategoryId, gameUniqueId], map: "uniq_member_game_card_category_unique_id")
+  @@unique([gameCategoryId, gameNickname], map: "uniq_member_game_card_category_nickname")
   @@index([userId, gameCategoryId], map: "idx_member_game_card_user_category")
   @@index([userId, isPrimary], map: "idx_member_game_card_user_primary")
   @@map("member_game_cards")
