@@ -40,6 +40,21 @@ function dayStart(value = new Date()) {
 export class MiniEngagementService {
   constructor(private readonly prisma: PrismaService, private readonly memberService: MemberService, private readonly systemConfig: SystemConfigService) {}
 
+  private async assertProfileCompleted(userId: number) {
+    if (!userId) throw new BadRequestException('请先完成微信授权登录');
+    const user = await this.prisma.user.findUnique({
+      where: {id: userId},
+      select: {name: true, avatar: true, phone: true},
+    });
+    const completed = Boolean(
+      user?.name?.trim()
+      && user?.avatar?.trim()
+      && user?.phone?.trim()
+      && !user.phone.startsWith('wx_'),
+    );
+    if (!completed) throw new BadRequestException('请先完善昵称、头像和手机号');
+  }
+
   private async metrics(userId: number) {
     const today = dayStart();
     const [user, gameCards, favoriteCount, views, checkins, todayFavorite, orderCount, staffCard, profile] = await Promise.all([
@@ -72,9 +87,10 @@ export class MiniEngagementService {
 
   async dashboard(userId: number) {
     const m = await this.metrics(userId);
+    const profileReady = Boolean(m.user?.name && m.user?.avatar && m.user?.phone && !m.user.phone.startsWith('wx_'));
     const progress: Record<string, number> = {
-      WELCOME: 1,
-      PROFILE_READY: m.user?.name && m.user?.avatar && m.user?.phone && !m.user.phone.startsWith('wx_') ? 1 : 0,
+      WELCOME: profileReady ? 1 : 0,
+      PROFILE_READY: profileReady ? 1 : 0,
       GAME_PLAYER: m.gameCards.length,
       EXPLORER: m.uniqueViews,
       COLLECTOR: m.favoriteCount,
@@ -86,13 +102,15 @@ export class MiniEngagementService {
       DAWN_CALLER: m.dawnCheckin ? 1 : 0, NIGHT_WATCHER: m.nightCheckin ? 1 : 0,
       SERVICE_CREATOR: m.staffCard?.status === 'APPROVED' ? 1 : 0,
     };
-    const unlockedCodes = achievements.filter((x) => progress[x.code] >= x.target).map((x) => x.code);
+    const unlockedCodes = profileReady
+      ? achievements.filter((x) => progress[x.code] >= x.target).map((x) => x.code)
+      : [];
     await Promise.all(unlockedCodes.map((code) => this.prisma.memberAchievement.upsert({
       where: {userId_code: {userId, code}}, update: {}, create: {userId, code},
     })));
     const unlocked = await this.prisma.memberAchievement.findMany({where: {userId}, orderBy: {unlockedAt: 'desc'}});
     const unlockedMap = new Map(unlocked.map((x) => [x.code, x.unlockedAt]));
-    const achievementList = achievements.map((item: any) => { const isUnlocked=unlockedMap.has(item.code); return {...item,name:item.hidden&&!isUnlocked?'隐藏成就':item.name,description:item.hidden&&!isUnlocked?'达成神秘条件后揭晓':item.description,icon:item.hidden&&!isUnlocked?'❔':item.icon,progress:item.hidden&&!isUnlocked?0:Math.min(progress[item.code]||0,item.target),unlocked:isUnlocked,unlockedAt:unlockedMap.get(item.code)||null}; });
+    const achievementList = achievements.map((item: any) => { const isUnlocked=profileReady&&unlockedMap.has(item.code); return {...item,name:item.hidden&&!isUnlocked?'隐藏成就':item.name,description:item.hidden&&!isUnlocked?'达成神秘条件后揭晓':item.description,icon:item.hidden&&!isUnlocked?'❔':item.icon,progress:profileReady?(item.hidden&&!isUnlocked?0:Math.min(progress[item.code]||0,item.target)):0,unlocked:isUnlocked,unlockedAt:isUnlocked?unlockedMap.get(item.code)||null:null}; });
     const signInPoints=Math.max(0,Math.min(100,Math.floor(Number(await this.systemConfig.getNumber(SystemConfigService.KEYS.MINI_MEMBER_SIGNIN_POINTS,1)||0))));
     const tasks = [
       {code: 'CHECKIN', name: '每日签到', description: '签到点亮今日足迹', completed: m.checkedToday, action: '/pages/checkin/index', reward: signInPoints},
@@ -111,6 +129,7 @@ export class MiniEngagementService {
   }
 
   async checkin(userId: number) {
+    await this.assertProfileCompleted(userId);
     const today = dayStart();
     const existing = await this.prisma.memberCheckin.findUnique({where: {userId_checkinDate: {userId, checkinDate: today}}});
     if (!existing) {
@@ -123,6 +142,7 @@ export class MiniEngagementService {
   }
 
   async recordView(userId: number, projectId: number) {
+    await this.assertProfileCompleted(userId);
     await this.assertProject(projectId);
     const viewedOn = dayStart();
     await this.prisma.memberProjectView.upsert({
@@ -137,6 +157,7 @@ export class MiniEngagementService {
   }
 
   async toggleFavorite(userId: number, projectId: number) {
+    await this.assertProfileCompleted(userId);
     await this.assertProject(projectId);
     const existing = await this.prisma.memberProjectFavorite.findUnique({where: {userId_projectId: {userId, projectId}}});
     if (existing) await this.prisma.memberProjectFavorite.delete({where: {id: existing.id}});

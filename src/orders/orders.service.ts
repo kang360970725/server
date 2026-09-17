@@ -2308,7 +2308,21 @@ export class OrdersService {
         if (query.projectId) where.projectId = query.projectId;
         if (query.status) where.status = query.status as any;
         if (query.dispatcherId) where.dispatcherId = query.dispatcherId;
-        if (query.customerGameId) where.customerGameId = { contains: query.customerGameId };
+        if (query.customerGameId) {
+            const customerIdentifier = String(query.customerGameId).trim();
+            if (customerIdentifier) {
+                // 补录准确 ID 后仍保留原昵称/房间号，查询同时覆盖两个字段。
+                where.AND = [
+                    ...(where.AND || []),
+                    {
+                        OR: [
+                            { customerGameId: { contains: customerIdentifier } },
+                            { customerOriginalIdentifier: { contains: customerIdentifier } },
+                        ],
+                    },
+                ];
+            }
+        }
         if (query.orderMonth) {
             const monthText = String(query.orderMonth || '').trim();
             const match = monthText.match(/^(\d{4})-(\d{2})$/);
@@ -2334,6 +2348,10 @@ export class OrdersService {
             where.OR = [
                 // 1) 订单号
                 { autoSerial: { contains: keyword } },
+
+                // 客户最初提供的昵称/房间号，以及后续补录的准确游戏 ID
+                { customerOriginalIdentifier: { contains: keyword } },
+                { customerGameId: { contains: keyword } },
 
                 // 2) 客服（dispatcher）
                 { dispatcher: { name: { contains: keyword } } },
