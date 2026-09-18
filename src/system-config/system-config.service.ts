@@ -49,6 +49,10 @@ export class SystemConfigService implements OnModuleInit {
     return {
       consultText: String(config?.consultText || '详询客服').trim() || '详询客服',
       qrCodeUrl: String(config?.qrCodeUrl || '').trim(),
+      wechatCustomerServiceEnabled: config?.wechatCustomerServiceEnabled === true || String(config?.wechatCustomerServiceEnabled || '').toLowerCase() === 'true',
+      wechatCustomerServiceCorpId: String(config?.wechatCustomerServiceCorpId || '').trim(),
+      wechatCustomerServiceUrl: String(config?.wechatCustomerServiceUrl || '').trim(),
+      customerServiceCardImage: String(config?.customerServiceCardImage || '').trim(),
       wechatReviewMode: config?.wechatReviewMode === true || String(config?.wechatReviewMode || '').toLowerCase() === 'true',
       remark: String(config?.remark || '').trim(),
     };
@@ -822,6 +826,10 @@ export class SystemConfigService implements OnModuleInit {
     const fallback = {
       consultText: '详询客服',
       qrCodeUrl: '',
+      wechatCustomerServiceEnabled: false,
+      wechatCustomerServiceCorpId: '',
+      wechatCustomerServiceUrl: '',
+      customerServiceCardImage: '',
       wechatReviewMode: false,
       remark: '',
     };

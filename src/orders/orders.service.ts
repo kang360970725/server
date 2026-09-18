@@ -3955,12 +3955,26 @@ export class OrdersService {
                 finalPayableAmount: true,
                 status: true,
                 createdAt: true,
+                updatedAt: true,
+                dispatches: {
+                    where: { completedAt: { not: null } },
+                    orderBy: { completedAt: 'desc' },
+                    take: 1,
+                    select: { completedAt: true },
+                },
                 customerUser: { select: { id: true, name: true, phone: true } },
                 latestPayment: { select: { channel: true, status: true, amount: true, paidAt: true } },
                 project: { select: { id: true, name: true, coverImage: true } },
             },
         });
         if (!order) throw new NotFoundException('订单不存在');
+
+        const completedAt = order?.dispatches?.[0]?.completedAt || order?.updatedAt || null;
+        const completedAtMs = completedAt ? new Date(completedAt).getTime() : 0;
+        const afterSalesDeadlineMs = completedAtMs > 0 ? completedAtMs + 24 * 60 * 60 * 1000 : 0;
+        if (!afterSalesDeadlineMs || Date.now() >= afterSalesDeadlineMs) {
+            throw new BadRequestException('订单售后申请期限为服务结束后24小时，当前已超过申请期限');
+        }
 
         const allowed = new Set(['COMPLETED', 'REVIEWED', 'WAIT_AFTERSALE', 'AFTERSALE_DONE']);
         const currentStatus = String(order.status || '').toUpperCase();

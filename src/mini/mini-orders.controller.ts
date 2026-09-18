@@ -33,6 +33,64 @@ export class MiniOrdersController {
     } as any;
   }
 
+  private maskContactValue(value: unknown) {
+    const raw = String(value ?? '').trim();
+    if (!raw) return raw;
+
+    const digits = raw.replace(/\D/g, '');
+    if (digits.length >= 7) {
+      const prefixLength = digits.length === 11 ? 3 : Math.min(3, Math.max(2, digits.length - 6));
+      const suffixLength = Math.min(4, digits.length - prefixLength);
+      const prefix = digits.slice(0, prefixLength);
+      const suffix = digits.slice(-suffixLength);
+      return `${prefix}${'*'.repeat(Math.max(4, digits.length - prefixLength - suffixLength))}${suffix}`;
+    }
+    if (raw.length <= 2) return '*'.repeat(raw.length);
+    return `${raw.slice(0, 1)}${'*'.repeat(Math.max(2, raw.length - 2))}${raw.slice(-1)}`;
+  }
+
+  /**
+   * 小程序订单接口只能返回脱敏联系方式。统一在服务端响应出口处理，
+   * 避免前端遗漏某个嵌套的派单、服务者或历史参与人结构。
+   */
+  private sanitizeMiniOrderPayload<T>(value: T): T {
+    if (Array.isArray(value)) {
+      return value.map((item) => this.sanitizeMiniOrderPayload(item)) as T;
+    }
+    if (!value || typeof value !== 'object') return value;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return value;
+
+    const result: Record<string, unknown> = {};
+    Object.entries(value as Record<string, unknown>).forEach(([key, child]) => {
+      const normalizedKey = key.toLowerCase();
+      if (normalizedKey === 'phone' || normalizedKey === 'mobile' || normalizedKey === 'contactphone') {
+        result[key] = this.maskContactValue(child);
+        return;
+      }
+      result[key] = this.sanitizeMiniOrderPayload(child);
+    });
+    return result as T;
+  }
+
+  private buildAfterSalesPolicy(order: any) {
+    const completedTimes = (Array.isArray(order?.dispatches) ? order.dispatches : [])
+      .map((dispatch: any) => dispatch?.completedAt ? new Date(dispatch.completedAt).getTime() : 0)
+      .filter((timestamp: number) => Number.isFinite(timestamp) && timestamp > 0);
+    const fallbackTime = order?.updatedAt ? new Date(order.updatedAt).getTime() : 0;
+    const completedAtMs = completedTimes.length ? Math.max(...completedTimes) : fallbackTime;
+    const deadlineMs = completedAtMs > 0 ? completedAtMs + 24 * 60 * 60 * 1000 : 0;
+    const status = String(order?.status || '').trim().toUpperCase();
+    const statusEligible = status === 'COMPLETED' || status === 'REVIEWED';
+    return {
+      windowHours: 24,
+      completedAt: completedAtMs > 0 ? new Date(completedAtMs).toISOString() : null,
+      deadlineAt: deadlineMs > 0 ? new Date(deadlineMs).toISOString() : null,
+      eligible: statusEligible && deadlineMs > Date.now(),
+      expired: deadlineMs > 0 && deadlineMs <= Date.now(),
+    };
+  }
+
   private async resolveMiniOrderPlayerIds(body: any) {
     const rawPlayerIds = Array.isArray(body?.playerIds) ? body.playerIds : [];
     if (rawPlayerIds.length > 1) {
@@ -243,7 +301,6 @@ export class MiniOrdersController {
               id: true,
               status: true,
               participants: {
-                where: { isActive: true },
                 orderBy: { id: 'asc' },
                 select: {
                   id: true,
@@ -288,7 +345,7 @@ export class MiniOrdersController {
     });
 
     return miniOk({
-      list: normalizedList,
+      list: this.sanitizeMiniOrderPayload(normalizedList),
       total,
       page,
       limit,
@@ -334,7 +391,10 @@ export class MiniOrdersController {
     if (!own) throw new BadRequestException('订单不存在或无权限访问');
 
     const detail = await this.ordersService.getOrderDetail(id);
-    return miniOk(detail);
+    return miniOk(this.sanitizeMiniOrderPayload({
+      ...detail,
+      afterSalesPolicy: this.buildAfterSalesPolicy(detail),
+    }));
   }
 
   @Post('create')
