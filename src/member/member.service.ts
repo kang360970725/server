@@ -1902,7 +1902,10 @@ export class MemberService {
       this.logger.log(JSON.stringify({ event: 'wechat_phone_exchange_started', ...diagnostic }));
 
       try {
-        const phoneResp = await fetch(`${apiBaseUrl}${endpoint}`, {
+        // 微信云托管资源复用场景必须声明 code 的来源小程序，否则云代理会
+        // 使用环境默认主体的 access_token，进而返回 48001 api unauthorized。
+        const requestUrl = `${apiBaseUrl}${endpoint}?from_appid=${encodeURIComponent(appId)}`;
+        const phoneResp = await fetch(requestUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ code: String(code || '').trim() }),

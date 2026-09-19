@@ -3,6 +3,7 @@ import { CouponTemplateStatus, UserCouponStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { miniOk } from './mini.response';
 import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { Public } from '../auth/decorators/public.decorator';
 
 @ApiTags('mini-coupons')
 @ApiBearerAuth()
@@ -11,6 +12,7 @@ export class MiniCouponsController {
   constructor(private readonly prisma: PrismaService) {}
 
   @Get('center')
+  @Public()
   @ApiOperation({ summary: '领券中心列表' })
   @ApiQuery({ name: 'page', required: false, example: 1 })
   @ApiQuery({ name: 'limit', required: false, example: 20 })

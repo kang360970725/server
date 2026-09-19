@@ -20,6 +20,13 @@ export class MiniMemberController {
     return miniOk(await this.memberService.getMiniOverview(userId));
   }
 
+  @Public()
+  @Get('levels')
+  async levels() {
+    const levels = await this.memberService.listLevelConfigs();
+    return miniOk((Array.isArray(levels) ? levels : []).filter((item: any) => item?.enabled !== false));
+  }
+
   @Get('recharge-plans')
   async rechargePlans() {
     const plans = await this.memberService.listRechargePlans(true);
