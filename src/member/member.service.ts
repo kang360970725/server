@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
   CouponTemplateStatus,
   MemberPointBizType,
@@ -22,6 +22,8 @@ type PrismaTx = PrismaClient | Prisma.TransactionClient;
 
 @Injectable()
 export class MemberService {
+  private readonly logger = new Logger(MemberService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly walletService: WalletService,
@@ -1888,20 +1890,77 @@ export class MemberService {
 
     const apiBaseUrl = this.getWechatApiBaseUrl();
     if (apiBaseUrl.startsWith('http://')) {
-      const phoneResp = await fetch(
-        `${apiBaseUrl}/wxa/business/getuserphonenumber`,
-        {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: String(code || '').trim() }),
-        },
-      );
-      const phoneData: any = await phoneResp.json();
-      const phoneNumber = String(phoneData?.phone_info?.phoneNumber || '').trim();
-      if (!phoneResp.ok || !phoneNumber) {
-        throw new BadRequestException(phoneData?.errmsg || `获取微信手机号失败（HTTP ${phoneResp.status}）`);
+      const endpoint = '/wxa/business/getuserphonenumber';
+      const startedAt = Date.now();
+      const diagnostic = {
+        mode: 'wechat_cloud_proxy',
+        endpoint,
+        tcbEnvIdSuffix: String(process.env.TCB_ENV_ID || '').trim().slice(-8),
+        appIdSuffix: appId.slice(-6),
+        hasCode: Boolean(String(code || '').trim()),
+      };
+      this.logger.log(JSON.stringify({ event: 'wechat_phone_exchange_started', ...diagnostic }));
+
+      try {
+        const phoneResp = await fetch(`${apiBaseUrl}${endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: String(code || '').trim() }),
+        });
+        const responseText = await phoneResp.text();
+        let phoneData: any = {};
+        try {
+          phoneData = responseText ? JSON.parse(responseText) : {};
+        } catch {
+          phoneData = {};
+        }
+
+        const phoneNumber = String(phoneData?.phone_info?.phoneNumber || '').trim();
+        if (!phoneResp.ok || !phoneNumber) {
+          const rawMessage = String(phoneData?.errmsg || '').trim();
+          const ridMatch = rawMessage.match(/\brid:\s*([^\s]+)/i);
+          this.logger.error(JSON.stringify({
+            event: 'wechat_phone_exchange_failed',
+            ...diagnostic,
+            durationMs: Date.now() - startedAt,
+            httpStatus: phoneResp.status,
+            wechatErrCode: phoneData?.errcode ?? null,
+            wechatErrMsg: rawMessage || null,
+            requestId: ridMatch?.[1] || null,
+            responseContentType: phoneResp.headers.get('content-type') || null,
+            responsePreview: rawMessage ? null : responseText.slice(0, 300),
+          }));
+
+          if (/api unauthorized/i.test(rawMessage)) {
+            throw new BadRequestException(
+              `微信手机号接口未获当前云托管环境授权，请配置 ${endpoint}${ridMatch?.[1] ? `（RID: ${ridMatch[1]}）` : ''}`,
+            );
+          }
+          throw new BadRequestException(rawMessage || `获取微信手机号失败（HTTP ${phoneResp.status}）`);
+        }
+
+        this.logger.log(JSON.stringify({
+          event: 'wechat_phone_exchange_succeeded',
+          ...diagnostic,
+          durationMs: Date.now() - startedAt,
+          httpStatus: phoneResp.status,
+        }));
+        return phoneNumber;
+      } catch (error: any) {
+        if (!(error instanceof BadRequestException)) {
+          this.logger.error(JSON.stringify({
+            event: 'wechat_phone_exchange_request_error',
+            ...diagnostic,
+            durationMs: Date.now() - startedAt,
+            errorName: String(error?.name || error?.constructor?.name || 'Error'),
+            errorCode: String(error?.code || ''),
+            message: String(error?.message || '微信手机号接口请求失败').slice(0, 500),
+            causeCode: String(error?.cause?.code || ''),
+            causeMessage: String(error?.cause?.message || '').slice(0, 500),
+          }));
+        }
+        throw error;
       }
-      return phoneNumber;
     }
 
     const tokenResp = await fetch(
