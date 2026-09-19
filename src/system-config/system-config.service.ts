@@ -1,10 +1,12 @@
-import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import { UpsertSystemConfigDto } from './dto/upsert-system-config.dto';
 import { ProjectStatus, UserType } from '@prisma/client';
 
 @Injectable()
 export class SystemConfigService implements OnModuleInit {
+  private readonly logger = new Logger(SystemConfigService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   private normalizeMiniappHomeConfig(config: any) {
@@ -707,19 +709,23 @@ export class SystemConfigService implements OnModuleInit {
       },
     ] as const;
 
-    for (const item of defaults) {
-      await this.prisma.systemConfig.upsert({
-        where: { key: item.key },
-        update: {},
-        create: {
-          key: item.key,
-          value: item.value,
-          valueType: item.valueType as any,
-          remark: item.remark,
-          enabled: true,
-        },
-      });
-    }
+    const startedAt = Date.now();
+    const result = await this.prisma.systemConfig.createMany({
+      data: defaults.map((item) => ({
+        key: item.key,
+        value: item.value,
+        valueType: item.valueType as any,
+        remark: item.remark,
+        enabled: true,
+      })),
+      skipDuplicates: true,
+    });
+    this.logger.log(JSON.stringify({
+      event: 'system_config_defaults_ready',
+      durationMs: Date.now() - startedAt,
+      defaultCount: defaults.length,
+      createdCount: Number(result?.count || 0),
+    }));
   }
 
   async listAll() {
