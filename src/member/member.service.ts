@@ -940,6 +940,28 @@ export class MemberService {
     return this.toLevelView(updated);
   }
 
+  async deleteLevelConfig(id: number) {
+    await this.ensureDefaultLevelConfigs();
+    return this.prisma.$transaction(async (tx) => {
+      const current = await tx.memberLevelConfig.findUnique({ where: { id } });
+      if (!current) throw new NotFoundException('会员等级不存在');
+      if (current.isDefault) throw new BadRequestException('默认会员等级不允许删除，请先设置其他默认等级');
+
+      const [currentLevelUsers, manualLevelUsers] = await Promise.all([
+        tx.memberProfile.count({ where: { levelCode: current.code } }),
+        tx.memberProfile.count({ where: { manualLevelCode: current.code } }),
+      ]);
+      if (currentLevelUsers > 0 || manualLevelUsers > 0) {
+        throw new BadRequestException(
+          `该等级已关联会员，无法删除（当前等级 ${currentLevelUsers} 人，手动指定 ${manualLevelUsers} 人）`,
+        );
+      }
+
+      await tx.memberLevelConfig.delete({ where: { id: current.id } });
+      return { success: true, id: current.id, code: current.code };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }
+
   async refreshMemberLevels() {
     await this.ensureDefaultLevelConfigs();
     const profiles = await this.prisma.memberProfile.findMany({

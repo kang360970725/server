@@ -1,4 +1,4 @@
-import { Body, Controller, ForbiddenException, Get, Param, ParseIntPipe, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Delete, ForbiddenException, Get, Param, ParseIntPipe, Patch, Post, Query, Req } from '@nestjs/common';
 import { MemberService } from './member.service';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 
@@ -59,6 +59,12 @@ export class MemberController {
   @Patch('levels/:id')
   updateLevelConfig(@Param('id', ParseIntPipe) id: number, @Body() body: any) {
     return this.memberService.updateLevelConfig(id, body || {});
+  }
+
+  @Delete('levels/:id')
+  @Permissions('wallet:member-levels:page')
+  deleteLevelConfig(@Param('id', ParseIntPipe) id: number) {
+    return this.memberService.deleteLevelConfig(id);
   }
 
   @Post('levels/refresh')

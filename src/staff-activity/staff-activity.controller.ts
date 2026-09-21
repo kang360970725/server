@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Post, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Post, Req, UseGuards } from '@nestjs/common';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { StaffActivityService } from './staff-activity.service';
@@ -6,6 +6,19 @@ import { StaffActivityService } from './staff-activity.service';
 @Controller('staff-activity')
 export class StaffActivityController {
   constructor(private readonly service: StaffActivityService) {}
+
+  private assertCanRejectLeave(req: any) {
+    const user = req?.user || {};
+    const userType = String(user?.userType || '').trim().toUpperCase();
+    const roleName = String(user?.roleName || '').trim().toUpperCase();
+    const permissions = Array.isArray(user?.permissions) ? user.permissions : [];
+    if (
+      ['SUPER_ADMIN', 'ADMIN'].includes(userType) ||
+      ['SUPER_ADMIN', 'CS_MANAGER', 'STORE_MANAGER'].includes(roleName) ||
+      permissions.includes('users:staff:leave-reject:button')
+    ) return;
+    throw new ForbiddenException('仅店长或管理员可以驳回请假');
+  }
 
   @Post('my/overview')
   myOverview(@Req() req: any) {
@@ -48,6 +61,26 @@ export class StaffActivityController {
   @Permissions('users:staff:page')
   adminStats() {
     return this.service.getTodayStats();
+  }
+
+  @Post('admin/leaves/reject-preview')
+  @UseGuards(PermissionsGuard)
+  @Permissions('users:staff:page', 'users:staff:leave-reject:button')
+  rejectLeavePreview(@Req() req: any, @Body() body: { leaveId: number }) {
+    this.assertCanRejectLeave(req);
+    return this.service.getRejectLeavePreview(Number(body?.leaveId));
+  }
+
+  @Post('admin/leaves/reject')
+  @UseGuards(PermissionsGuard)
+  @Permissions('users:staff:page', 'users:staff:leave-reject:button')
+  rejectLeave(@Req() req: any, @Body() body: { leaveId: number; reason: string }) {
+    this.assertCanRejectLeave(req);
+    return this.service.rejectLeave({
+      leaveId: Number(body?.leaveId),
+      reviewerId: Number(req?.user?.userId ?? req?.user?.id),
+      reason: body?.reason,
+    });
   }
 
   @Post('admin/set-enabled')

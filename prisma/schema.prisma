@@ -2100,20 +2100,24 @@ enum StaffLeaveStatus {
   COMPLETED
   EARLY_ENDED
   CANCELED
+  REJECTED
 }
 
 model StaffLeave {
-  id          Int              @id @default(autoincrement())
-  userId      Int
-  days        Int
-  startAt     DateTime
-  endAt       DateTime
-  actualEndAt DateTime?
-  status      StaffLeaveStatus @default(SCHEDULED)
-  reason      String?          @db.VarChar(255)
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
-  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id           Int              @id @default(autoincrement())
+  userId       Int
+  days         Int
+  startAt      DateTime
+  endAt        DateTime
+  actualEndAt  DateTime?
+  status       StaffLeaveStatus @default(SCHEDULED)
+  reason       String?          @db.VarChar(255)
+  rejectedAt   DateTime?
+  rejectedBy   Int?
+  rejectReason String?          @db.VarChar(255)
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, status, startAt, endAt], map: "idx_staff_leave_user_status_time")
   @@index([status, startAt, endAt], map: "idx_staff_leave_status_time")

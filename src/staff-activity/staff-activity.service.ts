@@ -1,7 +1,8 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
-import { DepositBizType, PenaltyFundBizType, PlayerWorkStatus, StaffEmploymentStatus, StaffLeaveStatus, UserStatus, UserType, WalletBizType, WalletDirection, WalletTxStatus } from '@prisma/client';
+import { DepositBizType, NotificationType, PenaltyFundBizType, PlayerWorkStatus, StaffEmploymentStatus, StaffLeaveStatus, UserStatus, UserType, WalletBizType, WalletDirection, WalletTxStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -30,7 +31,10 @@ export const shouldRefreshActivityAfterSettlement = (forceByAdmin: boolean) => !
 @Injectable()
 export class StaffActivityService {
   private readonly logger = new Logger(StaffActivityService.name);
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notificationsService?: NotificationsService,
+  ) {}
 
   private rateFor(baseAt: Date, scheduledAt: Date) {
     const hours = Math.max(0, Math.floor((scheduledAt.getTime() - baseAt.getTime()) / HOUR));
@@ -75,6 +79,151 @@ export class StaffActivityService {
       this.prisma.staffLeave.count({ where }),
     ]);
     return { data, total, page, limit };
+  }
+
+  private buildRejectEstimate(user: any, account: any, now = new Date()) {
+    const baseAt = user?.activityLastCompletedAt || user?.activityAssessmentStartedAt || user?.createdAt || now;
+    const nextChargeAt = user?.activityNextChargeAt || getInitialActivityNextChargeAt(
+      user?.activityLastCompletedAt || null,
+      user?.activityAssessmentStartedAt || user?.createdAt || now,
+    );
+    const inactivityHours = Math.max(0, Math.floor((now.getTime() - new Date(baseAt).getTime()) / HOUR));
+    const scheduledInactivityHours = Math.max(0, Math.floor((new Date(nextChargeAt).getTime() - new Date(baseAt).getTime()) / HOUR));
+    const estimatedPenaltyAmount = getActivityPenaltyAmount(scheduledInactivityHours);
+    const assessmentActive = Boolean(user?.activityAssessmentEnabled) &&
+      !isActivityAssessmentPaused(Boolean(user?.activityTimerPaused)) &&
+      isActivityAssessmentEmploymentStatus(user?.staffEmploymentStatus) &&
+      isActivityAssessmentAccountStatus(user?.status);
+    const willChargeImmediately = assessmentActive && new Date(nextChargeAt).getTime() <= now.getTime();
+    const available = Math.max(0, Number(account?.availableBalance || 0));
+    const deposit = Math.max(0, Number(account?.depositBalance || 0));
+    const estimatedAvailableDeducted = Math.min(estimatedPenaltyAmount, available);
+    const estimatedDepositDeducted = Math.min(estimatedPenaltyAmount - estimatedAvailableDeducted, deposit);
+
+    return {
+      baseAt: new Date(baseAt),
+      inactivityHours,
+      inactivityDays: Math.floor(inactivityHours / 24),
+      inactivityRemainingHours: inactivityHours % 24,
+      nextChargeAt: new Date(nextChargeAt),
+      estimatedPenaltyAmount,
+      estimatedAvailableDeducted,
+      estimatedDepositDeducted,
+      estimatedUnpaidAmount: Math.max(0, estimatedPenaltyAmount - estimatedAvailableDeducted - estimatedDepositDeducted),
+      mayAutoExit: shouldAutoExitForActivity(available, deposit, estimatedPenaltyAmount),
+      assessmentActive,
+      timerPaused: Boolean(user?.activityTimerPaused),
+      willChargeImmediately,
+    };
+  }
+
+  private async loadRejectContext(db: any, leaveId: number, now = new Date()) {
+    if (!Number.isInteger(leaveId) || leaveId <= 0) throw new BadRequestException('请假记录ID无效');
+    const leave = await db.staffLeave.findUnique({
+      where: { id: leaveId },
+      include: { user: true },
+    });
+    if (!leave) throw new NotFoundException('请假记录不存在');
+    if (![StaffLeaveStatus.SCHEDULED, StaffLeaveStatus.ACTIVE].includes(leave.status)) {
+      throw new BadRequestException('仅待生效或请假中的记录可以驳回');
+    }
+    const account = await db.walletAccount.findUnique({ where: { userId: leave.userId } });
+    return {
+      leave,
+      estimate: this.buildRejectEstimate(leave.user, account, now),
+    };
+  }
+
+  async getRejectLeavePreview(leaveId: number, now = new Date()) {
+    const context = await this.loadRejectContext(this.prisma, leaveId, now);
+    return {
+      leave: context.leave,
+      estimate: context.estimate,
+    };
+  }
+
+  async rejectLeave(input: { leaveId: number; reviewerId: number; reason?: string }, now = new Date()) {
+    const reason = String(input?.reason || '').trim();
+    if (!reason) throw new BadRequestException('请填写驳回原因');
+    if (reason.length > 255) throw new BadRequestException('驳回原因不能超过255字');
+
+    const result = await this.prisma.$transaction(async tx => {
+      await tx.$queryRawUnsafe('SELECT id FROM `staff_leaves` WHERE id = ? FOR UPDATE', input.leaveId);
+      const context = await this.loadRejectContext(tx, input.leaveId, now);
+      const { leave, estimate } = context;
+
+      const updated = await tx.staffLeave.update({
+        where: { id: leave.id },
+        data: {
+          status: StaffLeaveStatus.REJECTED,
+          actualEndAt: now,
+          rejectedAt: now,
+          rejectedBy: input.reviewerId,
+          rejectReason: reason,
+        },
+        include: { user: { select: { id: true, name: true, phone: true } } },
+      });
+
+      if (leave.user.activityAssessmentEnabled && !leave.user.activityNextChargeAt) {
+        await tx.user.update({
+          where: { id: leave.userId },
+          data: { activityNextChargeAt: estimate.nextChargeAt },
+        });
+      }
+
+      await tx.userLog.create({
+        data: {
+          userId: input.reviewerId,
+          action: 'STAFF_LEAVE_REJECT',
+          targetType: 'STAFF_LEAVE',
+          targetId: leave.id,
+          oldData: { status: leave.status, userId: leave.userId } as any,
+          newData: {
+            status: StaffLeaveStatus.REJECTED,
+            rejectReason: reason,
+            activityNextChargeAt: estimate.nextChargeAt,
+            willChargeImmediately: estimate.willChargeImmediately,
+            estimatedPenaltyAmount: estimate.estimatedPenaltyAmount,
+          } as any,
+          remark: `驳回服务者请假：${reason}`,
+        },
+      });
+
+      const idleText = `${estimate.inactivityDays}天${estimate.inactivityRemainingHours}小时`;
+      const chargeText = estimate.willChargeImmediately
+        ? `当前已到扣款时间，预计下一次检查扣款${estimate.estimatedPenaltyAmount}元。`
+        : `下次预计考核时间为${estimate.nextChargeAt.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}。`;
+      const notification = {
+        title: '请假申请已被驳回',
+        content: `驳回原因：${reason}。活跃度考核已恢复，当前已空闲${idleText}。${chargeText}`,
+      };
+      await tx.userNotification.create({
+        data: {
+          userId: leave.userId,
+          type: NotificationType.SYSTEM_ANNOUNCEMENT,
+          title: notification.title,
+          content: notification.content,
+          payload: { leaveId: leave.id, route: '/staff/leave', ...estimate } as any,
+        },
+      });
+
+      return { leave: updated, estimate, notification };
+    });
+
+    try {
+      await this.notificationsService?.pushRealtimeToUsers({
+        userIds: [result.leave.userId],
+        type: 'STAFF_LEAVE_REJECTED',
+        title: result.notification.title,
+        content: result.notification.content,
+        route: '/staff/leave',
+        payload: { leaveId: result.leave.id, force: true, ...result.estimate },
+      });
+    } catch (error: any) {
+      this.logger.warn(`staff leave rejection notification failed leave=${result.leave.id}: ${error?.message || error}`);
+    }
+
+    return result;
   }
 
   async listCharges(input: any) {
