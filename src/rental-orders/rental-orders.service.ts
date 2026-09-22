@@ -3,7 +3,7 @@ import { randomInt } from 'node:crypto';
 import { PrismaService } from '../prisma.service';
 import { WalletService } from '../wallet/wallet.service';
 import { inspectWalletFundingTx } from '../wallet/wallet-funding.util';
-import { CreateAdminRentalOrderDto, ReconcileAdminRentalOrderDto, SettleAdminRentalOrderDto } from './dto/admin-rental-order.dto';
+import { BatchReconcileAdminRentalOrderDto, CreateAdminRentalOrderDto, ReconcileAdminRentalOrderDto, SettleAdminRentalOrderDto } from './dto/admin-rental-order.dto';
 import { dateOnly, money, settleAmounts, shanghaiDay, startDateFor, textField, todayRange } from './rental-order.rules';
 
 class RentalSerialCollision extends Error {}
@@ -162,6 +162,80 @@ export class RentalOrdersService {
     });
   }
 
+  private parseBatchReconcileText(textInput: any) {
+    const text = String(textInput || '').trim();
+    if (!text) throw new BadRequestException('请粘贴号源编号及金额');
+    const rows = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line, index) => {
+      const matched = line.match(/^([^\s：:]+)\s*(?:金额\s*)?[：:]\s*(?:¥|￥)?\s*(\d+(?:\.\d{1,2})?)\s*$/i);
+      if (!matched) return { lineNo: index + 1, raw: line, accountSourceNo: '', amount: null, parseError: '格式无法识别' };
+      return { lineNo: index + 1, raw: line, accountSourceNo: matched[1].trim().toUpperCase(), amount: money(matched[2], '核销金额'), parseError: null };
+    });
+    if (rows.length > 200) throw new BadRequestException('单次最多处理200条');
+    return rows;
+  }
+
+  private async buildBatchReconcilePreview(input: BatchReconcileAdminRentalOrderDto, db: any = this.prisma) {
+    const inputs = this.parseBatchReconcileText(input.text);
+    const sourceNos = [...new Set(inputs.map((item) => item.accountSourceNo).filter(Boolean))];
+    const orders = sourceNos.length ? await db.rentalOrder.findMany({
+      where: { accountSourceNo: { in: sourceNos } },
+      orderBy: { id: 'desc' },
+    }) : [];
+    const groups = new Map<string, any[]>();
+    for (const order of orders) {
+      const key = String(order.accountSourceNo || '').trim().toUpperCase();
+      groups.set(key, [...(groups.get(key) || []), order]);
+    }
+    const duplicateInputs = new Set<string>();
+    const seen = new Set<string>();
+    for (const item of inputs) {
+      if (!item.accountSourceNo) continue;
+      if (seen.has(item.accountSourceNo)) duplicateInputs.add(item.accountSourceNo);
+      seen.add(item.accountSourceNo);
+    }
+    const rows = inputs.map((item) => {
+      if (item.parseError) return { ...item, status: 'INVALID_FORMAT', message: item.parseError };
+      if (duplicateInputs.has(item.accountSourceNo)) return { ...item, status: 'DUPLICATE_INPUT', message: '输入中号源编号重复' };
+      const candidates = groups.get(item.accountSourceNo) || [];
+      if (!candidates.length) return { ...item, status: 'NOT_FOUND', message: '未找到对应订单' };
+      if (candidates.length > 1) return { ...item, status: 'AMBIGUOUS', message: `找到${candidates.length}笔同号源订单，请单独核对` };
+      const order = candidates[0];
+      const base = { ...item, orderId: order.id, serialNo: order.serialNo, orderAmount: Number(order.actualAmount), orderStatus: order.status, reconciledAt: order.reconciledAt, version: order.version };
+      if (order.reconciledAt) return { ...base, status: 'ALREADY_RECONCILED', message: '该订单已核销' };
+      if (order.status !== 'SETTLED') return { ...base, status: 'NOT_SETTLED', message: '订单尚未结算' };
+      if (Math.round(Number(order.actualAmount) * 100) !== Math.round(Number(item.amount) * 100)) return { ...base, status: 'AMOUNT_MISMATCH', message: '输入金额与订单实际费用不一致' };
+      return { ...base, status: 'MATCHED', message: '可核销' };
+    });
+    return { rows, matchedCount: rows.filter((item) => item.status === 'MATCHED').length, totalCount: rows.length };
+  }
+
+  previewBatchReconcile(input: BatchReconcileAdminRentalOrderDto) {
+    return this.buildBatchReconcilePreview(input);
+  }
+
+  async batchReconcile(input: BatchReconcileAdminRentalOrderDto, operatorId: number) {
+    return this.prisma.$transaction(async (tx) => {
+      const preview = await this.buildBatchReconcilePreview(input, tx);
+      const matched: any[] = preview.rows.filter((item: any) => item.status === 'MATCHED');
+      if (!matched.length) throw new BadRequestException('没有可核销的匹配订单');
+      if (matched.length !== preview.totalCount) throw new BadRequestException('存在未匹配或异常数据，请修正后再确认核销');
+      const now = new Date();
+      const remark = textField(input.remark, '核销备注', false, 2000) || '批量核销：商行垫付款已实际转付';
+      for (const item of matched) {
+        const order = await this.lockOrder(tx, this.id(item.orderId));
+        if (order.reconciledAt || order.status !== 'SETTLED' || order.version !== item.version) {
+          throw new ConflictException(`号源 ${item.accountSourceNo} 状态已变化，请重新查询`);
+        }
+        const updated = await tx.rentalOrder.update({ where: { id: order.id }, data: {
+          reconciledBy: operatorId, reconciledAt: now, reconciliationAmount: Number(order.actualAmount),
+          reconciliationRemark: remark, version: { increment: 1 },
+        } });
+        await this.log(tx, operatorId, updated, 'RENTAL_ORDER_BATCH_RECONCILE');
+      }
+      return { reconciledCount: matched.length, reconciledAt: now, rows: matched };
+    });
+  }
+
   async detail(id: number) {
     const order = await this.prisma.rentalOrder.findUnique({ where: { id: this.id(id) } });
     if (!order) throw new NotFoundException('租号订单不存在');
@@ -186,10 +260,12 @@ export class RentalOrdersService {
       where.status = query.status;
     }
     if (query.staffUserId) where.staffUserId = this.id(query.staffUserId);
-    if (query.reconciled === 'true' || query.reconciled === 'false') {
+    const reconciledFilter = query.reconciled === true || query.reconciled === 'true'
+      ? true : query.reconciled === false || query.reconciled === 'false' ? false : undefined;
+    if (reconciledFilter !== undefined) {
       // 核销只属于已结算订单，“待核销”不应把所有进行中订单一并查出。
       where.status = 'SETTLED';
-      where.reconciledAt = query.reconciled === 'true' ? { not: null } : null;
+      where.reconciledAt = reconciledFilter ? { not: null } : null;
     }
     if (query.search) {
       const search = textField(query.search, '查询内容', false, 100);
@@ -206,7 +282,7 @@ export class RentalOrdersService {
         tx.rentalOrder.aggregate({ where: { createdAt: todayRange(), status: { not: 'VOIDED' } }, _count: true, _sum: { prepaidAmount: true, depositAmount: true } }),
         tx.rentalOrder.aggregate({ where: { settledAt: todayRange(), status: 'SETTLED' }, _count: true, _sum: { actualAmount: true, ownerSettlementAmount: true } }),
       ]);
-      return { list, total, page, limit, serverNow: new Date().toISOString(), stats: {
+      return { list: list.map((item) => ({ ...item, reconciled: Boolean(item.reconciledAt) })), total, page, limit, serverNow: new Date().toISOString(), stats: {
         date: shanghaiDay(), createdCount: created._count, rentalAmount: Number(created._sum.prepaidAmount || 0),
         depositAmount: Number(created._sum.depositAmount || 0), settledCount: settled._count,
         staffSettlementAmount: Number(settled._sum.actualAmount || 0), ownerSettlementAmount: Number(settled._sum.ownerSettlementAmount || 0),

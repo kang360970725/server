@@ -169,4 +169,15 @@ describe('RentalOrdersService', () => {
     prisma.rentalOrder.findUnique.mockResolvedValue({ id: 1, createdBy: 3, settledBy: null, voidedBy: 5 });
     expect(await new RentalOrdersService(prisma, {} as any).detail(1)).toMatchObject({ createdByName: '工作人员甲', settledByName: null, voidedByName: '未知操作人' });
   });
+  it('parses pasted source numbers and only matches exact settled amounts', async () => {
+    const prisma: any = { rentalOrder: { findMany: jest.fn().mockResolvedValue([
+      { id: 1, serialNo: 'LMSH100001', accountSourceNo: 'LM0131', actualAmount: 558.6, status: 'SETTLED', reconciledAt: null, version: 2 },
+      { id: 2, serialNo: 'LMSH100002', accountSourceNo: 'LM0133', actualAmount: 300, status: 'SETTLED', reconciledAt: null, version: 1 },
+    ]) } };
+    const result = await new RentalOrdersService(prisma, {} as any).previewBatchReconcile({
+      text: 'LM0131 金额：558.6\nLM0133 金额：345.9',
+    });
+    expect(result.matchedCount).toBe(1);
+    expect(result.rows.map((row: any) => row.status)).toEqual(['MATCHED', 'AMOUNT_MISMATCH']);
+  });
 });

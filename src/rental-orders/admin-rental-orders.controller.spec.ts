@@ -7,7 +7,10 @@ describe('admin rental permissions', () => {
   it.each([
     ['list', 'rental-orders:page'], ['detail', 'rental-orders:page'],
     ['create', 'rental-orders:create:button'], ['settle', 'rental-orders:settle:button'],
-    ['reconcile', 'rental-orders:reconcile:button'], ['void', 'rental-orders:void:button'],
+    ['reconcile', 'rental-orders:reconcile:button'],
+    ['previewBatchReconcile', 'rental-orders:reconcile:button'],
+    ['confirmBatchReconcile', 'rental-orders:reconcile:button'],
+    ['void', 'rental-orders:void:button'],
   ])('%s requires its own permission', (method, permission) => {
     const handler = AdminRentalOrdersController.prototype[method];
     expect(Reflect.getMetadata('permissions', handler)).toEqual([permission]);

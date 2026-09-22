@@ -799,6 +799,7 @@ export class UsersService {
     anonymousOnly?: string | boolean;
     includeStaffMembers?: string | boolean;
     memberState?: string;
+    memberLevelCode?: string;
     scene?: string;
     actor?: { userType?: UserType; permissions?: string[]; id?: number; userId?: number };
 
@@ -814,6 +815,7 @@ export class UsersService {
       anonymousOnly,
       includeStaffMembers,
       memberState,
+      memberLevelCode,
       scene,
       actor,
       loginInactiveDays,
@@ -945,6 +947,10 @@ export class UsersService {
     }
 
     if (sceneKey === 'MEMBER') {
+      const normalizedMemberLevelCode = String(memberLevelCode || '').trim().toUpperCase();
+      if (normalizedMemberLevelCode) {
+        AND.push({ memberProfile: { is: { levelCode: normalizedMemberLevelCode } } });
+      }
       const normalizedMemberState = String(memberState || 'ALL').trim().toUpperCase();
       const activeMemberWhere = {
         OR: [

@@ -153,6 +153,51 @@ export class OrdersService {
         return actualPaidAmount;
     }
 
+    private async recalculateMemberTotalConsumeTx(tx: any, userIdInput: number) {
+        const userId = Number(userIdInput || 0);
+        if (!userId) return 0;
+        const orders = await tx.order.findMany({
+            where: {
+                customerUserId: userId,
+                isGifted: false,
+                OR: [{ isPaid: true }, { payStatus: OrderPayStatus.SUCCESS }],
+            },
+            select: {
+                paidAmount: true,
+                finalPayableAmount: true,
+                receivableAmount: true,
+                isTestPayment: true,
+                refunds: {
+                    where: { status: { in: ['SUCCESS', 'MANUAL_REQUIRED'] } },
+                    select: { amount: true },
+                },
+            },
+        });
+        const totalConsumeAmount = round2(orders.reduce((sum: number, item: any) => {
+            const paidBase = this.resolveMemberBenefitBaseAmount(item);
+            const refunded = round2((item.refunds || []).reduce(
+                (refundSum: number, refund: any) => refundSum + Math.max(0, Number(refund?.amount || 0)),
+                0,
+            ));
+            return sum + Math.max(0, round2(paidBase - refunded));
+        }, 0));
+        const currentProfile = await tx.memberProfile.findUnique({ where: { userId } });
+        if (currentProfile) {
+            await tx.memberProfile.update({ where: { userId }, data: { totalConsumeAmount } });
+        } else {
+            await tx.memberProfile.create({
+                data: {
+                    userId,
+                    memberCode: await this.generateMemberCodeTx(tx),
+                    levelCode: 'V0',
+                    totalConsumeAmount,
+                    annualContribution: 0,
+                },
+            });
+        }
+        return totalConsumeAmount;
+    }
+
     private buildOrderBalanceReceiptMeta(params: {
         deductedAmount: number;
         balanceAfter: number;
@@ -201,38 +246,7 @@ export class OrdersService {
         const growthValue = 0;
         const earnedPoints = this.getOrderRewardPointsByPaidAmount(benefitBaseAmount);
 
-        const currentProfile = await tx.memberProfile.findUnique({ where: { userId } });
-        const totalRechargeAmount = Number(currentProfile?.totalRechargeAmount || 0);
-        const nextTotalConsumeAmount = round2(Number(currentProfile?.totalConsumeAmount || 0) + benefitBaseAmount);
-        const nextAnnualContribution = Number(currentProfile?.annualContribution || 0);
-        const automaticLevelCode = await this.resolveMemberLevelCodeTx(
-            tx,
-            totalRechargeAmount,
-            nextAnnualContribution,
-            String(currentProfile?.levelCode || 'NONE'),
-        );
-        const nextLevelCode = String(currentProfile?.manualLevelCode || automaticLevelCode);
-
-        if (currentProfile) {
-            await tx.memberProfile.update({
-                where: { userId },
-                data: {
-                    totalConsumeAmount: nextTotalConsumeAmount,
-                    annualContribution: nextAnnualContribution,
-                    levelCode: nextLevelCode,
-                },
-            });
-        } else {
-            await tx.memberProfile.create({
-                data: {
-                    userId,
-                    memberCode: await this.generateMemberCodeTx(tx),
-                    levelCode: nextLevelCode,
-                    totalConsumeAmount: nextTotalConsumeAmount,
-                    annualContribution: nextAnnualContribution,
-                },
-            });
-        }
+        await this.recalculateMemberTotalConsumeTx(tx, userId);
 
         if (earnedPoints <= 0) return;
 
@@ -291,28 +305,7 @@ export class OrdersService {
         const growthValue = 0;
         const earnedPoints = this.getOrderRewardPointsByPaidAmount(benefitBaseAmount);
 
-        const currentProfile = await tx.memberProfile.findUnique({ where: { userId } });
-        if (currentProfile) {
-            const totalRechargeAmount = Number(currentProfile?.totalRechargeAmount || 0);
-            const nextTotalConsumeAmount = Math.max(0, round2(Number(currentProfile?.totalConsumeAmount || 0) - benefitBaseAmount));
-            const nextAnnualContribution = Number(currentProfile?.annualContribution || 0);
-            const automaticLevelCode = await this.resolveMemberLevelCodeTx(
-                tx,
-                totalRechargeAmount,
-                nextAnnualContribution,
-                String(currentProfile?.levelCode || 'NONE'),
-            );
-            const nextLevelCode = String(currentProfile?.manualLevelCode || automaticLevelCode);
-
-            await tx.memberProfile.update({
-                where: { userId },
-                data: {
-                    totalConsumeAmount: nextTotalConsumeAmount,
-                    annualContribution: nextAnnualContribution,
-                    levelCode: nextLevelCode,
-                },
-            });
-        }
+        await this.recalculateMemberTotalConsumeTx(tx, userId);
 
         if (earnedPoints <= 0) return;
 
@@ -1615,12 +1608,14 @@ export class OrdersService {
      * 用途：列表/统计快速分组，不替代明细表。
      */
     private resolveDiscountType(input: {
+        memberDiscountAmount: number;
         couponDiscountAmount: number;
         activityDiscountAmount: number;
         giftDiscountAmount: number;
         manualAdjustAmount: number;
     }): string {
         const types: string[] = [];
+        if (input.memberDiscountAmount > 0) types.push('MEMBER');
         if (input.couponDiscountAmount > 0) types.push('COUPON');
         if (input.activityDiscountAmount > 0) types.push('ACTIVITY');
         if (input.giftDiscountAmount > 0) types.push('GIFT');
@@ -1628,6 +1623,132 @@ export class OrdersService {
         if (!types.length) return 'NONE';
         if (types.length === 1) return types[0];
         return 'MIXED';
+    }
+
+    private async resolveMemberOrderDiscount(input: { customerUserId?: number | null; project: any; originalAmount: number }) {
+        const userId = Number(input.customerUserId || 0);
+        if (!userId || input.originalAmount <= 0) return { amount: 0, rate: 1, levelCode: null, benefitId: null };
+        const profile = await this.prisma.memberProfile.findUnique({ where: { userId } });
+        if (!profile?.levelCode) return { amount: 0, rate: 1, levelCode: null, benefitId: null };
+        const level = await this.prisma.memberLevelConfig.findUnique({ where: { code: profile.levelCode } });
+        if (!level) return { amount: 0, rate: 1, levelCode: profile.levelCode, benefitId: null };
+        const rule = await (this.prisma as any).memberLevelBenefit.findFirst({
+            where: {
+                levelId: level.id,
+                enabled: true,
+                grantMode: 'AUTOMATIC_DISCOUNT',
+                benefit: { enabled: true, category: 'ORDER_DISCOUNT' },
+            },
+            include: { benefit: true },
+            orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+        });
+        if (!rule) return { amount: 0, rate: 1, levelCode: profile.levelCode, benefitId: null };
+        const config = rule.config && typeof rule.config === 'object' ? rule.config : {};
+        const excludedProjectTypes = Array.isArray(config.excludedProjectTypes)
+            ? config.excludedProjectTypes.map((item: any) => String(item || '').trim().toUpperCase()) : [];
+        const excludedCategoryIds = Array.isArray(config.excludedCategoryIds)
+            ? config.excludedCategoryIds.map((item: any) => String(item || '').trim()) : [];
+        if (excludedProjectTypes.includes(String(input.project?.type || '').trim().toUpperCase()) ||
+            excludedCategoryIds.includes(String(input.project?.category || '').trim())) {
+            return { amount: 0, rate: 1, levelCode: profile.levelCode, benefitId: Number(rule.benefitId) };
+        }
+        let rate = Number(config.rate ?? config.discountRate ?? 1);
+        if (rate > 1) rate /= 100;
+        if (!(rate > 0 && rate <= 1)) return { amount: 0, rate: 1, levelCode: profile.levelCode, benefitId: Number(rule.benefitId) };
+        return {
+            amount: this.toAmount2(input.originalAmount * (1 - rate)),
+            rate,
+            levelCode: profile.levelCode,
+            benefitId: Number(rule.benefitId),
+        };
+    }
+
+    private async allocateMemberBalanceLotsTx(tx: any, input: { userId: number; amount: number; sourceType: string; sourceId: number }) {
+        let remaining = this.toAmount2(input.amount);
+        if (remaining <= 0) return { allocated: 0, untracked: 0 };
+        const lots = await tx.memberBalanceLot.findMany({
+            where: {
+                userId: input.userId,
+                status: 'ACTIVE',
+                OR: [{ principalRemaining: { gt: 0 } }, { bonusRemaining: { gt: 0 } }],
+            },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        });
+        const allocations = new Map<number, { lot: any; principal: number; bonus: number }>();
+        for (const lot of lots) {
+            if (remaining <= 0) break;
+            const used = Math.min(remaining, this.toAmount2(lot.principalRemaining));
+            if (used <= 0) continue;
+            allocations.set(lot.id, { lot, principal: used, bonus: 0 });
+            remaining = this.toAmount2(remaining - used);
+        }
+        for (const lot of lots) {
+            if (remaining <= 0) break;
+            const used = Math.min(remaining, this.toAmount2(lot.bonusRemaining));
+            if (used <= 0) continue;
+            const current = allocations.get(lot.id) || { lot, principal: 0, bonus: 0 };
+            current.bonus = used;
+            allocations.set(lot.id, current);
+            remaining = this.toAmount2(remaining - used);
+        }
+        for (const row of allocations.values()) {
+            await tx.memberBalanceLot.update({
+                where: { id: row.lot.id },
+                data: {
+                    principalRemaining: { decrement: row.principal },
+                    bonusRemaining: { decrement: row.bonus },
+                },
+            });
+            await tx.memberBalanceLotUsage.create({
+                data: {
+                    lotId: row.lot.id,
+                    userId: input.userId,
+                    sourceType: input.sourceType,
+                    sourceId: input.sourceId,
+                    principalAmount: row.principal,
+                    bonusAmount: row.bonus,
+                },
+            });
+        }
+        return { allocated: this.toAmount2(input.amount - remaining), untracked: remaining };
+    }
+
+    private async reverseMemberBalanceLotsTx(tx: any, paymentId?: number | null, refundAmountInput?: number) {
+        const sourceId = Number(paymentId || 0);
+        if (!sourceId) return;
+        let remaining = this.toAmount2(Math.max(0, Number(refundAmountInput || 0)));
+        if (remaining <= 0) return;
+        const usages = await tx.memberBalanceLotUsage.findMany({
+            where: { sourceType: 'ORDER_PAYMENT', sourceId, status: 'CONSUMED' },
+            orderBy: { id: 'asc' },
+        });
+        for (const usage of usages) {
+            if (remaining <= 0) break;
+            const principalRestore = Math.min(remaining, this.toAmount2(usage.principalAmount));
+            remaining = this.toAmount2(remaining - principalRestore);
+            const bonusRestore = Math.min(remaining, this.toAmount2(usage.bonusAmount));
+            remaining = this.toAmount2(remaining - bonusRestore);
+            if (principalRestore <= 0 && bonusRestore <= 0) continue;
+            const principalLeft = this.toAmount2(usage.principalAmount - principalRestore);
+            const bonusLeft = this.toAmount2(usage.bonusAmount - bonusRestore);
+            await tx.memberBalanceLot.update({
+                where: { id: usage.lotId },
+                data: {
+                    principalRemaining: { increment: principalRestore },
+                    bonusRemaining: { increment: bonusRestore },
+                    status: 'ACTIVE',
+                },
+            });
+            await tx.memberBalanceLotUsage.update({
+                where: { id: usage.id },
+                data: {
+                    principalAmount: principalLeft,
+                    bonusAmount: bonusLeft,
+                    status: principalLeft <= 0 && bonusLeft <= 0 ? 'REVERSED' : 'CONSUMED',
+                    reversedAt: principalLeft <= 0 && bonusLeft <= 0 ? new Date() : null,
+                },
+            });
+        }
     }
 
     private isAutoRefundSupportedChannel(channel?: string | null) {
@@ -2007,9 +2128,16 @@ export class OrdersService {
         const isPaid = dto.isGifted ? false : (useMemberBalancePayment ? true : Boolean(dto.isPaid));
 
         // 统一优惠汇总（先接基础口径，便于后续无缝接优惠券/活动）
+        const memberDiscount = isGifted ? { amount: 0, rate: 1, levelCode: null, benefitId: null } : await this.resolveMemberOrderDiscount({
+            customerUserId,
+            project,
+            originalAmount,
+        });
+        const memberDiscountAmount = this.toAmount2(memberDiscount.amount);
+        const couponBaseAmount = this.toAmount2(Math.max(0, originalAmount - memberDiscountAmount));
         const couponDiscountAmount = selectedUserCoupon
             ? await this.calcCouponDiscount({
-                originalAmount,
+                originalAmount: couponBaseAmount,
                 projectId: project.id,
                 template: selectedUserCoupon.template,
             })
@@ -2018,7 +2146,7 @@ export class OrdersService {
         const manualAdjustAmount = this.toAmount2(Number(dto.manualAdjustAmount ?? 0));
         const giftDiscountAmount = this.toAmount2(giftedAmount);
         const discountAmount = this.toAmount2(
-            couponDiscountAmount + activityDiscountAmount + giftDiscountAmount + manualAdjustAmount,
+            memberDiscountAmount + couponDiscountAmount + activityDiscountAmount + giftDiscountAmount + manualAdjustAmount,
         );
         const finalPayableAmount = this.toAmount2(Math.max(0, originalAmount - discountAmount));
         const effectivePaidAmount = selectedUserCoupon
@@ -2028,6 +2156,7 @@ export class OrdersService {
             ? finalPayableAmount
             : effectiveSettlementAmount;
         const discountType = this.resolveDiscountType({
+            memberDiscountAmount,
             couponDiscountAmount,
             activityDiscountAmount,
             giftDiscountAmount,
@@ -2048,6 +2177,15 @@ export class OrdersService {
             amount: number;
             description: string;
         }> = [];
+        if (memberDiscountAmount > 0) {
+            discountDetails.push({
+                sourceType: 'MEMBER',
+                sourceId: memberDiscount.benefitId || undefined,
+                ruleType: 'LEVEL_DISCOUNT',
+                amount: memberDiscountAmount,
+                description: `${memberDiscount.levelCode || '会员'}会员折扣（${Math.round(memberDiscount.rate * 100)}折）`,
+            });
+        }
         if (couponDiscountAmount > 0) {
             discountDetails.push({
                 sourceType: 'COUPON',
@@ -2120,6 +2258,7 @@ export class OrdersService {
                     originalAmount,
                     discountAmount,
                     couponDiscountAmount,
+                    memberDiscountAmount,
                     activityDiscountAmount,
                     giftDiscountAmount,
                     manualAdjustAmount,
@@ -2199,6 +2338,13 @@ export class OrdersService {
                             }) as any,
                         },
                         select: { id: true },
+                    });
+
+                    await this.allocateMemberBalanceLotsTx(tx, {
+                        userId: Number(customerUserId),
+                        amount: consumeAmount,
+                        sourceType: 'ORDER_PAYMENT',
+                        sourceId: Number(payment.id),
                     });
 
                     await tx.walletTransaction.create({
@@ -4464,6 +4610,7 @@ export class OrdersService {
 
             // ✅ 5) 退款回滚订单奖励积分（会员等级仅由储值或后台人工调整）
             await this.rollbackOrderMemberBenefitsTx(tx, orderWithPayment, refundAmount);
+            await this.reverseMemberBalanceLotsTx(tx, (orderWithPayment as any)?.latestPaymentId, refundAmount);
 
             // 退款后及时同步订单财务快照，避免原成本继续占用月度利润。
             await this.rebuildPerformanceAndFinanceByOrderId({ tx, orderId });

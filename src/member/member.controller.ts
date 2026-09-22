@@ -109,8 +109,36 @@ export class MemberController {
     return this.memberService.adjustMemberLevel({
       userId: Number(body?.userId || 0),
       levelCode: body?.levelCode == null ? null : String(body.levelCode),
+      sourceRechargeOrderId: body?.sourceRechargeOrderId ? Number(body.sourceRechargeOrderId) : undefined,
       remark: body?.remark ? String(body.remark) : undefined,
     }, Number(req?.user?.userId || 0) || undefined);
+  }
+
+  @Get('recharge-orders/:id/refund-preview')
+  @Permissions('wallet:member-recharges:page')
+  previewRechargeRefund(@Param('id', ParseIntPipe) id: number) {
+    return this.memberService.previewRechargeRefund(id);
+  }
+
+  @Post('recharge-orders/:id/refund')
+  @Permissions('wallet:member-recharges:page')
+  refundRecharge(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Req() req: any) {
+    return this.memberService.refundRecharge(id, {
+      levelAfterRefund: String(body?.levelAfterRefund || ''),
+      remark: String(body?.remark || ''),
+    }, Number(req?.user?.userId || 0) || undefined);
+  }
+
+  @Get('balance-lots/users/:userId/repair-preview')
+  @Permissions('wallet:member-recharges:page')
+  previewHistoricalBalanceLots(@Param('userId', ParseIntPipe) userId: number) {
+    return this.memberService.previewHistoricalBalanceLots(userId);
+  }
+
+  @Post('balance-lots/users/:userId/repair')
+  @Permissions('wallet:member-recharges:page')
+  repairHistoricalBalanceLots(@Param('userId', ParseIntPipe) userId: number, @Req() req: any) {
+    return this.memberService.repairHistoricalBalanceLots(userId, Number(req?.user?.userId || 0) || undefined);
   }
 
   @Post('recharge/manual')

@@ -173,6 +173,12 @@ model User {
   memberPointAccount          MemberPointAccount?
   memberPointTransactions     MemberPointTransaction[]
   memberRechargeOrders        MemberRechargeOrder[]
+  memberBenefitGrants         MemberBenefitGrant[]
+  memberBenefitUsages         MemberBenefitUsage[]
+  memberBalanceLots           MemberBalanceLot[]
+  memberRechargeRefunds       MemberRechargeRefund[]
+  memberLevelOperations       MemberLevelOperation[]     @relation("MemberLevelOperationMember")
+  operatedLevelOperations     MemberLevelOperation[]     @relation("MemberLevelOperationOperator")
   memberCheckins              MemberCheckin[]
   memberProjectFavorites      MemberProjectFavorite[]
   memberProjectViews          MemberProjectView[]
@@ -500,6 +506,8 @@ model UserCoupon {
   usedAt     DateTime?
   expiresAt  DateTime?
   orderId    Int?
+  sourceType String?          @db.VarChar(32)
+  sourceId   Int?
   createdAt  DateTime         @default(now())
   updatedAt  DateTime         @updatedAt
   user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -510,6 +518,7 @@ model UserCoupon {
   @@index([userId, status, expiresAt], map: "idx_user_coupon_user_status_expire")
   @@index([templateId, status], map: "idx_user_coupon_template_status")
   @@index([orderId], map: "idx_user_coupon_order")
+  @@index([sourceType, sourceId], map: "idx_user_coupon_source")
   @@map("user_coupons")
 }
 
@@ -844,21 +853,138 @@ model StaffPublicCard {
 }
 
 model MemberLevelConfig {
-  id                    Int      @id @default(autoincrement())
-  code                  String   @unique @db.VarChar(32)
-  name                  String   @db.VarChar(64)
-  sortOrder             Int      @default(100)
-  minRechargeAmount     Decimal  @default(0.00) @db.Decimal(12, 2)
-  minAnnualContribution Int      @default(0)
+  id                    Int                  @id @default(autoincrement())
+  code                  String               @unique @db.VarChar(32)
+  name                  String               @db.VarChar(64)
+  sortOrder             Int                  @default(100)
+  minRechargeAmount     Decimal              @default(0.00) @db.Decimal(12, 2)
+  minAnnualContribution Int                  @default(0)
   benefits              Json?
-  description           String?  @db.VarChar(255)
-  enabled               Boolean  @default(true)
-  isDefault             Boolean  @default(false)
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  description           String?              @db.VarChar(255)
+  enabled               Boolean              @default(true)
+  isDefault             Boolean              @default(false)
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
+  levelBenefits         MemberLevelBenefit[]
 
   @@index([enabled, sortOrder], map: "idx_member_level_cfg_enabled_sort")
   @@map("member_level_configs")
+}
+
+/// 可复用的会员权益项目；等级只建立关联，会员通过发放台账获得权益。
+model MemberBenefit {
+  id                   Int                  @id @default(autoincrement())
+  code                 String               @unique @db.VarChar(64)
+  name                 String               @db.VarChar(120)
+  description          String?              @db.Text
+  category             String               @default("SERVICE") @db.VarChar(32)
+  unitName             String               @default("次") @db.VarChar(24)
+  unitValue            Decimal              @default(0.00) @db.Decimal(12, 2)
+  refundableDeduction  Boolean              @default(false)
+  reviewRestricted     Boolean              @default(false)
+  requiresVerification Boolean              @default(true)
+  enabled              Boolean              @default(true)
+  sortOrder            Int                  @default(100)
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  levelBenefits        MemberLevelBenefit[]
+  grants               MemberBenefitGrant[]
+
+  @@index([enabled, sortOrder], map: "idx_member_benefit_enabled_sort")
+  @@index([reviewRestricted, enabled], map: "idx_member_benefit_review_restricted")
+  @@map("member_benefits")
+}
+
+model MemberLevelBenefit {
+  id           Int               @id @default(autoincrement())
+  levelId      Int
+  benefitId    Int
+  grantMode    String            @default("IDENTITY") @db.VarChar(32)
+  quantity     Decimal?          @db.Decimal(12, 2)
+  unlimited    Boolean           @default(false)
+  validityDays Int?
+  config       Json?
+  enabled      Boolean           @default(true)
+  sortOrder    Int               @default(100)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  level        MemberLevelConfig @relation(fields: [levelId], references: [id], onDelete: Cascade)
+  benefit      MemberBenefit     @relation(fields: [benefitId], references: [id], onDelete: Restrict)
+
+  @@unique([levelId, benefitId], map: "uniq_member_level_benefit")
+  @@index([benefitId, enabled], map: "idx_member_level_benefit_enabled")
+  @@map("member_level_benefits")
+}
+
+model MemberBenefitGrant {
+  id                  Int                  @id @default(autoincrement())
+  userId              Int
+  benefitId           Int
+  levelCodeSnapshot   String               @db.VarChar(32)
+  benefitNameSnapshot String               @db.VarChar(120)
+  unitNameSnapshot    String               @db.VarChar(24)
+  unitValueSnapshot   Decimal              @default(0.00) @db.Decimal(12, 2)
+  sourceType          String               @db.VarChar(32)
+  sourceId            Int?
+  totalQuantity       Decimal?             @db.Decimal(12, 2)
+  usedQuantity        Decimal              @default(0.00) @db.Decimal(12, 2)
+  unlimited           Boolean              @default(false)
+  status              String               @default("ACTIVE") @db.VarChar(24)
+  periodStart         DateTime?
+  periodEnd           DateTime?
+  expiresAt           DateTime?
+  grantedAt           DateTime             @default(now())
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  user                User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  benefit             MemberBenefit        @relation(fields: [benefitId], references: [id], onDelete: Restrict)
+  usages              MemberBenefitUsage[]
+
+  @@index([userId, status, expiresAt], map: "idx_member_benefit_grant_user_status")
+  @@index([sourceType, sourceId], map: "idx_member_benefit_grant_source")
+  @@index([benefitId, grantedAt], map: "idx_member_benefit_grant_benefit")
+  @@map("member_benefit_grants")
+}
+
+model MemberBenefitUsage {
+  id            Int                @id @default(autoincrement())
+  grantId       Int
+  userId        Int
+  quantity      Decimal            @db.Decimal(12, 2)
+  deductedValue Decimal            @default(0.00) @db.Decimal(12, 2)
+  sourceType    String?            @db.VarChar(32)
+  sourceId      Int?
+  status        String             @default("CONFIRMED") @db.VarChar(24)
+  operatorId    Int?
+  remark        String?            @db.VarChar(255)
+  usedAt        DateTime           @default(now())
+  reversedAt    DateTime?
+  createdAt     DateTime           @default(now())
+  grant         MemberBenefitGrant @relation(fields: [grantId], references: [id], onDelete: Cascade)
+  user          User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, usedAt], map: "idx_member_benefit_usage_user_time")
+  @@index([sourceType, sourceId], map: "idx_member_benefit_usage_source")
+  @@map("member_benefit_usages")
+}
+
+model MemberLevelOperation {
+  id              Int      @id @default(autoincrement())
+  userId          Int
+  beforeLevelCode String   @db.VarChar(32)
+  afterLevelCode  String   @db.VarChar(32)
+  operationType   String   @db.VarChar(32)
+  sourceType      String?  @db.VarChar(32)
+  sourceId        Int?
+  operatorId      Int?
+  remark          String?  @db.VarChar(255)
+  createdAt       DateTime @default(now())
+  user            User     @relation("MemberLevelOperationMember", fields: [userId], references: [id], onDelete: Cascade)
+  operator        User?    @relation("MemberLevelOperationOperator", fields: [operatorId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt], map: "idx_member_level_operation_user_time")
+  @@index([sourceType, sourceId], map: "idx_member_level_operation_source")
+  @@map("member_level_operations")
 }
 
 model MemberPointAccount {
@@ -934,15 +1060,87 @@ model MemberRechargeOrder {
   prepayId        String?                   @db.VarChar(128)
   transactionId   String?                   @db.VarChar(128)
   notifyRaw       Json?
+  levelBeforeCode String?                   @db.VarChar(32)
+  levelAfterCode  String?                   @db.VarChar(32)
   paidAt          DateTime?
   createdAt       DateTime                  @default(now())
   updatedAt       DateTime                  @updatedAt
   user            User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
   plan            MemberRechargePlan?       @relation(fields: [planId], references: [id], onDelete: SetNull)
+  balanceLot      MemberBalanceLot?
+  refunds         MemberRechargeRefund[]
 
   @@index([userId, status, createdAt], map: "idx_member_recharge_order_user_status")
   @@index([planId], map: "idx_member_recharge_order_plan")
   @@map("member_recharge_orders")
+}
+
+/// 每笔充值独立资金批次，用于区分可退本金与不可退赠送金。
+model MemberBalanceLot {
+  id                 Int                     @id @default(autoincrement())
+  userId             Int
+  rechargeOrderId    Int?                    @unique
+  sourceType         String                  @default("RECHARGE") @db.VarChar(32)
+  principalInitial   Decimal                 @default(0.00) @db.Decimal(12, 2)
+  principalRemaining Decimal                 @default(0.00) @db.Decimal(12, 2)
+  bonusInitial       Decimal                 @default(0.00) @db.Decimal(12, 2)
+  bonusRemaining     Decimal                 @default(0.00) @db.Decimal(12, 2)
+  status             String                  @default("ACTIVE") @db.VarChar(24)
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+  user               User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rechargeOrder      MemberRechargeOrder?    @relation(fields: [rechargeOrderId], references: [id], onDelete: SetNull)
+  usages             MemberBalanceLotUsage[]
+
+  @@index([userId, status, createdAt], map: "idx_member_balance_lot_user_status")
+  @@map("member_balance_lots")
+}
+
+model MemberBalanceLotUsage {
+  id              Int              @id @default(autoincrement())
+  lotId           Int
+  userId          Int
+  sourceType      String           @db.VarChar(32)
+  sourceId        Int
+  principalAmount Decimal          @default(0.00) @db.Decimal(12, 2)
+  bonusAmount     Decimal          @default(0.00) @db.Decimal(12, 2)
+  status          String           @default("CONSUMED") @db.VarChar(24)
+  createdAt       DateTime         @default(now())
+  reversedAt      DateTime?
+  lot             MemberBalanceLot @relation(fields: [lotId], references: [id], onDelete: Cascade)
+
+  @@unique([lotId, sourceType, sourceId], map: "uniq_member_balance_lot_usage_source")
+  @@index([userId, createdAt], map: "idx_member_balance_lot_usage_user_time")
+  @@index([sourceType, sourceId], map: "idx_member_balance_lot_usage_source")
+  @@map("member_balance_lot_usages")
+}
+
+model MemberRechargeRefund {
+  id                  Int                 @id @default(autoincrement())
+  refundNo            String              @unique @db.VarChar(64)
+  rechargeOrderId     Int
+  userId              Int
+  originalPrincipal   Decimal             @db.Decimal(12, 2)
+  consumedPrincipal   Decimal             @default(0.00) @db.Decimal(12, 2)
+  refundablePrincipal Decimal             @default(0.00) @db.Decimal(12, 2)
+  recoveredBonus      Decimal             @default(0.00) @db.Decimal(12, 2)
+  usedBenefitValue    Decimal             @default(0.00) @db.Decimal(12, 2)
+  serviceFeeRate      Decimal             @default(0.30) @db.Decimal(6, 4)
+  serviceFeeAmount    Decimal             @default(0.00) @db.Decimal(12, 2)
+  actualRefundAmount  Decimal             @default(0.00) @db.Decimal(12, 2)
+  levelBeforeRefund   String              @db.VarChar(32)
+  levelAfterRefund    String              @db.VarChar(32)
+  suggestedLevelCode  String?             @db.VarChar(32)
+  status              String              @default("SUCCESS") @db.VarChar(24)
+  operatorId          Int?
+  remark              String?             @db.VarChar(255)
+  createdAt           DateTime            @default(now())
+  rechargeOrder       MemberRechargeOrder @relation(fields: [rechargeOrderId], references: [id], onDelete: Restrict)
+  user                User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt], map: "idx_member_recharge_refund_user_time")
+  @@index([rechargeOrderId, status], map: "idx_member_recharge_refund_order_status")
+  @@map("member_recharge_refunds")
 }
 
 model UserLog {
@@ -1051,6 +1249,7 @@ model Order {
   originalAmount             Decimal                 @default(0) @db.Decimal(10, 2)
   discountAmount             Decimal                 @default(0) @db.Decimal(10, 2)
   couponDiscountAmount       Decimal                 @default(0) @db.Decimal(10, 2)
+  memberDiscountAmount       Decimal                 @default(0) @db.Decimal(10, 2)
   activityDiscountAmount     Decimal                 @default(0) @db.Decimal(10, 2)
   giftDiscountAmount         Decimal                 @default(0) @db.Decimal(10, 2)
   manualAdjustAmount         Decimal                 @default(0) @db.Decimal(10, 2)

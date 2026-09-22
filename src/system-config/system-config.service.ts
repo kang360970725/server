@@ -48,6 +48,12 @@ export class SystemConfigService implements OnModuleInit {
   }
 
   private normalizeMiniappCustomerServiceConfig(config: any) {
+    const reviewVersions = (Array.isArray(config?.wechatReviewVersions)
+      ? config.wechatReviewVersions
+      : String(config?.wechatReviewVersions || '').split(/[,，\s]+/))
+      .map((item: any) => String(item || '').trim())
+      .filter(Boolean)
+      .filter((item: string, index: number, list: string[]) => list.indexOf(item) === index);
     return {
       consultText: String(config?.consultText || '详询客服').trim() || '详询客服',
       qrCodeUrl: String(config?.qrCodeUrl || '').trim(),
@@ -56,6 +62,7 @@ export class SystemConfigService implements OnModuleInit {
       wechatCustomerServiceUrl: String(config?.wechatCustomerServiceUrl || '').trim(),
       customerServiceCardImage: String(config?.customerServiceCardImage || '').trim(),
       wechatReviewMode: config?.wechatReviewMode === true || String(config?.wechatReviewMode || '').toLowerCase() === 'true',
+      wechatReviewVersions: reviewVersions,
       remark: String(config?.remark || '').trim(),
     };
   }
@@ -837,6 +844,7 @@ export class SystemConfigService implements OnModuleInit {
       wechatCustomerServiceUrl: '',
       customerServiceCardImage: '',
       wechatReviewMode: false,
+      wechatReviewVersions: [],
       remark: '',
     };
     const config = await this.getJson(SystemConfigService.KEYS.MINIAPP_CUSTOMER_SERVICE_CONFIG, fallback);

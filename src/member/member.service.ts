@@ -7,6 +7,9 @@ import {
   PrismaClient,
   UserCouponStatus,
   UserType,
+  WalletBizType,
+  WalletDirection,
+  WalletTxStatus,
   WechatBindingPlatform,
 } from '@prisma/client';
 import { createHash } from 'crypto';
@@ -17,6 +20,7 @@ import { WalletService } from '../wallet/wallet.service';
 import { WechatPayService } from '../mini/wechat-pay.service';
 import { SystemConfigService } from '../system-config/system-config.service';
 import { normalizeRechargeCouponBenefits } from './member-recharge-benefits';
+import { MemberBenefitsService } from './member-benefits.service';
 
 type PrismaTx = PrismaClient | Prisma.TransactionClient;
 
@@ -29,6 +33,7 @@ export class MemberService {
     private readonly walletService: WalletService,
     private readonly wechatPayService: WechatPayService,
     private readonly systemConfigService: SystemConfigService,
+    private readonly memberBenefitsService: MemberBenefitsService,
   ) {}
 
   private getDb(tx?: PrismaTx) {
@@ -221,6 +226,8 @@ export class MemberService {
         status: UserCouponStatus.UNUSED,
         receivedAt: now,
         expiresAt,
+        sourceType: 'MEMBER_RECHARGE_ORDER',
+        sourceId: Number(input.sourceId),
       }));
       if (createRows.length) {
         await (tx as any).userCoupon.createMany({ data: createRows });
@@ -263,13 +270,10 @@ export class MemberService {
     const profile = await (tx as any).memberProfile.findUnique({ where: { userId: Number(input.userId) } });
     const totalRechargeAmount = this.round2(this.toAmount(profile?.totalRechargeAmount));
     const annualContribution = Number(profile?.annualContribution || 0) + growthValue;
-    const levelConfig = await this.resolveLevelConfig(totalRechargeAmount, annualContribution, tx as any);
-
     const updated = await (tx as any).memberProfile.update({
       where: { userId: Number(input.userId) },
       data: {
         annualContribution,
-        levelCode: String(levelConfig?.code || 'V0'),
       },
     });
 
@@ -830,6 +834,7 @@ export class MemberService {
             },
           },
           plan: { select: { id: true, title: true } },
+          refunds: { where: { status: 'SUCCESS' }, select: { id: true, refundNo: true, actualRefundAmount: true, createdAt: true } },
         },
       }),
       this.prisma.memberRechargeOrder.count({ where }),
@@ -838,8 +843,14 @@ export class MemberService {
     return { data, total, page, limit };
   }
 
-  async listLevelConfigs() {
+  async listLevelConfigs(options: { reviewMode?: boolean; structured?: boolean } = {}) {
     await this.ensureDefaultLevelConfigs();
+    if (options.structured) {
+      return this.memberBenefitsService.listLevelBenefits({
+        enabledOnly: false,
+        reviewMode: !!options.reviewMode,
+      });
+    }
     const configs = await this.prisma.memberLevelConfig.findMany({
       orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
     });
@@ -910,10 +921,6 @@ export class MemberService {
     const nextRecharge = data?.minRechargeAmount !== undefined ? this.round2(Number(data.minRechargeAmount || 0)) : this.toAmount(current.minRechargeAmount);
     const nextContribution = data?.minAnnualContribution !== undefined ? Math.max(0, Math.floor(Number(data.minAnnualContribution || 0))) : Number(current.minAnnualContribution || 0);
 
-    if (data?.minRechargeAmount !== undefined || data?.minAnnualContribution !== undefined) {
-      await this.assertLevelThresholdAdjustable(id, nextRecharge);
-    }
-
     const updated = await this.prisma.memberLevelConfig.update({
       where: { id },
       data: {
@@ -936,7 +943,6 @@ export class MemberService {
       });
     }
 
-    await this.refreshMemberLevels();
     return this.toLevelView(updated);
   }
 
@@ -964,28 +970,7 @@ export class MemberService {
 
   async refreshMemberLevels() {
     await this.ensureDefaultLevelConfigs();
-    const profiles = await this.prisma.memberProfile.findMany({
-      where: { manualLevelCode: null },
-      select: {
-        userId: true,
-        totalRechargeAmount: true,
-        annualContribution: true,
-      },
-    });
-
-    for (const profile of profiles) {
-      const resolved = await this.resolveLevelConfig(
-        this.toAmount(profile.totalRechargeAmount),
-        Number(profile.annualContribution || 0),
-      );
-      await this.prisma.memberProfile.update({
-        where: { userId: profile.userId },
-        data: {
-          levelCode: String(resolved?.code || 'V0'),
-        },
-      });
-    }
-    return { success: true, count: profiles.length };
+    return { success: true, count: 0, message: '会员等级已改为后台人工管理，不再按累计储值自动刷新' };
   }
 
   async createRechargePlan(data: any) {
@@ -1166,18 +1151,35 @@ export class MemberService {
         }, tx as any);
       }
 
+      await tx.memberBalanceLot.upsert({
+        where: { rechargeOrderId: order.id },
+        create: {
+          userId: order.userId,
+          rechargeOrderId: order.id,
+          sourceType: 'RECHARGE',
+          principalInitial: this.toAmount(order.payAmount),
+          principalRemaining: this.toAmount(order.payAmount),
+          bonusInitial: this.toAmount(order.bonusAmount),
+          bonusRemaining: this.toAmount(order.bonusAmount),
+        },
+        update: {},
+      });
+
       const profile = await tx.memberProfile.findUnique({ where: { userId: order.userId } });
+      const levelBeforeCode = String(profile?.levelCode || 'V0');
       const totalRechargeAmount = this.round2(this.toAmount(profile?.totalRechargeAmount) + this.toAmount(order.payAmount));
       const annualContribution = Number(profile?.annualContribution || 0);
-      const levelConfig = await this.resolveLevelConfig(totalRechargeAmount, annualContribution, tx as any);
       await tx.memberProfile.update({
         where: { userId: order.userId },
         data: {
           totalRechargeAmount,
           annualContribution,
           lastRechargeAt: new Date(),
-          levelCode: String(profile?.manualLevelCode || levelConfig?.code || 'V0'),
         },
+      });
+      await tx.memberRechargeOrder.update({
+        where: { id: order.id },
+        data: { levelBeforeCode, levelAfterCode: levelBeforeCode },
       });
 
       if (Number(order.giftPoints || 0) > 0) {
@@ -1282,6 +1284,245 @@ export class MemberService {
     return this.prisma.memberRechargeOrder.findUnique({ where: { id: created.id } });
   }
 
+  private buildRechargeRefundNo(orderId: number) {
+    return `MRF${orderId}${Date.now()}`;
+  }
+
+  async previewRechargeRefund(orderId: number) {
+    const order = await this.prisma.memberRechargeOrder.findUnique({
+      where: { id: orderId },
+      include: {
+        balanceLot: true,
+        refunds: { where: { status: 'SUCCESS' } },
+        user: { select: { id: true, name: true, phone: true, memberProfile: true, walletAccount: true } },
+      },
+    });
+    if (!order) throw new NotFoundException('充值订单不存在');
+    if (order.status !== 'SUCCESS') throw new BadRequestException('仅成功充值订单可以退款');
+    if (order.refunds?.length) throw new BadRequestException('该充值订单已经退款');
+    if (!order.balanceLot) throw new BadRequestException('该充值尚未建立资金批次，请先执行历史资金预核算修复');
+    const principalRemaining = this.round2(this.toAmount(order.balanceLot.principalRemaining));
+    const bonusRemaining = this.round2(this.toAmount(order.balanceLot.bonusRemaining));
+    const consumedPrincipal = this.round2(Math.max(0, this.toAmount(order.balanceLot.principalInitial) - principalRemaining));
+    const usedBenefitAggregate: any = await (this.prisma as any).memberBenefitUsage.aggregate({
+      where: {
+        status: 'CONFIRMED',
+        grant: { sourceId: order.id, sourceType: 'LEVEL_UPGRADE' },
+      },
+      _sum: { deductedValue: true },
+    });
+    const rechargeCoupons: any[] = await (this.prisma as any).userCoupon.findMany({
+      where: { userId: order.userId, sourceType: 'MEMBER_RECHARGE_ORDER', sourceId: order.id },
+      include: { order: { select: { couponDiscountAmount: true } } },
+    });
+    const usedCouponValue = this.round2(rechargeCoupons
+      .filter((item: any) => item.status === 'USED')
+      .reduce((sum: number, item: any) => sum + this.toAmount(item?.order?.couponDiscountAmount), 0));
+    const usedBenefitValue = this.round2(this.toAmount(usedBenefitAggregate?._sum?.deductedValue) + usedCouponValue);
+    const refundablePrincipal = this.round2(Math.max(0, principalRemaining - usedBenefitValue));
+    const serviceFeeRate = 0.3;
+    const serviceFeeAmount = this.round2(refundablePrincipal * serviceFeeRate);
+    const actualRefundAmount = this.round2(Math.max(0, refundablePrincipal - serviceFeeAmount));
+    const currentLevelCode = String(order.user?.memberProfile?.levelCode || 'V0');
+    const suggestedLevelCode = String(order.levelBeforeCode || currentLevelCode);
+    const walletAvailable = this.round2(this.toAmount(order.user?.walletAccount?.availableBalance));
+    const walletRecoveryAmount = this.round2(principalRemaining + bonusRemaining);
+    return {
+      orderId: order.id,
+      rechargeNo: order.rechargeNo,
+      userId: order.userId,
+      userName: order.user?.name || order.user?.phone || `#${order.userId}`,
+      originalPrincipal: this.round2(this.toAmount(order.payAmount)),
+      originalBonus: this.round2(this.toAmount(order.bonusAmount)),
+      consumedPrincipal,
+      principalRemaining,
+      recoveredBonus: bonusRemaining,
+      usedBenefitValue,
+      usedCouponValue,
+      unusedCouponCount: rechargeCoupons.filter((item: any) => item.status === 'UNUSED').length,
+      refundablePrincipal,
+      serviceFeeRate,
+      serviceFeeAmount,
+      actualRefundAmount,
+      walletAvailable,
+      walletRecoveryAmount,
+      canRefund: walletAvailable >= walletRecoveryAmount,
+      levelBeforeRefund: currentLevelCode,
+      suggestedLevelCode,
+      rechargeLevelBeforeCode: order.levelBeforeCode,
+      rechargeLevelAfterCode: order.levelAfterCode,
+    };
+  }
+
+  async refundRecharge(orderId: number, input: { levelAfterRefund: string; remark: string }, operatorId?: number) {
+    const preview = await this.previewRechargeRefund(orderId);
+    const targetLevelCode = this.normalizeLevelCode(input?.levelAfterRefund);
+    const remark = String(input?.remark || '').trim().slice(0, 255);
+    if (!targetLevelCode) throw new BadRequestException('请选择退款后的会员等级');
+    if (!remark) throw new BadRequestException('请填写退款原因');
+    if (!preview.canRefund) throw new BadRequestException('当前会员余额不足以收回本次充值的剩余本金和赠送金');
+    const target = await this.prisma.memberLevelConfig.findUnique({ where: { code: targetLevelCode } });
+    if (!target || !target.enabled) throw new BadRequestException('退款后的会员等级不存在或未启用');
+    return this.prisma.$transaction(async (tx: any) => {
+      const order = await tx.memberRechargeOrder.findUnique({
+        where: { id: orderId },
+        include: { balanceLot: true, refunds: { where: { status: 'SUCCESS' } } },
+      });
+      if (!order?.balanceLot || order.refunds?.length) throw new BadRequestException('充值订单状态已变化，请刷新后重试');
+      const profile = await tx.memberProfile.findUnique({ where: { userId: order.userId } });
+      const account = await tx.walletAccount.findUnique({ where: { userId: order.userId } });
+      const recoveryAmount = this.round2(this.toAmount(order.balanceLot.principalRemaining) + this.toAmount(order.balanceLot.bonusRemaining));
+      if (this.toAmount(account?.availableBalance) < recoveryAmount) throw new BadRequestException('当前会员余额不足，无法执行退款');
+      const refund = await tx.memberRechargeRefund.create({ data: {
+        refundNo: this.buildRechargeRefundNo(orderId),
+        rechargeOrderId: orderId,
+        userId: order.userId,
+        originalPrincipal: preview.originalPrincipal,
+        consumedPrincipal: preview.consumedPrincipal,
+        refundablePrincipal: preview.refundablePrincipal,
+        recoveredBonus: preview.recoveredBonus,
+        usedBenefitValue: preview.usedBenefitValue,
+        serviceFeeRate: preview.serviceFeeRate,
+        serviceFeeAmount: preview.serviceFeeAmount,
+        actualRefundAmount: preview.actualRefundAmount,
+        levelBeforeRefund: String(profile?.levelCode || 'V0'),
+        levelAfterRefund: targetLevelCode,
+        suggestedLevelCode: preview.suggestedLevelCode,
+        operatorId: operatorId || null,
+        remark,
+      }});
+      const accountAfter = await tx.walletAccount.update({
+        where: { userId: order.userId },
+        data: { availableBalance: { decrement: recoveryAmount } },
+      });
+      await tx.walletTransaction.create({ data: {
+        userId: order.userId,
+        direction: WalletDirection.OUT,
+        bizType: WalletBizType.MEMBER_RECHARGE_REFUND,
+        amount: recoveryAmount,
+        status: WalletTxStatus.AVAILABLE,
+        sourceType: 'MEMBER_RECHARGE_REFUND',
+        sourceId: refund.id,
+        availableAfter: this.round2(this.toAmount(accountAfter.availableBalance)),
+        frozenAfter: this.round2(this.toAmount(accountAfter.frozenBalance)),
+        remark: `会员充值退款：收回剩余本金¥${preview.principalRemaining.toFixed(2)}、赠送金¥${preview.recoveredBonus.toFixed(2)}；实际退款¥${preview.actualRefundAmount.toFixed(2)}`,
+      }});
+      await tx.memberBalanceLot.update({ where: { id: order.balanceLot.id }, data: {
+        principalRemaining: 0,
+        bonusRemaining: 0,
+        status: 'REFUNDED',
+      }});
+      await tx.memberProfile.update({ where: { userId: order.userId }, data: {
+        totalRechargeAmount: Math.max(0, this.round2(this.toAmount(profile?.totalRechargeAmount) - preview.refundablePrincipal)),
+        levelCode: targetLevelCode,
+        manualLevelCode: targetLevelCode,
+        levelAdjustedAt: new Date(),
+        levelAdjustRemark: `充值退款 ${refund.refundNo}：${remark}`,
+      }});
+      await tx.memberBenefitGrant.updateMany({
+        where: { userId: order.userId, sourceType: 'LEVEL_UPGRADE', sourceId: orderId, status: 'ACTIVE' },
+        data: { status: 'REVOKED' },
+      });
+      await tx.userCoupon.updateMany({
+        where: { userId: order.userId, sourceType: 'MEMBER_RECHARGE_ORDER', sourceId: orderId, status: 'UNUSED' },
+        data: { status: 'EXPIRED' },
+      });
+      await tx.memberLevelOperation.create({ data: {
+        userId: order.userId,
+        beforeLevelCode: String(profile?.levelCode || 'V0'),
+        afterLevelCode: targetLevelCode,
+        operationType: 'RECHARGE_REFUND',
+        sourceType: 'MEMBER_RECHARGE_REFUND',
+        sourceId: refund.id,
+        operatorId: operatorId || null,
+        remark,
+      }});
+      return refund;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }
+
+  private buildHistoricalLotPlan(orders: any[], consumedInput: number) {
+    let remainingConsumption = this.round2(Math.max(0, consumedInput));
+    const rows = orders.map((order: any) => ({
+      rechargeOrderId: Number(order.id),
+      rechargeNo: String(order.rechargeNo),
+      paidAt: order.paidAt || order.createdAt,
+      principalInitial: this.round2(this.toAmount(order.payAmount)),
+      principalRemaining: this.round2(this.toAmount(order.payAmount)),
+      bonusInitial: this.round2(this.toAmount(order.bonusAmount)),
+      bonusRemaining: this.round2(this.toAmount(order.bonusAmount)),
+    }));
+    for (const row of rows) {
+      const used = Math.min(remainingConsumption, row.principalRemaining);
+      row.principalRemaining = this.round2(row.principalRemaining - used);
+      remainingConsumption = this.round2(remainingConsumption - used);
+    }
+    for (const row of rows) {
+      const used = Math.min(remainingConsumption, row.bonusRemaining);
+      row.bonusRemaining = this.round2(row.bonusRemaining - used);
+      remainingConsumption = this.round2(remainingConsumption - used);
+    }
+    return { rows, unallocatedConsumption: remainingConsumption };
+  }
+
+  async previewHistoricalBalanceLots(userId: number) {
+    const [orders, consumedAggregate]: any[] = await Promise.all([
+      this.prisma.memberRechargeOrder.findMany({
+        where: { userId, status: 'SUCCESS', balanceLot: { is: null } },
+        orderBy: [{ paidAt: 'asc' }, { id: 'asc' }],
+      }),
+      this.prisma.orderPayment.aggregate({
+        where: {
+          channel: 'BALANCE',
+          status: 'SUCCESS',
+          order: { customerUserId: userId, status: { not: 'REFUNDED' as any } },
+        },
+        _sum: { amount: true },
+      }),
+    ]);
+    const totalConsumed = this.round2(this.toAmount(consumedAggregate?._sum?.amount));
+    const plan = this.buildHistoricalLotPlan(orders, totalConsumed);
+    return {
+      userId,
+      rechargeCount: orders.length,
+      totalConsumed,
+      ...plan,
+      warning: '历史预核算仅依据成功会员充值和未退款余额支付订单重建；执行前请核对钱包流水。',
+    };
+  }
+
+  async repairHistoricalBalanceLots(userId: number, operatorId?: number) {
+    const preview = await this.previewHistoricalBalanceLots(userId);
+    if (!preview.rows.length) return { success: true, createdCount: 0, preview };
+    return this.prisma.$transaction(async (tx: any) => {
+      let createdCount = 0;
+      for (const row of preview.rows) {
+        const exists = await tx.memberBalanceLot.findUnique({ where: { rechargeOrderId: row.rechargeOrderId } });
+        if (exists) continue;
+        await tx.memberBalanceLot.create({ data: {
+          userId,
+          rechargeOrderId: row.rechargeOrderId,
+          sourceType: 'HISTORICAL_REPAIR',
+          principalInitial: row.principalInitial,
+          principalRemaining: row.principalRemaining,
+          bonusInitial: row.bonusInitial,
+          bonusRemaining: row.bonusRemaining,
+          status: row.principalRemaining > 0 || row.bonusRemaining > 0 ? 'ACTIVE' : 'CONSUMED',
+        }});
+        createdCount += 1;
+      }
+      await tx.userLog.create({ data: {
+        userId: operatorId || userId,
+        action: 'REPAIR_MEMBER_BALANCE_LOTS',
+        targetType: 'MEMBER_PROFILE',
+        targetId: userId,
+        newData: { memberUserId: userId, createdCount, totalConsumed: preview.totalConsumed, unallocatedConsumption: preview.unallocatedConsumption } as any,
+        remark: '历史会员充值资金批次重建（本金优先、赠送金后消费）',
+      }});
+      return { success: true, createdCount, preview };
+    });
+  }
+
   async adjustGrowth(input: { userId: number; growthValue: number; remark?: string }) {
     const userId = Number(input?.userId || 0);
     const delta = Math.trunc(Number(input?.growthValue || 0));
@@ -1294,17 +1535,10 @@ export class MemberService {
       if (!profile) throw new NotFoundException('会员档案不存在');
 
       const nextAnnualContribution = Math.max(0, Number(profile.annualContribution || 0) + delta);
-      const levelConfig = await this.resolveLevelConfig(
-        this.round2(this.toAmount(profile.totalRechargeAmount)),
-        nextAnnualContribution,
-        tx as any,
-      );
-
       const updated = await tx.memberProfile.update({
         where: { userId },
         data: {
           annualContribution: nextAnnualContribution,
-          levelCode: String(levelConfig?.code || 'V0'),
         },
       });
 
@@ -1324,11 +1558,10 @@ export class MemberService {
     });
   }
 
-  async adjustMemberLevel(input: { userId: number; levelCode?: string | null; remark?: string }, operatorId?: number) {
+  async adjustMemberLevel(input: { userId: number; levelCode?: string | null; sourceRechargeOrderId?: number; remark?: string }, operatorId?: number) {
     const userId = Number(input?.userId || 0);
     if (!userId) throw new BadRequestException('userId 必填');
     const requested = String(input?.levelCode || '').trim().toUpperCase();
-    const automatic = !requested || requested === 'AUTO';
     const remark = String(input?.remark || '').trim().slice(0, 255);
     if (!remark) throw new BadRequestException('请填写等级调整原因');
 
@@ -1336,19 +1569,25 @@ export class MemberService {
       await this.ensureUserAssets(userId, tx as any);
       const profile = await tx.memberProfile.findUnique({ where: { userId } });
       if (!profile) throw new NotFoundException('会员档案不存在');
-      let nextCode = requested;
-      if (automatic) {
-        const resolved = await this.resolveLevelConfig(this.toAmount(profile.totalRechargeAmount), 0, tx as any);
-        nextCode = String(resolved?.code || 'V0');
-      } else {
-        const target = await tx.memberLevelConfig.findUnique({ where: { code: requested } });
-        if (!target || !target.enabled) throw new BadRequestException('目标会员等级不存在或未启用');
+      if (!requested || requested === 'AUTO') throw new BadRequestException('请选择明确的会员等级');
+      const target = await tx.memberLevelConfig.findUnique({ where: { code: requested } });
+      if (!target || !target.enabled) throw new BadRequestException('目标会员等级不存在或未启用');
+      if (requested === 'V6' && this.toAmount(profile.totalConsumeAmount) < 60000) {
+        throw new BadRequestException(`VIP6要求累计有效消费达到 ¥60000.00，当前为 ¥${this.toAmount(profile.totalConsumeAmount).toFixed(2)}`);
+      }
+      const nextCode = requested;
+      const sourceRechargeOrderId = Number(input?.sourceRechargeOrderId || 0) || null;
+      if (sourceRechargeOrderId) {
+        const sourceOrder = await tx.memberRechargeOrder.findFirst({
+          where: { id: sourceRechargeOrderId, userId, status: 'SUCCESS' },
+        });
+        if (!sourceOrder) throw new BadRequestException('关联充值订单不存在或不属于该会员');
       }
       const updated = await tx.memberProfile.update({
         where: { userId },
         data: {
           levelCode: nextCode,
-          manualLevelCode: automatic ? null : nextCode,
+          manualLevelCode: nextCode,
           levelAdjustedAt: new Date(),
           levelAdjustRemark: remark,
         },
@@ -1360,15 +1599,41 @@ export class MemberService {
           targetType: 'MEMBER_PROFILE',
           targetId: Number(updated.id),
           oldData: { levelCode: profile.levelCode, manualLevelCode: profile.manualLevelCode } as any,
-          newData: { levelCode: nextCode, manualLevelCode: automatic ? null : nextCode, memberUserId: userId } as any,
+          newData: { levelCode: nextCode, manualLevelCode: nextCode, memberUserId: userId } as any,
           remark,
         },
+      });
+      await tx.memberLevelOperation.create({
+        data: {
+          userId,
+          beforeLevelCode: String(profile.levelCode || 'V0'),
+          afterLevelCode: nextCode,
+          operationType: 'ADMIN_ADJUST',
+          sourceType: sourceRechargeOrderId ? 'MEMBER_RECHARGE_ORDER' : 'ADMIN',
+          sourceId: sourceRechargeOrderId,
+          operatorId: operatorId || null,
+          remark,
+        },
+      });
+      if (sourceRechargeOrderId) {
+        await tx.memberRechargeOrder.update({
+          where: { id: sourceRechargeOrderId },
+          data: { levelAfterCode: nextCode },
+        });
+      }
+      await this.memberBenefitsService.grantForLevelChange({
+        tx,
+        userId,
+        beforeLevelCode: String(profile.levelCode || 'V0'),
+        afterLevelCode: nextCode,
+        sourceType: sourceRechargeOrderId ? 'LEVEL_UPGRADE' : 'ADMIN_LEVEL_CHANGE',
+        sourceId: sourceRechargeOrderId || undefined,
       });
       return updated;
     });
   }
 
-  async getMiniOverview(userId: number) {
+  async getMiniOverview(userId: number, options: { reviewMode?: boolean } = {}) {
     await this.ensureUserAssets(userId);
 
     const [user, wallet, profile, pointAccount, bindings, rechargePlans, levelConfigs] = await Promise.all([
@@ -1389,11 +1654,12 @@ export class MemberService {
         orderBy: [{ lastLoginAt: 'desc' as const }, { updatedAt: 'desc' as const }],
       }),
       this.listRechargePlans(true),
-      this.listLevelConfigs(),
+      this.listLevelConfigs({ structured: true, reviewMode: !!options.reviewMode }),
     ]);
     const currentLevel = levelConfigs.find((item: any) => item.code === profile?.levelCode) || null;
     const paymentTestAllowed = await this.canUseMiniPaymentTestMode(userId, { user, bindings });
 
+    const memberBenefits = await this.memberBenefitsService.listUserBenefits(userId, { reviewMode: !!options.reviewMode });
     return {
       user: user || null,
       wallet: wallet || null,
@@ -1401,7 +1667,9 @@ export class MemberService {
         ...(profile || {}),
         levelName: currentLevel?.name || profile?.levelCode || '普通会员',
         levelCode: profile?.levelCode || 'V0',
-        rights: currentLevel?.benefits || [],
+        rights: Array.isArray(currentLevel?.benefits)
+          ? currentLevel.benefits.map((item: any) => typeof item === 'string' ? item : item?.name).filter(Boolean)
+          : [],
       },
       points: pointAccount || null,
       wechat: {
@@ -1423,6 +1691,7 @@ export class MemberService {
         remark: '仅对白名单账号生效，开启后订单与充值将按 0.01 元发起真实微信支付',
       },
       memberLevels: levelConfigs,
+      memberBenefits,
     };
   }
 
@@ -1612,7 +1881,54 @@ export class MemberService {
       });
       linkedCount += Number(result.count || 0);
     }
-    return { linkedCount };
+    const totalConsumeAmount = await this.recalculateMemberTotalConsume(normalizedUserId);
+    return { linkedCount, totalConsumeAmount };
+  }
+
+  private async recalculateMemberTotalConsume(userIdInput: number) {
+    const userId = Number(userIdInput || 0);
+    if (!userId) return 0;
+    const orders = await this.prisma.order.findMany({
+      where: {
+        customerUserId: userId,
+        isGifted: false,
+        OR: [{ isPaid: true }, { payStatus: 'SUCCESS' as any }],
+      },
+      select: {
+        paidAmount: true,
+        finalPayableAmount: true,
+        receivableAmount: true,
+        isTestPayment: true,
+        refunds: {
+          where: { status: { in: ['SUCCESS', 'MANUAL_REQUIRED'] } },
+          select: { amount: true },
+        },
+      },
+    });
+    const totalConsumeAmount = this.round2(orders.reduce((sum, order: any) => {
+      const paidAmount = Math.max(0, this.toAmount(order.paidAmount));
+      const finalPayableAmount = Math.max(
+        0,
+        this.toAmount(order.finalPayableAmount ?? order.receivableAmount ?? paidAmount),
+      );
+      const paidBase = order.isTestPayment && finalPayableAmount > 0 ? finalPayableAmount : paidAmount;
+      const refundedAmount = (order.refunds || []).reduce(
+        (refundSum: number, refund: any) => refundSum + Math.max(0, this.toAmount(refund.amount)),
+        0,
+      );
+      return sum + Math.max(0, this.round2(paidBase - refundedAmount));
+    }, 0));
+    await this.prisma.memberProfile.upsert({
+      where: { userId },
+      update: { totalConsumeAmount },
+      create: {
+        userId,
+        memberCode: await this.generateMemberCode(),
+        levelCode: 'V0',
+        totalConsumeAmount,
+      },
+    });
+    return totalConsumeAmount;
   }
 
   async listAdminGameCards(userId: number) {

@@ -22,3 +22,7 @@ export class ReconcileAdminRentalOrderDto {
   version: number;
   remark?: string;
 }
+export class BatchReconcileAdminRentalOrderDto {
+  text: string;
+  remark?: string;
+}

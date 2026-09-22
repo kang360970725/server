@@ -15,15 +15,15 @@ export class MiniMemberController {
   ) {}
 
   @Get('overview')
-  async overview(@Req() req: any) {
+  async overview(@Req() req: any, @Query('reviewMode') reviewMode?: string) {
     const userId = Number(req?.user?.userId ?? req?.user?.id ?? req?.user?.sub);
-    return miniOk(await this.memberService.getMiniOverview(userId));
+    return miniOk(await this.memberService.getMiniOverview(userId, { reviewMode: reviewMode === 'true' }));
   }
 
   @Public()
   @Get('levels')
-  async levels() {
-    const levels = await this.memberService.listLevelConfigs();
+  async levels(@Query('reviewMode') reviewMode?: string) {
+    const levels = await this.memberService.listLevelConfigs({ structured: true, reviewMode: reviewMode === 'true' });
     return miniOk((Array.isArray(levels) ? levels : []).filter((item: any) => item?.enabled !== false));
   }
 

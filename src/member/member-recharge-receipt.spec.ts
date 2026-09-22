@@ -9,11 +9,11 @@ describe('会员充值收款日期', () => {
   ])('%s 充值使用可信支付时间或人工操作时间', async (channel, success_time, expected) => {
     jest.useFakeTimers().setSystemTime(new Date('2026-08-30T16:01:00Z'));
     const order = { id: 1, userId: 2, channel, status: 'PENDING', payAmount: 100, bonusAmount: 20, giftPoints: 0 };
-    const tx = { memberRechargeOrder: { update: jest.fn().mockResolvedValue(order) },
+    const tx = { memberRechargeOrder: { update: jest.fn().mockResolvedValue(order) }, memberBalanceLot: { upsert: jest.fn() },
       memberProfile: { findUnique: jest.fn().mockResolvedValue({}), update: jest.fn() } };
     const wallet = { creditAvailableBalance: jest.fn() };
     const service: any = new MemberService({ memberRechargeOrder: { findUnique: jest.fn().mockResolvedValue(order) },
-      $transaction: (fn: any) => fn(tx) } as any, wallet as any, {} as any, {} as any);
+      $transaction: (fn: any) => fn(tx) } as any, wallet as any, {} as any, {} as any, {} as any);
     service.ensureUserAssets = jest.fn();
     service.resolveLevelConfig = jest.fn();
     await service.settleRechargeSuccess('R1', { notifyRaw: { success_time } });
@@ -23,7 +23,7 @@ describe('会员充值收款日期', () => {
   it('已成功充值回调不改历史付款日期', async () => {
     const order = { status: 'SUCCESS', paidAt: new Date('2026-08-30T00:00:00Z') };
     const db = { memberRechargeOrder: { findUnique: jest.fn().mockResolvedValue(order) }, $transaction: jest.fn() };
-    const service = new MemberService(db as any, {} as any, {} as any, {} as any);
+    const service = new MemberService(db as any, {} as any, {} as any, {} as any, {} as any);
     expect(await service.settleRechargeSuccess('R1', {})).toBe(order);
     expect(db.$transaction).not.toHaveBeenCalled();
   });
