@@ -1,8 +1,18 @@
-ALTER TABLE `member_recharge_orders`
-  ADD COLUMN `levelBeforeCode` VARCHAR(32) NULL,
-  ADD COLUMN `levelAfterCode` VARCHAR(32) NULL;
+SET @sql = IF(
+  (SELECT COUNT(1) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='member_recharge_orders' AND COLUMN_NAME='levelBeforeCode') = 0,
+  'ALTER TABLE `member_recharge_orders` ADD COLUMN `levelBeforeCode` VARCHAR(32) NULL',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
-ALTER TABLE `orders`
+SET @sql = IF(
+  (SELECT COUNT(1) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='member_recharge_orders' AND COLUMN_NAME='levelAfterCode') = 0,
+  'ALTER TABLE `member_recharge_orders` ADD COLUMN `levelAfterCode` VARCHAR(32) NULL',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+ALTER TABLE `Order`
   ADD COLUMN `memberDiscountAmount` DECIMAL(10,2) NOT NULL DEFAULT 0.00;
 
 ALTER TABLE `user_coupons`

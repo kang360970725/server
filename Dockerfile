@@ -1,7 +1,7 @@
 # ---------- Build stage 完整编译、生成纯净生产依赖 ----------
 FROM node:20-slim AS builder
 WORKDIR /app
-ARG PRISMA_REQUIRED_MIGRATION=20260413080000_add_weekdays_mask_for_cs_duty_schedule
+ARG PRISMA_REQUIRED_MIGRATION=20260922090000_add_member_benefit_system
 
 RUN apt-get update -y \
  && apt-get install -y openssl ca-certificates \
@@ -40,7 +40,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV TZ=Asia/Shanghai
 ENV DEBIAN_FRONTEND=noninteractive
-ARG PRISMA_REQUIRED_MIGRATION=20260413080000_add_weekdays_mask_for_cs_duty_schedule
+ARG PRISMA_REQUIRED_MIGRATION=20260922090000_add_member_benefit_system
 ENV PRISMA_REQUIRED_MIGRATION=${PRISMA_REQUIRED_MIGRATION}
 
 # 时区与基础依赖
@@ -63,5 +63,5 @@ COPY --from=builder /app/scripts ./scripts
 COPY ./docker-entrypoint.sh ./docker-entrypoint.sh
 RUN chmod +x ./docker-entrypoint.sh
 
-EXPOSE 3000
+EXPOSE 80
 ENTRYPOINT ["./docker-entrypoint.sh"]

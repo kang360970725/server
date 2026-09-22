@@ -7,6 +7,7 @@ const STAFF_EXIT_MIGRATION = '20260619152000_add_staff_exit_status';
 const EXCELLENT_STAFF_MIGRATION = '20260813093000_add_excellent_staff_and_renewal_snapshot';
 const ORDER_CUSTOMER_IDENTIFIER_MIGRATION = '20260828161000_add_order_customer_identifier_type';
 const STAFF_ACTIVITY_MIGRATION = '20260902100000_add_staff_activity_assessment';
+const MEMBER_BENEFIT_MIGRATION = '20260922090000_add_member_benefit_system';
 
 async function tableExists(tableName) {
   const rows = await prisma.$queryRawUnsafe(
@@ -358,6 +359,24 @@ async function shouldRollBackFailedStaffActivityMigration() {
   return true;
 }
 
+async function shouldRetryFailedMemberBenefitMigration() {
+  const row = await getLatestMigrationState(MEMBER_BENEFIT_MIGRATION);
+  if (!row) {
+    console.log(`[migration-repair] no record found for ${MEMBER_BENEFIT_MIGRATION}, skip`);
+    return false;
+  }
+  if (row.finished_at || row.rolled_back_at) {
+    console.log(`[migration-repair] ${MEMBER_BENEFIT_MIGRATION} already resolved, skip`);
+    return false;
+  }
+  // 已知旧版在第二条 SQL 使用错误表名 `orders` 后失败。首条新增字段由新版迁移幂等跳过，保留数据后重跑。
+  if (await tableExists('member_benefits')) {
+    throw new Error(`cannot automatically retry ${MEMBER_BENEFIT_MIGRATION}: migration progressed beyond the known safe failure point`);
+  }
+  console.log(`[migration-repair] ${MEMBER_BENEFIT_MIGRATION} is at the known safe retry point`);
+  return true;
+}
+
 async function main() {
   const migrationsToResolve = [];
   const migrationsToRollBack = [];
@@ -366,6 +385,7 @@ async function main() {
     if (await ensureExcellentStaffMigrationState()) migrationsToResolve.push(EXCELLENT_STAFF_MIGRATION);
     if (await ensureOrderCustomerIdentifierMigrationState()) migrationsToResolve.push(ORDER_CUSTOMER_IDENTIFIER_MIGRATION);
     if (await shouldRollBackFailedStaffActivityMigration()) migrationsToRollBack.push(STAFF_ACTIVITY_MIGRATION);
+    if (await shouldRetryFailedMemberBenefitMigration()) migrationsToRollBack.push(MEMBER_BENEFIT_MIGRATION);
   } finally {
     await prisma.$disconnect();
   }
