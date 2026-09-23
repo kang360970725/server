@@ -1663,6 +1663,54 @@ export class OrdersService {
         };
     }
 
+    async getMemberOrderContext(input: { userId: number; projectId: number; originalAmount: number }) {
+        const userId = Number(input.userId || 0);
+        const projectId = Number(input.projectId || 0);
+        const originalAmount = this.toAmount2(Math.max(0, Number(input.originalAmount || 0)));
+        if (!Number.isSafeInteger(userId) || userId <= 0) throw new BadRequestException('会员ID无效');
+        if (!Number.isSafeInteger(projectId) || projectId <= 0) throw new BadRequestException('项目ID无效');
+        const [user, project] = await Promise.all([
+            this.prisma.user.findUnique({ where: { id: userId }, select: { id: true } }),
+            this.prisma.gameProject.findUnique({
+                where: { id: projectId },
+                select: { id: true, type: true, category: true, gameType: true },
+            }),
+        ]);
+        if (!user) throw new NotFoundException('会员不存在');
+        if (!project) throw new NotFoundException('项目不存在');
+        const [discount, cards] = await Promise.all([
+            this.resolveMemberOrderDiscount({ customerUserId: userId, project, originalAmount }),
+            this.prisma.memberGameCard.findMany({
+                where: {
+                    userId,
+                    ...(project.gameType ? { gameCategoryId: String(project.gameType) } : {}),
+                },
+                orderBy: [{ isPrimary: 'desc' }, { id: 'asc' }],
+                select: {
+                    id: true,
+                    gameCategoryId: true,
+                    gameCategoryName: true,
+                    gameUniqueId: true,
+                    gameNickname: true,
+                    isPrimary: true,
+                },
+            }),
+        ]);
+        const memberDiscountAmount = this.toAmount2(Number(discount.amount || 0));
+        return {
+            memberDiscount: {
+                applied: memberDiscountAmount > 0,
+                levelCode: discount.levelCode,
+                rate: Number(discount.rate || 1),
+                amount: memberDiscountAmount,
+                originalAmount,
+                payableAmount: this.toAmount2(Math.max(0, originalAmount - memberDiscountAmount)),
+            },
+            gameCards: cards,
+            primaryGameCard: cards.find((item: any) => item.isPrimary) || cards[0] || null,
+        };
+    }
+
     private async allocateMemberBalanceLotsTx(tx: any, input: { userId: number; amount: number; sourceType: string; sourceId: number }) {
         let remaining = this.toAmount2(input.amount);
         if (remaining <= 0) return { allocated: 0, untracked: 0 };
@@ -2143,16 +2191,18 @@ export class OrdersService {
             })
             : this.toAmount2(Number(dto.couponDiscountAmount ?? 0));
         const activityDiscountAmount = this.toAmount2(Number(dto.activityDiscountAmount ?? 0));
-        const manualAdjustAmount = this.toAmount2(Number(dto.manualAdjustAmount ?? 0));
+        const manualAdjustAmount = memberDiscountAmount > 0 || selectedUserCoupon
+            ? 0
+            : this.toAmount2(Number(dto.manualAdjustAmount ?? 0));
         const giftDiscountAmount = this.toAmount2(giftedAmount);
         const discountAmount = this.toAmount2(
             memberDiscountAmount + couponDiscountAmount + activityDiscountAmount + giftDiscountAmount + manualAdjustAmount,
         );
         const finalPayableAmount = this.toAmount2(Math.max(0, originalAmount - discountAmount));
-        const effectivePaidAmount = selectedUserCoupon
+        const effectivePaidAmount = selectedUserCoupon || memberDiscountAmount > 0
             ? finalPayableAmount
             : this.toAmount2(Number(dto.paidAmount ?? finalPayableAmount));
-        const effectiveSettlementAmountForCreate = selectedUserCoupon
+        const effectiveSettlementAmountForCreate = selectedUserCoupon || memberDiscountAmount > 0
             ? finalPayableAmount
             : effectiveSettlementAmount;
         const discountType = this.resolveDiscountType({

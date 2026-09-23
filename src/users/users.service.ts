@@ -2368,6 +2368,17 @@ export class UsersService {
           totalSpentPoints: true,
         },
       },
+      memberGameCards: {
+        select: {
+          id: true,
+          gameCategoryId: true,
+          gameCategoryName: true,
+          gameUniqueId: true,
+          gameNickname: true,
+          isPrimary: true,
+        },
+        orderBy: [{ isPrimary: 'desc' as const }, { id: 'asc' as const }],
+      },
       wechatBindings: {
         select: {
           id: true,

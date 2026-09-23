@@ -6,6 +6,30 @@ import { PermissionType } from '@prisma/client';
 export class PermissionService {
     constructor(private prisma: PrismaService) {}
 
+    private async ensureMembershipPermissionTree() {
+        const menu = await this.prisma.permission.upsert({
+            where: { key: 'menu:membership' },
+            update: { name: '会员体系', module: 'menu', type: PermissionType.PAGE },
+            create: { key: 'menu:membership', name: '会员体系', module: 'menu', type: PermissionType.PAGE },
+            select: { id: true },
+        });
+        const pageKeys = [
+            'users:member:page',
+            'wallet:member-levels:page',
+            'wallet:recharge-plans:page',
+            'wallet:member-recharges:page',
+        ];
+        await this.prisma.permission.upsert({
+            where: { key: 'wallet:member-benefits:page' },
+            update: { name: '会员权益', module: 'member', type: PermissionType.PAGE, parentId: menu.id },
+            create: { key: 'wallet:member-benefits:page', name: '会员权益', module: 'member', type: PermissionType.PAGE, parentId: menu.id },
+        });
+        await this.prisma.permission.updateMany({
+            where: { key: { in: pageKeys } },
+            data: { parentId: menu.id },
+        });
+    }
+
     private async ensureServiceOnlineBoardPermissionTree() {
         const workbenchMenu = await this.prisma.permission.upsert({
             where: { key: 'menu:workbench' },
@@ -260,6 +284,7 @@ export class PermissionService {
         await this.ensureMemberCouponPermissionTree();
         await this.ensureRentalAccountPermissionTree();
         await this.ensureRentalOrderPermissions();
+        await this.ensureMembershipPermissionTree();
 
         const permissions = await this.prisma.permission.findMany({
             orderBy: { id: 'asc' },

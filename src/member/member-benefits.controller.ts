@@ -7,37 +7,37 @@ export class MemberBenefitsController {
   constructor(private readonly service: MemberBenefitsService) {}
 
   @Get()
-  @Permissions('wallet:member-levels:page')
+  @Permissions('wallet:member-benefits:page', 'wallet:member-levels:page')
   list(@Query('enabledOnly') enabledOnly?: string) {
     return this.service.listBenefits({ enabledOnly: enabledOnly === 'true' });
   }
 
   @Post()
-  @Permissions('wallet:member-levels:page')
+  @Permissions('wallet:member-benefits:page', 'wallet:member-levels:page')
   create(@Body() body: any) {
     return this.service.createBenefit(body || {});
   }
 
   @Patch(':id')
-  @Permissions('wallet:member-levels:page')
+  @Permissions('wallet:member-benefits:page', 'wallet:member-levels:page')
   update(@Param('id', ParseIntPipe) id: number, @Body() body: any) {
     return this.service.updateBenefit(id, body || {});
   }
 
   @Delete(':id')
-  @Permissions('wallet:member-levels:page')
+  @Permissions('wallet:member-benefits:page', 'wallet:member-levels:page')
   remove(@Param('id', ParseIntPipe) id: number) {
     return this.service.deleteBenefit(id);
   }
 
   @Get('levels/config')
-  @Permissions('wallet:member-levels:page')
+  @Permissions('wallet:member-benefits:page', 'wallet:member-levels:page')
   levelConfigs() {
     return this.service.listLevelBenefits();
   }
 
   @Post('levels/:levelId/config')
-  @Permissions('wallet:member-levels:page')
+  @Permissions('wallet:member-benefits:page', 'wallet:member-levels:page')
   replaceLevelBenefits(@Param('levelId', ParseIntPipe) levelId: number, @Body() body: any) {
     return this.service.replaceLevelBenefits(levelId, Array.isArray(body?.benefits) ? body.benefits : []);
   }

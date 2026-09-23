@@ -97,6 +97,17 @@ export class OrdersController {
         return this.systemConfigService.getEnabledOrderSourceOptions();
     }
 
+    @Post('member-order-context')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:list:create:button', 'orders:workbench:create:button')
+    async memberOrderContext(@Body() body: any) {
+        return this.ordersService.getMemberOrderContext({
+            userId: Number(body?.userId),
+            projectId: Number(body?.projectId),
+            originalAmount: Number(body?.originalAmount),
+        });
+    }
+
     /** 打手评价榜单 */
     @Post('player-evaluations/leaderboard')
     @UseGuards(PermissionsGuard)
