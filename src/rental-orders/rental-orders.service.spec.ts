@@ -178,6 +178,20 @@ describe('RentalOrdersService', () => {
       text: 'LM0131 金额：558.6\nLM0133 金额：345.9',
     });
     expect(result.matchedCount).toBe(1);
+    expect(result.inputAmountTotal).toBe(904.5);
+    expect(result.matchedAmountTotal).toBe(558.6);
     expect(result.rows.map((row: any) => row.status)).toEqual(['MATCHED', 'AMOUNT_MISMATCH']);
+    expect(prisma.rentalOrder.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { accountSourceNo: { in: ['LM0131', 'LM0133'] }, status: { not: 'VOIDED' } },
+    }));
+  });
+
+  it('ignores voided orders when the same source number has a valid settled order', async () => {
+    const prisma: any = { rentalOrder: { findMany: jest.fn().mockResolvedValue([
+      { id: 3, serialNo: 'LMSH100003', accountSourceNo: 'LM0131', actualAmount: 558.6, status: 'SETTLED', reconciledAt: null, version: 1 },
+    ]) } };
+    const result = await new RentalOrdersService(prisma, {} as any).previewBatchReconcile({ text: 'LM0131 金额：558.6' });
+    expect(result).toMatchObject({ matchedCount: 1, totalCount: 1, inputAmountTotal: 558.6, matchedAmountTotal: 558.6 });
+    expect(result.rows[0]).toMatchObject({ status: 'MATCHED', orderId: 3 });
   });
 });

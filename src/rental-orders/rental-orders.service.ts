@@ -178,7 +178,8 @@ export class RentalOrdersService {
     const inputs = this.parseBatchReconcileText(input.text);
     const sourceNos = [...new Set(inputs.map((item) => item.accountSourceNo).filter(Boolean))];
     const orders = sourceNos.length ? await db.rentalOrder.findMany({
-      where: { accountSourceNo: { in: sourceNos } },
+      // 已废除订单已完成原路退款，不属于商行待转付/待核销资金；同号源重新建单时也不能造成重复匹配。
+      where: { accountSourceNo: { in: sourceNos }, status: { not: 'VOIDED' } },
       orderBy: { id: 'desc' },
     }) : [];
     const groups = new Map<string, any[]>();
@@ -206,7 +207,15 @@ export class RentalOrdersService {
       if (Math.round(Number(order.actualAmount) * 100) !== Math.round(Number(item.amount) * 100)) return { ...base, status: 'AMOUNT_MISMATCH', message: '输入金额与订单实际费用不一致' };
       return { ...base, status: 'MATCHED', message: '可核销' };
     });
-    return { rows, matchedCount: rows.filter((item) => item.status === 'MATCHED').length, totalCount: rows.length };
+    const matchedRows = rows.filter((item) => item.status === 'MATCHED');
+    const sumAmounts = (items: any[], field: string) => items.reduce((sum, item) => sum + Math.round(Number(item?.[field] || 0) * 100), 0) / 100;
+    return {
+      rows,
+      matchedCount: matchedRows.length,
+      totalCount: rows.length,
+      inputAmountTotal: sumAmounts(inputs.filter((item) => !item.parseError), 'amount'),
+      matchedAmountTotal: sumAmounts(matchedRows, 'orderAmount'),
+    };
   }
 
   previewBatchReconcile(input: BatchReconcileAdminRentalOrderDto) {
@@ -232,7 +241,7 @@ export class RentalOrdersService {
         } });
         await this.log(tx, operatorId, updated, 'RENTAL_ORDER_BATCH_RECONCILE');
       }
-      return { reconciledCount: matched.length, reconciledAt: now, rows: matched };
+      return { reconciledCount: matched.length, reconciledAmountTotal: preview.matchedAmountTotal, reconciledAt: now, rows: matched };
     });
   }
 
