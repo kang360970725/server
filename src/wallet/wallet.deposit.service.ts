@@ -274,6 +274,67 @@ export class WalletDepositService {
         });
     }
 
+    async manualRefund(params: {
+        userId: number;
+        amount: number;
+        remark?: string;
+        operatorId?: number;
+    }) {
+        const userId = Number(params.userId);
+        const amount = this.round2(params.amount);
+        const remark = String(params.remark || '').trim();
+        if (!Number.isSafeInteger(userId) || userId <= 0) throw new BadRequestException('用户ID无效');
+        if (!(amount > 0)) throw new BadRequestException('退还金额必须大于0');
+        if (!remark) throw new BadRequestException('请填写保证金退还原因');
+
+        return this.prisma.$transaction(async (tx) => {
+            await tx.$queryRawUnsafe('SELECT userId FROM wallet_accounts WHERE userId = ? FOR UPDATE', userId);
+            const account = await tx.walletAccount.findUnique({
+                where: { userId },
+                select: { depositBalance: true, availableBalance: true, frozenBalance: true },
+            });
+            if (!account) throw new BadRequestException('钱包账户不存在');
+            const currentDeposit = this.round2(account.depositBalance);
+            if (amount > currentDeposit) throw new BadRequestException('退还金额不能超过当前保证金余额');
+
+            const accountAfter = await tx.walletAccount.update({
+                where: { userId },
+                data: { depositBalance: { decrement: amount }, availableBalance: { increment: amount } },
+                select: { depositBalance: true, availableBalance: true, frozenBalance: true },
+            });
+            const depositTx = await tx.walletDepositTransaction.create({
+                data: {
+                    userId,
+                    amount: -amount,
+                    bizType: 'DEPOSIT_REFUND',
+                    remark: remark.slice(0, 255),
+                    operatorId: params.operatorId ?? null,
+                    manualSource: 'MANUAL_REFUND',
+                },
+            });
+            await tx.walletTransaction.create({
+                data: {
+                    userId,
+                    direction: 'IN',
+                    bizType: 'DEPOSIT_REFUND',
+                    amount,
+                    status: 'AVAILABLE',
+                    sourceType: 'WALLET_DEPOSIT',
+                    sourceId: depositTx.id,
+                    availableAfter: accountAfter.availableBalance,
+                    frozenAfter: accountAfter.frozenBalance,
+                    remark: `手动退还保证金：${remark}`.slice(0, 255),
+                },
+            });
+            return {
+                record: depositTx,
+                depositBalance: this.round2(accountAfter.depositBalance),
+                availableBalance: this.round2(accountAfter.availableBalance),
+                frozenBalance: this.round2(accountAfter.frozenBalance),
+            };
+        });
+    }
+
     async listDepositTransactions(params: {
         userId: number;
         page: number;

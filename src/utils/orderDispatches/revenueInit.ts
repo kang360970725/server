@@ -500,9 +500,33 @@ export const computeBillingMODEPLAY = (order: any, modePlayAllocList: any) => {
         (a, b) => (a.round ?? 0) - (b.round ?? 0),
     );
 
-    const allocMap = new Map(
+    const allocMap = new Map<number, number>(
         modePlayAllocList?.map((x: any) => [Number(x.dispatchId), Number(x.income)]) ?? [],
     );
+
+    // 历史订单可能存在“派错后直接存档”的空派轮次。旧管理端会把这类轮次也
+    // 纳入均分，导致真实完成轮只拿到部分结算基数。重算时将空派轮次已分配的
+    // 金额归并到最后一个真实参与的完成轮；合法存单轮的人工分配保持不变。
+    let emptyDispatchIncome = 0;
+    for (const dispatch of dispatches) {
+        if (getSettlementParticipants(dispatch).length > 0) continue;
+        const dispatchId = Number(dispatch?.id ?? 0);
+        emptyDispatchIncome = roundMix1(emptyDispatchIncome + Number(allocMap.get(dispatchId) ?? 0));
+        allocMap.delete(dispatchId);
+    }
+    if (Math.abs(emptyDispatchIncome) > 1e-9) {
+        const fallbackDispatch = [...dispatches]
+            .reverse()
+            .find((dispatch) => getSettlementParticipants(dispatch).length > 0);
+        if (!fallbackDispatch) {
+            throw new BadRequestException('派单记录均无实际接单人，无法完成核算');
+        }
+        const fallbackId = Number(fallbackDispatch.id);
+        allocMap.set(
+            fallbackId,
+            roundMix1(Number(allocMap.get(fallbackId) ?? 0) + emptyDispatchIncome),
+        );
+    }
 
     const orderPaidAmount = getSettlementBaseAmount(order);
     const initialDispatcher = getInitialDispatcherSnapshot(order);

@@ -1826,11 +1826,11 @@ export class UsersService {
       });
 
       // ==========================
-      // 押金阈值降低 → 自动退还押金
+      // 保存时保证金超过当前阈值 → 自动退还溢出部分。
+      // 不能只判断“阈值是否降低”，否则手动补录导致的溢出在再次保存时永远不会被处理。
       // ==========================
       if (
-          updateUserDto.depositLimit !== undefined &&
-          Number(updateUserDto.depositLimit) < Number(oldUser.depositLimit || 2000)
+          updateUserDto.depositLimit !== undefined
       ) {
 
         const wallet = await tx.walletAccount.findUnique({

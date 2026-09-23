@@ -305,6 +305,61 @@ describe('finalized dispatch settlement participant filter', () => {
     });
   });
 
+  it('moves income mistakenly allocated to an empty archived round into the real completed round', () => {
+    const settlements = computeBillingMODEPLAY(
+      {
+        id: 31,
+        status: 'COMPLETED_PENDING_CONFIRM',
+        paidAmount: 888,
+        billingMode: BillingMode.MODE_PLAY,
+        projectSnapshot: { clubRate: null },
+        dispatches: [
+          {
+            id: 311,
+            round: 1,
+            status: DispatchStatus.ARCHIVED,
+            participants: [
+              { id: 1, userId: 5001, acceptedAt: null, rejectedAt: null, isActive: false },
+              { id: 2, userId: 5002, acceptedAt: null, rejectedAt: null, isActive: false },
+            ],
+          },
+          {
+            id: 312,
+            round: 2,
+            status: DispatchStatus.COMPLETED,
+            participants: [
+              {
+                id: 3,
+                userId: 5002,
+                acceptedAt: new Date('2026-08-20T03:17:00.000Z'),
+                rejectedAt: null,
+                isActive: false,
+                user: { name: 'A', staffRating: { rate: 0.2 } },
+              },
+              {
+                id: 4,
+                userId: 5003,
+                acceptedAt: new Date('2026-08-20T03:18:00.000Z'),
+                rejectedAt: null,
+                isActive: false,
+                user: { name: 'B', staffRating: { rate: 0.28 } },
+              },
+            ],
+          },
+        ],
+      },
+      [
+        { dispatchId: 311, income: 444 },
+        { dispatchId: 312, income: 444 },
+      ],
+    );
+
+    expect(settlements.filter((item) => item.ownerRoleType === 'PLAYER')).toMatchObject([
+      { dispatchId: 312, userId: 5002, contributionBaseAmount: 444, finalEarnings: 355.2 },
+      { dispatchId: 312, userId: 5003, contributionBaseAmount: 444, finalEarnings: 319.6 },
+    ]);
+  });
+
   it('applies to guaranteed settlement rebuilds as well', () => {
     const settlements = computeBillingGuaranteed({
       id: 2,

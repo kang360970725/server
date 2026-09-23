@@ -160,6 +160,18 @@ export class WalletController {
         });
     }
 
+    @Post('deposit/manual-refund')
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE, FINANCE_RECORDS_PAGE)
+    async manualDepositRefund(@Body() body: any, @Req() req: any) {
+        return this.walletDepositService.manualRefund({
+            userId: Number(body?.userId),
+            amount: Number(body?.amount),
+            remark: body?.remark,
+            operatorId: req.user?.userId,
+        });
+    }
+
 
     @Get('deposit-transactions')
     @UseGuards(PermissionsGuard)
