@@ -36,6 +36,12 @@ export class MemberBenefitsController {
     return this.service.listLevelBenefits();
   }
 
+  @Get('usages')
+  @Permissions('wallet:member-benefits:page', 'wallet:member-levels:page', 'users:member:page')
+  usageRecords(@Query() query: any) {
+    return this.service.listUsageRecords(query || {});
+  }
+
   @Post('levels/:levelId/config')
   @Permissions('wallet:member-benefits:page', 'wallet:member-levels:page')
   replaceLevelBenefits(@Param('levelId', ParseIntPipe) levelId: number, @Body() body: any) {

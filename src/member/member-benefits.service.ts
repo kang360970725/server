@@ -256,13 +256,80 @@ export class MemberBenefitsService {
       include: { benefit: true, usages: { orderBy: { usedAt: 'desc' } } },
       orderBy: [{ grantedAt: 'desc' }, { id: 'desc' }],
     });
+    const operatorIds = [...new Set(rows.flatMap((row: any) => row.usages || []).map((item: any) => Number(item.operatorId)).filter(Boolean))] as number[];
+    const operators = operatorIds.length ? await this.prisma.user.findMany({
+      where: { id: { in: operatorIds } },
+      select: { id: true, name: true, realName: true },
+    }) : [];
+    const operatorNames = new Map(operators.map((item: any) => [item.id, item.realName || item.name || `#${item.id}`]));
     return rows.map((row: any) => ({
       ...row,
       totalQuantity: row.totalQuantity == null ? null : quantity(row.totalQuantity),
       usedQuantity: quantity(row.usedQuantity),
       remainingQuantity: row.unlimited ? null : Math.max(0, quantity(row.totalQuantity) - quantity(row.usedQuantity)),
       unitValueSnapshot: money(row.unitValueSnapshot),
+      usages: (row.usages || []).map((item: any) => ({
+        ...item,
+        quantity: quantity(item.quantity),
+        deductedValue: money(item.deductedValue),
+        operatorName: item.operatorId ? (operatorNames.get(item.operatorId) || `#${item.operatorId}`) : '系统',
+      })),
     }));
+  }
+
+  async listUsageRecords(input: any = {}) {
+    const page = Math.max(1, Math.floor(Number(input?.page || input?.current || 1)));
+    const limit = Math.min(200, Math.max(1, Math.floor(Number(input?.limit || input?.pageSize || 20))));
+    const keyword = String(input?.keyword || '').trim();
+    const userId = Number(input?.userId || 0);
+    const benefitId = Number(input?.benefitId || 0);
+    const startAt = input?.startAt ? new Date(input.startAt) : null;
+    const endAt = input?.endAt ? new Date(input.endAt) : null;
+    const where: any = {
+      ...(userId > 0 ? { userId } : {}),
+      ...(benefitId > 0 ? { grant: { benefitId } } : {}),
+      ...(input?.status ? { status: String(input.status) } : {}),
+      ...(startAt || endAt ? { usedAt: { ...(startAt ? { gte: startAt } : {}), ...(endAt ? { lte: endAt } : {}) } } : {}),
+      ...(keyword ? {
+        OR: [
+          { user: { name: { contains: keyword } } },
+          { user: { realName: { contains: keyword } } },
+          { user: { phone: { contains: keyword } } },
+          { user: { memberProfile: { is: { memberCode: { contains: keyword } } } } },
+          { grant: { benefitNameSnapshot: { contains: keyword } } },
+          { remark: { contains: keyword } },
+        ],
+      } : {}),
+    };
+    const [total, rows] = await Promise.all([
+      (this.prisma as any).memberBenefitUsage.count({ where }),
+      (this.prisma as any).memberBenefitUsage.findMany({
+        where,
+        include: {
+          user: { select: { id: true, name: true, realName: true, phone: true, memberProfile: { select: { memberCode: true } } } },
+          grant: { select: { id: true, benefitId: true, benefitNameSnapshot: true, unitNameSnapshot: true, levelCodeSnapshot: true } },
+        },
+        orderBy: [{ usedAt: 'desc' }, { id: 'desc' }],
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+    ]);
+    const operatorIds = [...new Set(rows.map((item: any) => Number(item.operatorId)).filter(Boolean))] as number[];
+    const operators = operatorIds.length ? await this.prisma.user.findMany({
+      where: { id: { in: operatorIds } }, select: { id: true, name: true, realName: true },
+    }) : [];
+    const operatorNames = new Map(operators.map((item: any) => [item.id, item.realName || item.name || `#${item.id}`]));
+    return {
+      data: rows.map((item: any) => ({
+        ...item,
+        quantity: quantity(item.quantity),
+        deductedValue: money(item.deductedValue),
+        operatorName: item.operatorId ? (operatorNames.get(item.operatorId) || `#${item.operatorId}`) : '系统',
+      })),
+      total,
+      page,
+      limit,
+    };
   }
 
   async useBenefit(grantId: number, input: any, operatorId?: number) {
