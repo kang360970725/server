@@ -798,6 +798,7 @@ export class UsersService {
     staffEmploymentStatus?: string;
     anonymousOnly?: string | boolean;
     includeStaffMembers?: string | boolean;
+    wechatBoundOnly?: string | boolean;
     memberState?: string;
     memberLevelCode?: string;
     scene?: string;
@@ -814,6 +815,7 @@ export class UsersService {
       staffEmploymentStatus,
       anonymousOnly,
       includeStaffMembers,
+      wechatBoundOnly,
       memberState,
       memberLevelCode,
       scene,
@@ -858,6 +860,7 @@ export class UsersService {
     };
 
     const includeProfileMembersInMemberScene = sceneKey === 'MEMBER' && String(includeStaffMembers || '') === 'true';
+    const requireWechatBindingInMemberScene = includeProfileMembersInMemberScene && String(wechatBoundOnly || '') === 'true';
     const sceneUserTypes = includeProfileMembersInMemberScene ? null : resolveSceneUserTypes();
     if (sceneKey === 'STAFF_RENTAL_RISK' && !String(search || '').trim()) {
       return {
@@ -869,16 +872,20 @@ export class UsersService {
       };
     }
     if (includeProfileMembersInMemberScene) {
-      AND.push({
-        OR: [
-          { userType: UserType.REGISTERED_USER },
-          {
-            memberProfile: {
-              isNot: null,
+      if (requireWechatBindingInMemberScene) {
+        AND.push({ wechatBindings: { some: {} } });
+      } else {
+        AND.push({
+          OR: [
+            { userType: UserType.REGISTERED_USER },
+            {
+              memberProfile: {
+                isNot: null,
+              },
             },
-          },
-        ],
-      });
+          ],
+        });
+      }
     } else if (sceneUserTypes?.length) {
       AND.push({ userType: { in: sceneUserTypes } });
     }
