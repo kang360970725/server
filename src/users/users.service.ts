@@ -857,8 +857,8 @@ export class UsersService {
       return filteredTypes;
     };
 
-    const includeStaffMembersInMemberScene = sceneKey === 'MEMBER' && String(includeStaffMembers || '') === 'true';
-    const sceneUserTypes = includeStaffMembersInMemberScene ? null : resolveSceneUserTypes();
+    const includeProfileMembersInMemberScene = sceneKey === 'MEMBER' && String(includeStaffMembers || '') === 'true';
+    const sceneUserTypes = includeProfileMembersInMemberScene ? null : resolveSceneUserTypes();
     if (sceneKey === 'STAFF_RENTAL_RISK' && !String(search || '').trim()) {
       return {
         data: [],
@@ -868,12 +868,11 @@ export class UsersService {
         totalPages: 0,
       };
     }
-    if (includeStaffMembersInMemberScene) {
+    if (includeProfileMembersInMemberScene) {
       AND.push({
         OR: [
           { userType: UserType.REGISTERED_USER },
           {
-            userType: UserType.STAFF,
             memberProfile: {
               isNot: null,
             },
@@ -1017,7 +1016,7 @@ export class UsersService {
       where.AND = AND;
     }
 
-    if (sceneKey === 'STAFF' || sceneKey === 'ALL' || includeStaffMembersInMemberScene || userType === UserType.STAFF) {
+    if (sceneKey === 'STAFF' || sceneKey === 'ALL' || includeProfileMembersInMemberScene || userType === UserType.STAFF) {
       await this.autoFreezeDormantStaffUsers();
     }
 
