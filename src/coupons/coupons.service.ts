@@ -15,6 +15,7 @@ import { PrismaService } from '../prisma.service';
 import { CreateCouponTemplateDto } from './dto/create-coupon-template.dto';
 import { UpdateCouponTemplateStatusDto } from './dto/update-coupon-template-status.dto';
 import { GrantUserCouponDto } from './dto/grant-user-coupon.dto';
+import { UpdateCouponTemplateDto } from './dto/update-coupon-template.dto';
 
 @Injectable()
 export class CouponsService {
@@ -59,7 +60,7 @@ export class CouponsService {
     return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 
-  async createTemplate(dto: CreateCouponTemplateDto, operatorId?: number) {
+  private buildTemplateData(dto: CreateCouponTemplateDto) {
     if (!dto.name?.trim()) throw new BadRequestException('券名称不能为空');
     const type = dto.type;
     if (!Object.values(CouponTemplateType).includes(type)) {
@@ -105,8 +106,7 @@ export class CouponsService {
       throw new BadRequestException('结束时间必须晚于开始时间');
     }
 
-    return this.prisma.couponTemplate.create({
-      data: {
+    return {
         name: dto.name.trim(),
         type,
         discountValue,
@@ -123,8 +123,23 @@ export class CouponsService {
         startAt,
         endAt,
         totalLimit: dto.totalLimit ?? null,
+        miniappClaimEnabled: dto.miniappClaimEnabled === true,
+        dailyClaimLimit: dto.miniappClaimEnabled && dto.dailyClaimLimit ? Number(dto.dailyClaimLimit) : null,
         perUserLimit: dto.perUserLimit ?? null,
-      },
+      };
+  }
+
+  async createTemplate(dto: CreateCouponTemplateDto, operatorId?: number) {
+    return this.prisma.couponTemplate.create({ data: this.buildTemplateData(dto) as any });
+  }
+
+  async updateTemplate(dto: UpdateCouponTemplateDto, operatorId?: number) {
+    const id = Number(dto.id);
+    const row = await this.prisma.couponTemplate.findUnique({ where: { id } });
+    if (!row) throw new NotFoundException('券模板不存在');
+    return this.prisma.couponTemplate.update({
+      where: { id },
+      data: this.buildTemplateData(dto) as any,
     });
   }
 
@@ -169,21 +184,6 @@ export class CouponsService {
       if (template.totalLimit && template.issuedCount + totalGrantCount > template.totalLimit) {
         throw new BadRequestException('超出券模板总发放上限');
       }
-      if (template.perUserLimit && template.perUserLimit > 0) {
-        const userCounts = await tx.userCoupon.groupBy({
-          by: ['userId'],
-          where: { userId: { in: userIds }, templateId },
-          _count: { _all: true },
-        });
-        const countMap = new Map<number, number>(
-          userCounts.map((row) => [Number(row.userId), Number((row as any)?._count?._all || 0)]),
-        );
-        const exceededUserId = userIds.find((userId) => Number(countMap.get(userId) || 0) + count > template.perUserLimit);
-        if (exceededUserId) {
-          throw new BadRequestException(`用户 ${exceededUserId} 超出领券上限`);
-        }
-      }
-
       const expiresAt = dto.expiresAt ? new Date(dto.expiresAt) : template.endAt || null;
       if (expiresAt && expiresAt <= now) {
         throw new BadRequestException('券过期时间必须晚于当前时间');
@@ -196,6 +196,8 @@ export class CouponsService {
           status: UserCouponStatus.UNUSED,
           receivedAt: now,
           expiresAt,
+          sourceType: 'ADMIN_GRANT',
+          sourceId: operatorId || null,
         })),
       );
       await tx.userCoupon.createMany({ data: rows });

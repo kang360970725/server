@@ -8,6 +8,7 @@ import {
   IsString,
   MaxLength,
   Min,
+  IsBoolean,
 } from 'class-validator';
 import { CouponScope, CouponTemplateStatus, CouponTemplateType } from '@prisma/client';
 
@@ -58,6 +59,15 @@ export class CreateCouponTemplateDto {
   @IsInt()
   @Min(0)
   totalLimit?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  miniappClaimEnabled?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  dailyClaimLimit?: number;
 
   @IsOptional()
   @IsInt()

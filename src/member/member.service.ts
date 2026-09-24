@@ -210,15 +210,6 @@ export class MemberService {
       if (template.totalLimit && Number(template.issuedCount || 0) + Number(benefit.count || 0) > Number(template.totalLimit)) {
         throw new BadRequestException(`优惠券模板库存不足：${template.name || benefit.templateId}`);
       }
-      if (template.perUserLimit && Number(template.perUserLimit) > 0) {
-        const currentCount = await (tx as any).userCoupon.count({
-          where: { userId: Number(input.userId), templateId: Number(template.id) },
-        });
-        if (currentCount + Number(benefit.count || 0) > Number(template.perUserLimit)) {
-          throw new BadRequestException(`会员领取该券已达上限：${template.name || benefit.templateId}`);
-        }
-      }
-
       const expiresAt = template.endAt || null;
       const createRows = Array.from({ length: Number(benefit.count || 0) }).map(() => ({
         userId: Number(input.userId),
@@ -1558,12 +1549,15 @@ export class MemberService {
     });
   }
 
-  async adjustMemberLevel(input: { userId: number; levelCode?: string | null; sourceRechargeOrderId?: number; remark?: string }, operatorId?: number) {
+  async adjustMemberLevel(input: { userId: number; levelCode?: string | null; sourceRechargeOrderId?: number; remark?: string; confirmBenefitReset?: boolean }, operatorId?: number) {
     const userId = Number(input?.userId || 0);
     if (!userId) throw new BadRequestException('userId 必填');
     const requested = String(input?.levelCode || '').trim().toUpperCase();
     const remark = String(input?.remark || '').trim().slice(0, 255);
     if (!remark) throw new BadRequestException('请填写等级调整原因');
+    if (input?.confirmBenefitReset !== true) {
+      throw new BadRequestException('请先确认：会员权益将按目标等级重新发放，当前可用权益的核销数量将重置为0');
+    }
 
     return this.prisma.$transaction(async (tx) => {
       await this.ensureUserAssets(userId, tx as any);
@@ -1603,7 +1597,7 @@ export class MemberService {
           remark,
         },
       });
-      await tx.memberLevelOperation.create({
+      const levelOperation = await tx.memberLevelOperation.create({
         data: {
           userId,
           beforeLevelCode: String(profile.levelCode || 'V0'),
@@ -1621,13 +1615,11 @@ export class MemberService {
           data: { levelAfterCode: nextCode },
         });
       }
-      await this.memberBenefitsService.grantForLevelChange({
+      await this.memberBenefitsService.reissueForManualLevelChange({
         tx,
         userId,
-        beforeLevelCode: String(profile.levelCode || 'V0'),
         afterLevelCode: nextCode,
-        sourceType: sourceRechargeOrderId ? 'LEVEL_UPGRADE' : 'ADMIN_LEVEL_CHANGE',
-        sourceId: sourceRechargeOrderId || undefined,
+        sourceId: Number(levelOperation?.id || 0) || undefined,
       });
       return updated;
     });

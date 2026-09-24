@@ -485,6 +485,11 @@ model CouponTemplate {
   startAt              DateTime?
   endAt                DateTime?
   totalLimit           Int?
+  /// 是否允许C端用户在小程序领券中心主动领取
+  miniappClaimEnabled  Boolean              @default(false)
+  /// 小程序主动领取每日限量；空值表示不限制，按北京时间自然日统计
+  dailyClaimLimit      Int?
+  /// 仅限制小程序主动领取，不限制后台发放或业务赠券
   perUserLimit         Int?
   issuedCount          Int                  @default(0)
   usedCount            Int                  @default(0)

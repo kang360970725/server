@@ -210,6 +210,64 @@ export class MemberBenefitsService {
     return created;
   }
 
+  async reissueForManualLevelChange(params: {
+    tx: any;
+    userId: number;
+    afterLevelCode: string;
+    sourceId?: number;
+  }) {
+    const { tx, userId, afterLevelCode, sourceId } = params;
+    const level = await tx.memberLevelConfig.findUnique({
+      where: { code: afterLevelCode },
+      select: { id: true, code: true },
+    });
+    if (!level) throw new NotFoundException('目标会员等级不存在');
+
+    // 保留旧发放和核销台账供审计，但不再计入会员当前可用权益。
+    await tx.memberBenefitGrant.updateMany({
+      where: { userId, status: 'ACTIVE' },
+      data: { status: 'REPLACED' },
+    });
+
+    const configs = await tx.memberLevelBenefit.findMany({
+      where: {
+        levelId: level.id,
+        enabled: true,
+        grantMode: { in: ['UPGRADE_ONCE', 'MONTHLY'] },
+        benefit: { enabled: true },
+      },
+      include: { benefit: true },
+      orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+    });
+    const created: any[] = [];
+    const now = new Date();
+    for (const config of configs) {
+      const range = config.grantMode === 'MONTHLY' ? this.monthRange(now) : null;
+      const expiresAt = config.validityDays
+        ? new Date(now.getTime() + Number(config.validityDays) * 86400000)
+        : range?.end || null;
+      created.push(await tx.memberBenefitGrant.create({
+        data: {
+          userId,
+          benefitId: config.benefitId,
+          levelCodeSnapshot: afterLevelCode,
+          benefitNameSnapshot: config.benefit.name,
+          unitNameSnapshot: config.benefit.unitName,
+          unitValueSnapshot: config.benefit.unitValue,
+          sourceType: 'ADMIN_LEVEL_RESET',
+          sourceId: sourceId ?? null,
+          totalQuantity: config.unlimited ? null : config.quantity,
+          usedQuantity: 0,
+          unlimited: config.unlimited,
+          periodStart: range?.start || null,
+          periodEnd: range?.end || null,
+          expiresAt,
+        },
+      }));
+    }
+    return created;
+  }
+
   async ensureMonthlyGrants(userId: number) {
     const profile = await (this.prisma as any).memberProfile.findUnique({ where: { userId } });
     if (!profile) return;

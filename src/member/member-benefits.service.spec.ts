@@ -61,4 +61,35 @@ describe('MemberBenefitsService', () => {
     expect(result.deductedValue).toBe(160);
     expect(tx.memberBenefitGrant.update).toHaveBeenCalled();
   });
+
+  it('人工调整等级时保留旧台账并按目标等级从零重发权益', async () => {
+    const tx: any = {
+      memberLevelConfig: { findUnique: jest.fn().mockResolvedValue({ id: 4, code: 'V4' }) },
+      memberLevelBenefit: { findMany: jest.fn().mockResolvedValue([
+        { benefitId: 8, grantMode: 'UPGRADE_ONCE', unlimited: false, quantity: 6, validityDays: null, benefit: { name: '免费跑刀', unitName: '份', unitValue: 1000 } },
+      ]) },
+      memberBenefitGrant: {
+        updateMany: jest.fn().mockResolvedValue({ count: 2 }),
+        create: jest.fn().mockImplementation(({ data }) => ({ id: 20, ...data })),
+      },
+    };
+    const service = new MemberBenefitsService({} as any);
+    await service.reissueForManualLevelChange({ tx, userId: 2, afterLevelCode: 'V4', sourceId: 88 });
+
+    expect(tx.memberBenefitGrant.updateMany).toHaveBeenCalledWith({
+      where: { userId: 2, status: 'ACTIVE' },
+      data: { status: 'REPLACED' },
+    });
+    expect(tx.memberBenefitGrant.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        userId: 2,
+        levelCodeSnapshot: 'V4',
+        sourceType: 'ADMIN_LEVEL_RESET',
+        sourceId: 88,
+        totalQuantity: 6,
+        usedQuantity: 0,
+        unitValueSnapshot: 1000,
+      }),
+    });
+  });
 });

@@ -111,6 +111,7 @@ export class MemberController {
       levelCode: body?.levelCode == null ? null : String(body.levelCode),
       sourceRechargeOrderId: body?.sourceRechargeOrderId ? Number(body.sourceRechargeOrderId) : undefined,
       remark: body?.remark ? String(body.remark) : undefined,
+      confirmBenefitReset: body?.confirmBenefitReset === true,
     }, Number(req?.user?.userId || 0) || undefined);
   }
 

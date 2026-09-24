@@ -5,6 +5,18 @@ import { miniOk } from './mini.response';
 import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { Public } from '../auth/decorators/public.decorator';
 
+const shanghaiDayRange = (now = new Date()) => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(now);
+  const value = (type: string) => parts.find((item) => item.type === type)?.value || '';
+  const date = `${value('year')}-${value('month')}-${value('day')}`;
+  return {
+    start: new Date(`${date}T00:00:00+08:00`),
+    end: new Date(new Date(`${date}T00:00:00+08:00`).getTime() + 24 * 60 * 60 * 1000),
+  };
+};
+
 @ApiTags('mini-coupons')
 @ApiBearerAuth()
 @Controller('mini/coupons')
@@ -34,6 +46,7 @@ export class MiniCouponsController {
 
     const where: any = {
       status: CouponTemplateStatus.ACTIVE,
+      miniappClaimEnabled: true,
       OR: [
         { startAt: null },
         { startAt: { lte: now } },
@@ -59,7 +72,23 @@ export class MiniCouponsController {
       this.prisma.couponTemplate.count({ where }),
     ]);
 
-    return miniOk({ list, total, page, limit, totalPages: Math.ceil(total / limit) });
+    const dayRange = shanghaiDayRange(now);
+    const dailyRows = list.length ? await this.prisma.userCoupon.groupBy({
+      by: ['templateId'],
+      where: {
+        templateId: { in: list.map((item) => Number(item.id)) },
+        sourceType: 'MINIAPP_CLAIM',
+        receivedAt: { gte: dayRange.start, lt: dayRange.end },
+      },
+      _count: { _all: true },
+    }) : [];
+    const dailyMap = new Map(dailyRows.map((item: any) => [Number(item.templateId), Number(item?._count?._all || 0)]));
+    const enrichedList = list.map((item: any) => ({
+      ...item,
+      dailyClaimedCount: Number(dailyMap.get(Number(item.id)) || 0),
+    }));
+
+    return miniOk({ list: enrichedList, total, page, limit, totalPages: Math.ceil(total / limit) });
   }
 
   @Get('mine')
@@ -95,7 +124,7 @@ export class MiniCouponsController {
     const where: any = { userId };
     if (query?.status) where.status = query.status as UserCouponStatus;
 
-    const [list, total] = await Promise.all([
+    const [list, total, claimCountRows] = await Promise.all([
       this.prisma.userCoupon.findMany({
         where,
         include: { template: true },
@@ -104,9 +133,24 @@ export class MiniCouponsController {
         take: limit,
       }),
       this.prisma.userCoupon.count({ where }),
+      this.prisma.userCoupon.groupBy({
+        by: ['templateId'],
+        where: { userId, sourceType: 'MINIAPP_CLAIM' },
+        _count: { _all: true },
+      }),
     ]);
 
-    return miniOk({ list, total, page, limit, totalPages: Math.ceil(total / limit) });
+    return miniOk({
+      list,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      miniappClaimCounts: claimCountRows.map((item: any) => ({
+        templateId: Number(item.templateId),
+        count: Number(item?._count?._all || 0),
+      })),
+    });
   }
 
   @Post('claim')
@@ -126,25 +170,38 @@ export class MiniCouponsController {
     const templateId = Number(templateIdRaw);
     if (!templateId) throw new BadRequestException('templateId 必填');
 
-    const template = await this.prisma.couponTemplate.findUnique({ where: { id: templateId } });
-    if (!template) throw new BadRequestException('券模板不存在');
-    if (template.status !== CouponTemplateStatus.ACTIVE) throw new BadRequestException('券模板未生效');
     const now = new Date();
-    if (template.startAt && now < template.startAt) throw new BadRequestException('券模板尚未开始');
-    if (template.endAt && now > template.endAt) throw new BadRequestException('券模板已过期');
-
-    const claimedCount = await this.prisma.userCoupon.count({
-      where: { userId, templateId },
-    });
-    if (template.perUserLimit && claimedCount >= template.perUserLimit) {
-      throw new BadRequestException('超出每人领取上限');
-    }
-
-    if (template.totalLimit && template.issuedCount >= template.totalLimit) {
-      throw new BadRequestException('已领完');
-    }
-
     const data = await this.prisma.$transaction(async (tx) => {
+      const template = await tx.couponTemplate.findUnique({ where: { id: templateId } });
+      if (!template) throw new BadRequestException('券模板不存在');
+      if (!template.miniappClaimEnabled) throw new BadRequestException('该券仅支持平台发放');
+      if (template.status !== CouponTemplateStatus.ACTIVE) throw new BadRequestException('券模板未生效');
+      if (template.startAt && now < template.startAt) throw new BadRequestException('券模板尚未开始');
+      if (template.endAt && now > template.endAt) throw new BadRequestException('券模板已过期');
+
+      const claimedCount = await tx.userCoupon.count({
+        where: { userId, templateId, sourceType: 'MINIAPP_CLAIM' },
+      });
+      if (template.perUserLimit && claimedCount >= template.perUserLimit) {
+        throw new BadRequestException('已达到个人领取上限');
+      }
+      if (template.totalLimit && template.issuedCount >= template.totalLimit) {
+        throw new BadRequestException('优惠券已抢光');
+      }
+      if (template.dailyClaimLimit && template.dailyClaimLimit > 0) {
+        const dayRange = shanghaiDayRange(now);
+        const dailyClaimed = await tx.userCoupon.count({
+          where: {
+            templateId,
+            sourceType: 'MINIAPP_CLAIM',
+            receivedAt: { gte: dayRange.start, lt: dayRange.end },
+          },
+        });
+        if (dailyClaimed >= template.dailyClaimLimit) {
+          throw new BadRequestException('今日优惠券已抢光，请明天再来');
+        }
+      }
+
       const coupon = await tx.userCoupon.create({
         data: {
           userId,
@@ -152,6 +209,7 @@ export class MiniCouponsController {
           status: UserCouponStatus.UNUSED,
           receivedAt: now,
           expiresAt: template.endAt || null,
+          sourceType: 'MINIAPP_CLAIM',
         },
       });
       await tx.couponTemplate.update({
@@ -159,7 +217,7 @@ export class MiniCouponsController {
         data: { issuedCount: { increment: 1 } },
       });
       return coupon;
-    });
+    }, { isolationLevel: 'Serializable' });
 
     return miniOk(data, '领取成功');
   }

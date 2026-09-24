@@ -6,6 +6,7 @@ import { CouponsService } from './coupons.service';
 import { CreateCouponTemplateDto } from './dto/create-coupon-template.dto';
 import { UpdateCouponTemplateStatusDto } from './dto/update-coupon-template-status.dto';
 import { GrantUserCouponDto } from './dto/grant-user-coupon.dto';
+import { UpdateCouponTemplateDto } from './dto/update-coupon-template.dto';
 
 const LEGACY_ADMIN_PAGE = 'system:role:page';
 const ORDERS_PAGE = 'orders:list:page';
@@ -29,6 +30,13 @@ export class CouponsController {
   createTemplate(@Body() dto: CreateCouponTemplateDto, @Req() req: any) {
     const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
     return this.couponsService.createTemplate(dto, operatorId);
+  }
+
+  @Post('templates/update')
+  @Permissions(COUPONS_PAGE, LEGACY_ADMIN_PAGE)
+  updateTemplate(@Body() dto: UpdateCouponTemplateDto, @Req() req: any) {
+    const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.couponsService.updateTemplate(dto, operatorId);
   }
 
   @Post('templates/update-status')
