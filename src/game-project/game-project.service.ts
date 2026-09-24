@@ -221,8 +221,12 @@ export class GameProjectService {
         });
     }
 
-    async options(params: { keyword?: string; category?: string }) {
-        const where: any = { status: 'ACTIVE' };
+    async options(params: { keyword?: string; category?: string; ids?: number[] }) {
+        const ids = Array.isArray(params?.ids)
+            ? params.ids.map((item) => Number(item)).filter((item) => Number.isFinite(item) && item > 0)
+            : [];
+        // 编辑时必须回显历史已选项目，即使项目后续已停用也不能从表单中消失。
+        const where: any = ids.length ? { id: { in: ids } } : { status: 'ACTIVE' };
         if (params?.keyword) {
             where.OR = [{ name: { contains: params.keyword } }];
         }
