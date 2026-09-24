@@ -68,8 +68,8 @@ async function bootstrap() {
       return callback(null, false);
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    exposedHeaders: ['x-access-token'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Miniapp-AppId', 'X-Miniapp-Version', 'X-Miniapp-Build', 'X-Miniapp-Env', 'X-Miniapp-Config-Revision'],
+    exposedHeaders: ['x-access-token', 'x-miniapp-mode', 'x-miniapp-config-revision'],
   });
 
   if (process.env.ENABLE_SWAGGER === 'true' || !isProd) {

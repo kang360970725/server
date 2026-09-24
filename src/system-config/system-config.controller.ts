@@ -92,7 +92,7 @@ export class SystemConfigController {
 
   @Post('goods/category-tree/get')
   @UseGuards(JwtAuthGuard, PermissionsGuard)
-  @Permissions('system:game-project:page')
+  @Permissions('system:game-project:page', 'wallet:member-benefits:page')
   async getGoodsCategoryTree() {
     return this.service.getGoodsCategoryTree();
   }

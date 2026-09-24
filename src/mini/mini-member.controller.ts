@@ -5,6 +5,7 @@ import { miniOk } from './mini.response';
 import { WechatPayService } from './wechat-pay.service';
 import { getWechatRechargeNotifyUrlFromConfig } from './wechat-callback.util';
 import { SystemConfigService } from '../system-config/system-config.service';
+import { MiniFeature } from './mini-feature.decorator';
 
 @Controller('mini/member')
 export class MiniMemberController {
@@ -15,19 +16,20 @@ export class MiniMemberController {
   ) {}
 
   @Get('overview')
-  async overview(@Req() req: any, @Query('reviewMode') reviewMode?: string) {
+  async overview(@Req() req: any, @Query('reviewMode') _reviewMode?: string) {
     const userId = Number(req?.user?.userId ?? req?.user?.id ?? req?.user?.sub);
-    return miniOk(await this.memberService.getMiniOverview(userId, { reviewMode: reviewMode === 'true' }));
+    return miniOk(await this.memberService.getMiniOverview(userId, { reviewMode: req?.miniRuntime?.mode === 'REVIEW' }));
   }
 
   @Public()
   @Get('levels')
-  async levels(@Query('reviewMode') reviewMode?: string) {
-    const levels = await this.memberService.listLevelConfigs({ structured: true, reviewMode: reviewMode === 'true' });
+  async levels(@Req() req: any, @Query('reviewMode') _reviewMode?: string) {
+    const levels = await this.memberService.listLevelConfigs({ structured: true, reviewMode: req?.miniRuntime?.mode === 'REVIEW' });
     return miniOk((Array.isArray(levels) ? levels : []).filter((item: any) => item?.enabled !== false));
   }
 
   @Get('recharge-plans')
+  @MiniFeature('recharge')
   async rechargePlans() {
     const plans = await this.memberService.listRechargePlans(true);
     return miniOk(plans.map((item: any) => ({
@@ -80,6 +82,7 @@ export class MiniMemberController {
   }
 
   @Post('recharge/create')
+  @MiniFeature('recharge')
   async createRechargeOrder(@Req() req: any, @Body() body: { planId?: number; amount?: number; payerOpenid?: string }) {
     const userId = Number(req?.user?.userId ?? req?.user?.id ?? req?.user?.sub);
     await this.memberService.assertMiniPhoneBound(userId);
@@ -87,6 +90,7 @@ export class MiniMemberController {
   }
 
   @Post('recharge/:id/wechat-prepay')
+  @MiniFeature('recharge')
   async createRechargePrepay(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: any) {
     const userId = Number(req?.user?.userId ?? req?.user?.id ?? req?.user?.sub);
     const notifyUrl = body?.notifyUrl

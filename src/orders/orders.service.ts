@@ -1644,12 +1644,18 @@ export class OrdersService {
         });
         if (!rule) return { amount: 0, rate: 1, levelCode: profile.levelCode, benefitId: null };
         const config = rule.config && typeof rule.config === 'object' ? rule.config : {};
-        const excludedProjectTypes = Array.isArray(config.excludedProjectTypes)
-            ? config.excludedProjectTypes.map((item: any) => String(item || '').trim().toUpperCase()) : [];
         const excludedCategoryIds = Array.isArray(config.excludedCategoryIds)
             ? config.excludedCategoryIds.map((item: any) => String(item || '').trim()) : [];
-        if (excludedProjectTypes.includes(String(input.project?.type || '').trim().toUpperCase()) ||
-            excludedCategoryIds.includes(String(input.project?.category || '').trim())) {
+        // 会员折扣排除范围统一按商品分类判断。订单类型属于结算/业务属性，
+        // 同一类型下可能包含多个不同分类，不能作为会员折扣适用范围依据。
+        if (excludedCategoryIds.includes(String(input.project?.category || '').trim())) {
+            return { amount: 0, rate: 1, levelCode: profile.levelCode, benefitId: Number(rule.benefitId) };
+        }
+        // 兼容尚未在新页面保存过的历史配置：仅当分类排除列表为空时，临时读取
+        // 旧 excludedProjectTypes。配置任意分类并保存后即完全切换到分类口径。
+        const legacyExcludedProjectTypes = excludedCategoryIds.length === 0 && Array.isArray(config.excludedProjectTypes)
+            ? config.excludedProjectTypes.map((item: any) => String(item || '').trim().toUpperCase()) : [];
+        if (legacyExcludedProjectTypes.includes(String(input.project?.type || '').trim().toUpperCase())) {
             return { amount: 0, rate: 1, levelCode: profile.levelCode, benefitId: Number(rule.benefitId) };
         }
         let rate = Number(config.rate ?? config.discountRate ?? 1);

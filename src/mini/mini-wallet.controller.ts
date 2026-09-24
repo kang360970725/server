@@ -2,10 +2,12 @@ import { Controller, Get, Query, Req } from '@nestjs/common';
 import { WalletService } from '../wallet/wallet.service';
 import { miniOk } from './mini.response';
 import { ApiBearerAuth, ApiOkResponse, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { MiniFeature } from './mini-feature.decorator';
 
 @ApiTags('mini-wallet')
 @ApiBearerAuth()
 @Controller('mini/wallet')
+@MiniFeature('wallet')
 export class MiniWalletController {
   constructor(private readonly walletService: WalletService) {}
 

@@ -19,10 +19,13 @@ import { MiniMemberController } from './mini-member.controller';
 import { MiniEngagementController } from './mini-engagement.controller';
 import { MiniEngagementService } from './mini-engagement.service';
 import { MemberEngagementAdminController } from './member-engagement-admin.controller';
+import { MiniRuntimeController } from './mini-runtime.controller';
+import { MiniRuntimeService } from './mini-runtime.service';
 
 @Module({
   imports: [AuthModule, OrdersModule, WalletModule, CouponsModule, SystemConfigModule, NotificationsModule, MemberModule],
-  controllers: [MiniAuthController, MiniOrdersController, MiniWalletController, MiniCouponsController, MiniProjectsController, MiniHomeController, MiniAnnouncementsController, MiniMemberController, MiniEngagementController, MemberEngagementAdminController],
-  providers: [PrismaService, WechatPayService, MiniEngagementService],
+  controllers: [MiniRuntimeController, MiniAuthController, MiniOrdersController, MiniWalletController, MiniCouponsController, MiniProjectsController, MiniHomeController, MiniAnnouncementsController, MiniMemberController, MiniEngagementController, MemberEngagementAdminController],
+  providers: [PrismaService, WechatPayService, MiniEngagementService, MiniRuntimeService],
+  exports: [MiniRuntimeService],
 })
 export class MiniModule {}

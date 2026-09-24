@@ -63,6 +63,7 @@ export class SystemConfigService implements OnModuleInit {
       customerServiceCardImage: String(config?.customerServiceCardImage || '').trim(),
       wechatReviewMode: config?.wechatReviewMode === true || String(config?.wechatReviewMode || '').toLowerCase() === 'true',
       wechatReviewVersions: reviewVersions,
+      revision: Math.max(0, Number(config?.revision || 0) || 0),
       remark: String(config?.remark || '').trim(),
     };
   }
@@ -845,6 +846,7 @@ export class SystemConfigService implements OnModuleInit {
       customerServiceCardImage: '',
       wechatReviewMode: false,
       wechatReviewVersions: [],
+      revision: 0,
       remark: '',
     };
     const config = await this.getJson(SystemConfigService.KEYS.MINIAPP_CUSTOMER_SERVICE_CONFIG, fallback);
@@ -913,7 +915,11 @@ export class SystemConfigService implements OnModuleInit {
   }
 
   async upsertMiniappCustomerServiceConfig(config: any) {
-    const normalized = this.normalizeMiniappCustomerServiceConfig(config);
+    const current: any = await this.getMiniappCustomerServiceConfig();
+    const normalized = this.normalizeMiniappCustomerServiceConfig({
+      ...config,
+      revision: Math.max(0, Number(current?.revision || 0) || 0) + 1,
+    });
     return this.prisma.systemConfig.upsert({
       where: { key: SystemConfigService.KEYS.MINIAPP_CUSTOMER_SERVICE_CONFIG },
       update: {

@@ -6,6 +6,7 @@ import { miniOk } from './mini.response';
 import { ApiBearerAuth, ApiBody, ApiOkResponse, ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { Public } from '../auth/decorators/public.decorator';
 import { WechatPayService } from './wechat-pay.service';
+import { MiniFeature } from './mini-feature.decorator';
 import { getWechatOrderNotifyUrlFromConfig } from './wechat-callback.util';
 import { SystemConfigService } from '../system-config/system-config.service';
 import { MemberService } from '../member/member.service';
@@ -398,6 +399,7 @@ export class MiniOrdersController {
   }
 
   @Post('create')
+  @MiniFeature('payment')
   @ApiOperation({ summary: '创建订单' })
   @ApiBody({
     schema: {
@@ -543,6 +545,7 @@ export class MiniOrdersController {
   }
 
   @Post(':id/pay-confirm')
+  @MiniFeature('payment')
   @ApiOperation({ summary: '确认支付（业务确认）' })
   @ApiParam({ name: 'id', example: 1001 })
   @ApiBody({
@@ -696,6 +699,7 @@ export class MiniOrdersController {
   }
 
   @Post(':id/wechat-prepay')
+  @MiniFeature('payment')
   @ApiOperation({ summary: '微信支付预下单（JSAPI）' })
   async wechatPrepay(@Req() req: any, @Param('id', ParseIntPipe) id: number, @Body() body: any) {
     const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);

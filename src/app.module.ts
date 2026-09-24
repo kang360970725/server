@@ -1,7 +1,7 @@
 import {Module} from '@nestjs/common';
 import {AppController} from './app.controller';
 import {AppService} from './app.service';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import {PrismaService} from './prisma/prisma.service';
 import {UsersModule} from './users/users.module';
 import {OrdersModule} from './orders/orders.module';
@@ -37,6 +37,8 @@ import { EquipmentRentalFeeModule } from './equipment-rental-fee/equipment-renta
 import { ExcellentStaffModule } from './excellent-staff/excellent-staff.module';
 import { RentalOrdersModule } from './rental-orders/rental-orders.module';
 import { StaffActivityModule } from './staff-activity/staff-activity.module';
+import { MiniRuntimeInterceptor } from './mini/mini-runtime.interceptor';
+import { MiniFeatureGuard } from './mini/mini-feature.guard';
 
 
 @Module({
@@ -78,6 +80,8 @@ import { StaffActivityModule } from './staff-activity/staff-activity.module';
         { provide: APP_GUARD, useClass: JwtAuthGuard },      // 1) 先验 token，挂 req.user
         { provide: APP_GUARD, useClass: UserStatusGuard },   // 2) 冻结/禁用限制
         { provide: APP_GUARD, useClass: PermissionsGuard },  // 3) 权限校验（读 @Permissions）
+        { provide: APP_GUARD, useClass: MiniFeatureGuard },  // 4) 小程序运行策略功能校验
+        { provide: APP_INTERCEPTOR, useClass: MiniRuntimeInterceptor },
     ],
 })
 export class AppModule {
