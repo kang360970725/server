@@ -1292,6 +1292,48 @@ export class UsersService {
     return this.buildStaffExitPreviewFromUser(user, config, effectiveAcceptedOrderCount);
   }
 
+  async grantExitedStaffLoginGrace(
+    id: number,
+    operatorId?: number,
+    actor?: { userType?: UserType; permissions?: string[] },
+  ) {
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) throw new NotFoundException('用户不存在');
+    this.assertActorCanAccessUser(actor, user.userType);
+    this.assertUserButtonPermission(actor, user.userType, 'exit', '当前角色无权临时放开退店员工登录');
+    if (user.userType !== UserType.STAFF || user.staffEmploymentStatus !== StaffEmploymentStatus.EXITED) {
+      throw new BadRequestException('仅支持为已退店员工临时放开登录');
+    }
+
+    const now = new Date();
+    const graceUntil = new Date(now.getTime() + 30 * 60 * 1000);
+    const updated = await this.prisma.user.update({
+      where: { id },
+      data: {
+        status: UserStatus.ACTIVE,
+        staffExitLoginGraceUntil: graceUntil,
+        workStatus: PlayerWorkStatus.IDLE,
+        workOnlineExpiresAt: null,
+      },
+    });
+    await this.prisma.userLog.create({
+      data: {
+        userId: operatorId || 0,
+        action: 'STAFF_EXIT_LOGIN_GRACE',
+        targetType: 'USER',
+        targetId: id,
+        oldData: {status: user.status, staffExitLoginGraceUntil: user.staffExitLoginGraceUntil} as any,
+        newData: {status: UserStatus.ACTIVE, staffExitLoginGraceUntil: graceUntil} as any,
+        remark: '为已退店员工临时放开登录30分钟，用于余额处理',
+      },
+    });
+    return {
+      success: true,
+      graceUntil,
+      user: updated,
+    };
+  }
+
   async exitStaffShop(id: number, dto: StaffExitDto, operatorId?: number, actor?: { userType?: UserType }) {
     if (dto?.mode === StaffExitMode.CLEAR_ALL) {
       return this.clearStaffAssets(
@@ -1394,6 +1436,7 @@ export class UsersService {
           ...(addToBlacklist ? { status: UserStatus.DISABLED } : {}),
           staffCooldownUntil: addToBlacklist ? null : this.buildStaffCooldownUntil(now, Number(preview.quitCoolingDays || this.staffExitCooldownDays)),
           staffExitedAt: now,
+          staffExitLoginGraceUntil: null,
           workMode: 'ONLINE',
           offlineJoinedAt: null,
           workStatus: PlayerWorkStatus.IDLE,
@@ -1568,6 +1611,7 @@ export class UsersService {
           ...(addToBlacklist ? { status: UserStatus.DISABLED } : {}),
           staffCooldownUntil: addToBlacklist ? null : this.buildStaffCooldownUntil(now),
           staffExitedAt: now,
+          staffExitLoginGraceUntil: null,
           workMode: 'ONLINE',
           offlineJoinedAt: null,
           workStatus: PlayerWorkStatus.IDLE,

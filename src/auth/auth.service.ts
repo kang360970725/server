@@ -65,7 +65,9 @@ export class AuthService {
     }
     if (employmentStatus === StaffEmploymentStatus.EXITED) {
       const baseAt = this.getStaffExitBaseAt(user);
-      const shouldDisable = !!baseAt && Date.now() - baseAt.getTime() >= AuthService.STAFF_EXIT_DISABLE_AFTER_MS;
+      const graceUntil = user?.staffExitLoginGraceUntil ? new Date(user.staffExitLoginGraceUntil) : null;
+      const hasLoginGrace = !!graceUntil && !Number.isNaN(graceUntil.getTime()) && graceUntil.getTime() > Date.now();
+      const shouldDisable = !hasLoginGrace && !!baseAt && Date.now() - baseAt.getTime() >= AuthService.STAFF_EXIT_DISABLE_AFTER_MS;
       if (shouldDisable && user.status !== UserStatus.DISABLED) {
         await this.prisma.user.update({
           where: { id: Number(user.id) },

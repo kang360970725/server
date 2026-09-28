@@ -113,6 +113,7 @@ model User {
   staffDormantFreezeBaseAt    DateTime?
   staffCooldownUntil          DateTime?
   staffExitedAt               DateTime?
+  staffExitLoginGraceUntil    DateTime?
   activityAssessmentEnabled   Boolean                    @default(true)
   activityAssessmentStartedAt DateTime                   @default(now())
   activityLastCompletedAt     DateTime?

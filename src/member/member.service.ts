@@ -2329,11 +2329,6 @@ export class MemberService {
     const avatarUrl = String(body?.avatarUrl || '').trim();
     const phoneCode = String(body?.phoneCode || '').trim();
 
-    let phone: string | null = null;
-    if (phoneCode) {
-      phone = await this.fetchWechatPhoneNumber(phoneCode);
-    }
-
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       include: {
@@ -2344,6 +2339,19 @@ export class MemberService {
       },
     });
     if (!user) throw new NotFoundException('用户不存在');
+    const currentPhone = String(user.phone || '').trim();
+    const phoneBound = !!currentPhone && !currentPhone.startsWith('wx_');
+    if (phoneBound && phoneCode) {
+      throw new BadRequestException('手机号已与会员身份绑定，不支持自行修改');
+    }
+    if (!phoneBound && !phoneCode) {
+      throw new BadRequestException('首次完善会员资料需要授权绑定手机号');
+    }
+
+    let phone: string | null = null;
+    if (!phoneBound && phoneCode) {
+      phone = await this.fetchWechatPhoneNumber(phoneCode);
+    }
     const shouldUpdateUserName = user.userType !== UserType.STAFF;
 
     let targetUserId = userId;

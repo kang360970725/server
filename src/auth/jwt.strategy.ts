@@ -56,7 +56,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     }
     if (employmentStatus === StaffEmploymentStatus.EXITED) {
       const baseAt = this.getStaffExitBaseAt(user);
-      const shouldDisable = !!baseAt && Date.now() - baseAt.getTime() >= this.staffExitDisableAfterMs;
+      const graceUntil = user?.staffExitLoginGraceUntil ? new Date(user.staffExitLoginGraceUntil) : null;
+      const hasLoginGrace = !!graceUntil && !Number.isNaN(graceUntil.getTime()) && graceUntil.getTime() > Date.now();
+      const shouldDisable = !hasLoginGrace && !!baseAt && Date.now() - baseAt.getTime() >= this.staffExitDisableAfterMs;
       if (shouldDisable && user.status !== UserStatus.DISABLED) {
         await this.prisma.user.update({
           where: { id: Number(user.id) },
@@ -159,6 +161,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         staffEmploymentStatus: true,
         staffDormantFreezeBaseAt: true,
         staffExitedAt: true,
+        staffExitLoginGraceUntil: true,
         staffTags: true,
         name: true,
         workStatus: true,

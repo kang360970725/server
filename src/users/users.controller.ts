@@ -229,6 +229,16 @@ export class UsersController {
     return this.usersService.getStaffExitPreview(id, req.user);
   }
 
+  @Post(':id/staff-exit-login-grace')
+  @UseGuards(PermissionsGuard)
+  @Permissions('users:staff:exit:button')
+  grantStaffExitLoginGrace(
+      @Param('id', ParseIntPipe) id: number,
+      @Request() req,
+  ) {
+    return this.usersService.grantExitedStaffLoginGrace(id, req.user.userId, req.user);
+  }
+
   @Post(':id/staff-clear')
   @UseGuards(PermissionsGuard)
   @Permissions('users:staff:clear:button')
