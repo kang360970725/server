@@ -3823,6 +3823,17 @@ export class OrdersService {
                 },
             });
             const totalCaptured = this.toAmount2(Number(reservation.capturedAmount) + supplementAmount);
+            await tx.orderPayment.update({
+                where: { id: payment.id },
+                data: {
+                    notifyRaw: this.buildOrderBalanceReceiptMeta({
+                        deductedAmount: totalCaptured,
+                        balanceAfter: Number(accountAfter.availableBalance),
+                        rewardPoints: 0,
+                        growthValue: 0,
+                    }) as any,
+                },
+            });
             await tx.memberOrderBalanceReservation.update({
                 where: { id: reservation.id },
                 data: { capturedAmount: totalCaptured, supplementAmount: 0, status: 'SETTLED' },
@@ -5719,10 +5730,30 @@ export class OrdersService {
                 receivableAmount: true,
                 paidAmount: true,
                 settlementBaseAmount: true,
+                originalAmount: true,
+                discountAmount: true,
+                couponDiscountAmount: true,
+                memberDiscountAmount: true,
+                activityDiscountAmount: true,
+                giftDiscountAmount: true,
+                manualAdjustAmount: true,
+                finalPayableAmount: true,
                 isPaid: true,
                 isGifted: true,
                 giftedAmount: true,
                 isTestPayment: true,
+                customerUserId: true,
+                balanceSettlementMode: true,
+                balanceReservationStatus: true,
+                balanceReservedAmount: true,
+                balanceCapturedAmount: true,
+                balancePendingSupplementAmount: true,
+                appliedUserCoupon: {
+                    select: {
+                        id: true,
+                        template: true,
+                    },
+                },
 
                 orderQuantity: true,
                 baseAmountWan: true,
@@ -6514,12 +6545,92 @@ export class OrdersService {
      * * - 并非必须收款，赠送单无法确认收款。
      * --------------------------*/
 
+    private calculateReservedHourlyFinalAmount(order: any, actualHoursInput: number) {
+        const actualHours = Number(actualHoursInput);
+        if (!Number.isFinite(actualHours) || actualHours < 0.5 || Math.round(actualHours * 2) !== actualHours * 2) {
+            throw new BadRequestException('真实服务时长必须为0.5小时的整数倍，且不能少于0.5小时');
+        }
+        const unitPrice = Number(order?.projectSnapshot?.price ?? order?.project?.price ?? 0);
+        if (!(unitPrice > 0)) throw new BadRequestException('订单缺少有效小时单价，无法自动计算');
+        const originalAmount = this.toAmount2(unitPrice * actualHours);
+        const originalAtCreate = this.toAmount2(Number(order?.originalAmount ?? order?.receivableAmount ?? 0));
+        const memberDiscountAtCreate = this.toAmount2(Number(order?.memberDiscountAmount ?? 0));
+        const memberDiscountRate = originalAtCreate > 0
+            ? Math.min(1, Math.max(0, memberDiscountAtCreate / originalAtCreate))
+            : 0;
+        const memberDiscountAmount = this.toAmount2(originalAmount * memberDiscountRate);
+        const couponBaseAmount = this.toAmount2(Math.max(0, originalAmount - memberDiscountAmount));
+        const template: any = order?.appliedUserCoupon?.template;
+        let couponDiscountAmount = 0;
+        if (template) {
+            const discountValue = Number(template.discountValue ?? 0);
+            const thresholdAmount = Number(template.thresholdAmount ?? 0);
+            const maxDiscountAmount = Number(template.maxDiscountAmount ?? 0);
+            if (template.type === CouponTemplateType.CASH) {
+                couponDiscountAmount = discountValue;
+            } else if (template.type === CouponTemplateType.FULL_REDUCTION) {
+                couponDiscountAmount = couponBaseAmount >= thresholdAmount ? discountValue : 0;
+            } else if (template.type === CouponTemplateType.DISCOUNT) {
+                let rate = discountValue;
+                if (rate > 1) rate /= 10;
+                if (!(rate > 0 && rate <= 1)) throw new BadRequestException('订单使用的折扣券配置异常');
+                couponDiscountAmount = couponBaseAmount * (1 - rate);
+            } else if (template.type === CouponTemplateType.FREE) {
+                couponDiscountAmount = couponBaseAmount;
+            }
+            couponDiscountAmount = Math.max(0, couponDiscountAmount);
+            if (maxDiscountAmount > 0) couponDiscountAmount = Math.min(couponDiscountAmount, maxDiscountAmount);
+            couponDiscountAmount = this.toAmount2(Math.min(couponDiscountAmount, couponBaseAmount));
+        }
+        const activityDiscountAmount = this.toAmount2(Number(order?.activityDiscountAmount ?? 0));
+        const manualAdjustAmount = this.toAmount2(Number(order?.manualAdjustAmount ?? 0));
+        const otherDiscountAmount = this.toAmount2(Math.min(
+            Math.max(0, couponBaseAmount - couponDiscountAmount),
+            activityDiscountAmount + manualAdjustAmount,
+        ));
+        const discountAmount = this.toAmount2(memberDiscountAmount + couponDiscountAmount + otherDiscountAmount);
+        const finalPayableAmount = this.toAmount2(Math.max(0, originalAmount - discountAmount));
+        return {
+            actualHours,
+            unitPrice: this.toAmount2(unitPrice),
+            originalAmount,
+            memberDiscountRate,
+            memberDiscountAmount,
+            couponName: template?.name || null,
+            couponDiscountAmount,
+            activityDiscountAmount: this.toAmount2(Math.min(activityDiscountAmount, otherDiscountAmount)),
+            manualAdjustAmount: this.toAmount2(Math.max(0, otherDiscountAmount - activityDiscountAmount)),
+            discountAmount,
+            finalPayableAmount,
+            reservedAmount: this.toAmount2(Number(order?.balanceReservedAmount ?? 0)),
+            differenceAmount: this.toAmount2(finalPayableAmount - Number(order?.balanceReservedAmount ?? 0)),
+        };
+    }
+
+    async previewMemberBalanceHourlySettlement(orderIdInput: number, actualHoursInput: number) {
+        const orderId = Number(orderIdInput);
+        if (!orderId) throw new BadRequestException('orderId 必填');
+        const order = await this.prisma.order.findUnique({
+            where: { id: orderId },
+            include: { project: true, appliedUserCoupon: { include: { template: true } } },
+        });
+        if (!order) throw new NotFoundException('订单不存在');
+        if ((order as any).balanceSettlementMode !== 'RESERVE_CAPTURE') {
+            throw new BadRequestException('该订单不是储值预占订单');
+        }
+        if (this.getBillingModeFromOrder(order) !== BillingMode.HOURLY) {
+            throw new BadRequestException('仅小时储值订单支持按时长自动计算');
+        }
+        return this.calculateReservedHourlyFinalAmount(order, actualHoursInput);
+    }
+
     async confirmCompleteOrder(
         orderId: number,
         operatorId: number,
         dto?: {
             remark?: string;
             paidAmount?: number;
+            actualHours?: number;
             settlementBaseMode?: 'PAID_AMOUNT' | 'SETTLEMENT_BASE_AMOUNT' | string;
             confirmPaid?: any;
             modePlayAllocList?: any;
@@ -6590,9 +6701,42 @@ export class OrdersService {
 
             const isReservedBalanceOrder = (order as any).balanceSettlementMode === 'RESERVE_CAPTURE';
             if (isReservedBalanceOrder) {
-                const actualAmount = newPaidAmount === undefined
-                    ? Number((order as any).balanceReservedAmount ?? order.paidAmount ?? 0)
-                    : newPaidAmount;
+                let pricing: any = null;
+                let actualAmount = Number(order.paidAmount || 0);
+                if ((order as any).balanceReservationStatus === 'HELD') {
+                    const fallbackHours = (order.dispatches || []).reduce(
+                        (sum: number, dispatch: any) => sum + Number(dispatch?.billableHours || 0),
+                        0,
+                    );
+                    const actualHours = dto?.actualHours !== undefined && dto?.actualHours !== null
+                        ? Number(dto.actualHours)
+                        : fallbackHours > 0
+                            ? fallbackHours
+                            : Number(order.orderQuantity || 0);
+                    pricing = this.calculateReservedHourlyFinalAmount(order, actualHours);
+                    await tx.order.update({
+                        where: { id: orderId },
+                        data: {
+                            receivableAmount: pricing.originalAmount,
+                            originalAmount: pricing.originalAmount,
+                            memberDiscountAmount: pricing.memberDiscountAmount,
+                            couponDiscountAmount: pricing.couponDiscountAmount,
+                            activityDiscountAmount: pricing.activityDiscountAmount,
+                            manualAdjustAmount: pricing.manualAdjustAmount,
+                            discountAmount: pricing.discountAmount,
+                            finalPayableAmount: pricing.finalPayableAmount,
+                        },
+                    });
+                    await tx.orderDiscount.updateMany({
+                        where: { orderId, sourceType: 'MEMBER' },
+                        data: { amount: pricing.memberDiscountAmount },
+                    });
+                    await tx.orderDiscount.updateMany({
+                        where: { orderId, sourceType: 'COUPON' },
+                        data: { amount: pricing.couponDiscountAmount },
+                    });
+                    actualAmount = pricing.finalPayableAmount;
+                }
                 const captureResult = await this.captureMemberBalanceReservationTx(tx, order, actualAmount);
                 if (captureResult.pendingSupplementAmount > 0) {
                     await this.writeUserLog(tx, {
@@ -6610,6 +6754,7 @@ export class OrdersService {
                         status: order.status,
                         capturedAmount: captureResult.capturedAmount,
                         pendingSupplementAmount: captureResult.pendingSupplementAmount,
+                        ...(pricing ? { pricing } : {}),
                         message: `尚需补款 ¥${captureResult.pendingSupplementAmount.toFixed(2)}，补款完成后方可最终结单`,
                     };
                 }

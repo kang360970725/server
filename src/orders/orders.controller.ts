@@ -298,6 +298,17 @@ export class OrdersController {
         );
     }
 
+    @Post('member-balance/hourly-settlement-preview')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:detail:confirm-complete:button')
+    previewMemberBalanceHourlySettlement(@Body() body: any, @Request() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:detail:confirm-complete:button', '当前角色无权确认结单');
+        return this.ordersService.previewMemberBalanceHourlySettlement(
+            Number(body?.id ?? body?.orderId),
+            Number(body?.actualHours),
+        );
+    }
+
     /** 更新参与者（管理端） */
     @Post('dispatch/update-participants')
     @UseGuards(PermissionsGuard)
@@ -345,6 +356,7 @@ export class OrdersController {
             {
                 remark: body?.remark,
                 paidAmount: body?.paidAmount,
+                actualHours: body?.actualHours,
                 settlementBaseMode: body?.settlementBaseMode,
                 confirmPaid: body?.confirmPaid, // 可选：默认 true
                 modePlayAllocList: body?.modePlayAllocList, //趣味玩法单 客服设定的每轮收益
