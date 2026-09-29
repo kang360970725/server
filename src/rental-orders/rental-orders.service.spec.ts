@@ -1,8 +1,8 @@
 import { RentalOrdersService } from './rental-orders.service';
 
 // 内存事务替身验证业务原子性/幂等路径；不替代真实MySQL行锁集成测试。
-function fixture() {
-  let state: any = { account: { availableBalance: 500, earningFrozenBalance: 1000, withdrawFrozenBalance: 0, frozenBalance: 1000 }, orders: [], transactions: [], logs: [] };
+function fixture(availableBalance = 500) {
+  let state: any = { account: { availableBalance, earningFrozenBalance: 1000, withdrawFrozenBalance: 0, frozenBalance: 1000 }, orders: [], transactions: [], logs: [] };
   const user: any = { id: 7, name: '服务者', userType: 'STAFF', status: 'ACTIVE', staffEmploymentStatus: 'ACTIVE' };
   const tx: any = {
     $queryRawUnsafe: jest.fn().mockResolvedValue([]),
@@ -47,21 +47,21 @@ const settleInput = (v: any = {}) => ({ version: 0, noRefundDifference: true, ha
 describe('RentalOrdersService', () => {
   beforeEach(() => { jest.useFakeTimers(); jest.setSystemTime(new Date('2026-08-31T02:00:00Z')); });
   afterEach(() => jest.useRealTimers());
-  it('debits rent and deposit once, allows negative available and preserves frozen money', async () => {
-    const f = fixture(); const result = await f.service.create(createInput(), 3);
+  it('debits rent and deposit once from available balance and preserves frozen money', async () => {
+    const f = fixture(); const result = await f.service.create(createInput({ prepaidAmount: 150, depositAmount: 300 }), 3);
     expect(result.serialNo).toMatch(/^LMSH\d{8}$/);
     expect(result.startDate.toISOString().slice(0, 10)).toBe('2026-08-31');
-    expect(f.state().account).toMatchObject({ availableBalance: -800, frozenBalance: 1000 });
+    expect(f.state().account).toMatchObject({ availableBalance: 50, frozenBalance: 1000 });
     expect(f.state().transactions.map((t: any) => t.bizType)).toEqual(['RENTAL_ORDER_PREPAY', 'RENTAL_ORDER_DEPOSIT']);
     expect(f.state().logs).toHaveLength(1);
   });
-  it('rejects total including deposit above assets without writes', async () => {
-    const f = fixture(); await expect(f.service.create(createInput({ depositAmount: 501 }), 3)).rejects.toThrow('资产不足');
+  it('rejects total including deposit above available balance without using frozen money', async () => {
+    const f = fixture(); await expect(f.service.create(createInput({ prepaidAmount: 200, depositAmount: 301 }), 3)).rejects.toThrow('可用余额不足');
     expect(f.state().transactions).toHaveLength(0); expect(f.state().orders).toHaveLength(0);
   });
-  it('accepts exactly sufficient assets and cents', async () => {
-    const f = fixture(); await f.service.create(createInput({ prepaidAmount: 1499.99, depositAmount: 0.01 }), 3);
-    expect(f.state().account.availableBalance).toBe(-1000);
+  it('accepts exactly sufficient available balance and cents', async () => {
+    const f = fixture(); await f.service.create(createInput({ prepaidAmount: 499.99, depositAmount: 0.01 }), 3);
+    expect(f.state().account.availableBalance).toBe(0);
   });
   it.each(['EXITED', 'BLACKLISTED'])('blocks unavailable staff %s', async (status) => {
     const f = fixture(); f.user.staffEmploymentStatus = status;
@@ -74,7 +74,8 @@ describe('RentalOrdersService', () => {
     const f = fixture(); await expect(f.service.create(createInput(v), 3)).rejects.toThrow(); expect(f.state().orders).toHaveLength(0);
   });
   it('concurrent requests cannot overspend assets', async () => {
-    const f = fixture(); const results = await Promise.allSettled([f.service.create(createInput(), 3), f.service.create(createInput(), 3)]);
+    const f = fixture(); const input = createInput({ prepaidAmount: 300, depositAmount: 200 });
+    const results = await Promise.allSettled([f.service.create(input, 3), f.service.create(input, 3)]);
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     expect(f.state().orders).toHaveLength(1); expect(f.state().transactions).toHaveLength(2);
   });
@@ -96,24 +97,24 @@ describe('RentalOrdersService', () => {
     expect(f.state().orders).toHaveLength(1); expect(f.state().transactions).toHaveLength(1);
   });
   it('ignores client supplied serial numbers', async () => {
-    const f = fixture(); jest.spyOn(f.service as any, 'generateSerialNo').mockReturnValue('LMSH12345678');
+    const f = fixture(2000); jest.spyOn(f.service as any, 'generateSerialNo').mockReturnValue('LMSH12345678');
     const order = await f.service.create(createInput({ serialNo: 'client-input' }), 3);
     expect(order.serialNo).toBe('LMSH12345678');
   });
   it('does not retry wallet transaction uniqueness errors', async () => {
-    const f = fixture(); f.tx.walletTransaction.create.mockRejectedValue({ code: 'P2002' });
+    const f = fixture(2000); f.tx.walletTransaction.create.mockRejectedValue({ code: 'P2002' });
     await expect(f.service.create(createInput(), 3)).rejects.toMatchObject({ code: 'P2002' });
     expect(f.tx.rentalOrder.create).toHaveBeenCalledTimes(1);
-    expect(f.state().account.availableBalance).toBe(500);
+    expect(f.state().account.availableBalance).toBe(2000);
     expect(f.state().orders).toHaveLength(0);
   });
   it('rolls back order and charges if audit writing fails', async () => {
-    const f = fixture(); f.tx.userLog.create.mockRejectedValue(new Error('audit failure'));
+    const f = fixture(2000); f.tx.userLog.create.mockRejectedValue(new Error('audit failure'));
     await expect(f.service.create(createInput(), 3)).rejects.toThrow('audit failure');
-    expect(f.state().orders).toHaveLength(0); expect(f.state().transactions).toHaveLength(0); expect(f.state().account.availableBalance).toBe(500);
+    expect(f.state().orders).toHaveLength(0); expect(f.state().transactions).toHaveLength(0); expect(f.state().account.availableBalance).toBe(2000);
   });
-  it.each([[120, 0, 180, -620], [120, 250, -70, -870], [300, 0, 0, -800]])('settles loss %s compensation %s net %s', async (loss, compensation, net, balance) => {
-    const f = fixture(); const order = await f.service.create(createInput(), 3);
+  it.each([[120, 0, 180, 880], [120, 250, -70, 630], [300, 0, 0, 700]])('settles loss %s compensation %s net %s', async (loss, compensation, net, balance) => {
+    const f = fixture(2000); const order = await f.service.create(createInput(), 3);
     const input = settleInput({ lossAmount: loss, lossDetail: '损耗', hasAbnormalCompensation: compensation > 0,
       abnormalCompensationAmount: compensation, abnormalCompensationRemark: '规则' });
     const result = await f.service.settle(order.id, input, 3);
@@ -122,29 +123,42 @@ describe('RentalOrdersService', () => {
     expect(f.state().account.availableBalance).toBe(balance); expect(f.state().transactions).toHaveLength(net === 0 ? 2 : 3);
     if (net < 0) expect(f.state().transactions[2].bizType).toBe('RENTAL_ORDER_EXCESS_CHARGE');
   });
+  it('rejects settlement excess charge when only frozen balance remains', async () => {
+    const f = fixture(1300); const order = await f.service.create(createInput(), 3);
+    await expect(f.service.settle(order.id, settleInput({
+      lossAmount: 120,
+      lossDetail: '损耗',
+      hasAbnormalCompensation: true,
+      abnormalCompensationAmount: 250,
+      abnormalCompensationRemark: '规则',
+    }), 3)).rejects.toThrow('已解冻可用余额不足');
+    expect(f.state().account.availableBalance).toBe(0);
+    expect(f.state().account.frozenBalance).toBe(1000);
+    expect(f.state().orders[0].status).toBe('RUNNING');
+  });
   it('refunds full rent and deposit once at exact 2 hour boundary', async () => {
-    const f = fixture(); const order = await f.service.create(createInput(), 3);
+    const f = fixture(2000); const order = await f.service.create(createInput(), 3);
     jest.setSystemTime(new Date('2026-08-31T04:00:00Z'));
     await f.service.void(order.id, { version: 0, reason: '无法登录' }, 3);
     await f.service.void(order.id, { version: 0, reason: '重试' }, 3);
-    expect(f.state().account.availableBalance).toBe(500); expect(f.state().transactions).toHaveLength(3);
+    expect(f.state().account.availableBalance).toBe(2000); expect(f.state().transactions).toHaveLength(3);
     await expect(f.service.settle(order.id, settleInput(), 3)).rejects.toThrow('进行中');
   });
   it('blocks cancellation after 2 hours and stale version', async () => {
-    const f = fixture(); const order = await f.service.create(createInput(), 3);
+    const f = fixture(2000); const order = await f.service.create(createInput(), 3);
     await expect(f.service.settle(order.id, settleInput({ version: 1 }), 3)).rejects.toThrow('刷新');
     jest.setSystemTime(new Date('2026-08-31T04:00:00.001Z'));
     await expect(f.service.void(order.id, { version: 0, reason: '无法登录' }, 3)).rejects.toThrow('2小时');
     expect(f.state().transactions).toHaveLength(2);
   });
   it('concurrent settlement and void cannot both mutate money', async () => {
-    const f = fixture(); const order = await f.service.create(createInput(), 3);
+    const f = fixture(2000); const order = await f.service.create(createInput(), 3);
     const result = await Promise.allSettled([f.service.settle(order.id, settleInput(), 3), f.service.void(order.id, { version: 0, reason: '废除' }, 3)]);
     expect(result.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     expect(f.state().transactions).toHaveLength(3);
   });
   it('reconciles only a settled order and snapshots the actual transferred amount', async () => {
-    const f = fixture(); const order = await f.service.create(createInput(), 3);
+    const f = fixture(2000); const order = await f.service.create(createInput(), 3);
     await expect(f.service.reconcile(order.id, { version: 0 }, 9)).rejects.toThrow('已结算');
     const settled = await f.service.settle(order.id, settleInput({ lossAmount: 120, lossDetail: '损耗' }), 3);
     const reconciled = await f.service.reconcile(order.id, { version: settled.version, remark: '银行转账凭证 001' }, 9);

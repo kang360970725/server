@@ -1767,6 +1767,283 @@ export class OrdersService {
         return { allocated: this.toAmount2(input.amount - remaining), untracked: remaining };
     }
 
+    private async reserveMemberBalanceForOrderTx(tx: any, input: {
+        orderId: number;
+        userId: number;
+        amount: number;
+    }) {
+        const amount = this.toAmount2(input.amount);
+        if (amount <= 0) throw new BadRequestException('储值预占金额必须大于0');
+
+        await tx.$queryRawUnsafe('SELECT id FROM `wallet_accounts` WHERE `userId` = ? FOR UPDATE', input.userId);
+        const existing = await tx.memberOrderBalanceReservation.findUnique({ where: { orderId: input.orderId } });
+        if (existing) return existing;
+        const account = await tx.walletAccount.findUnique({ where: { userId: input.userId } });
+        if (!account || this.toAmount2(account.availableBalance) < amount) {
+            throw new BadRequestException('会员储值余额不足');
+        }
+
+        const lots = await tx.memberBalanceLot.findMany({
+            where: {
+                userId: input.userId,
+                status: 'ACTIVE',
+                OR: [{ principalRemaining: { gt: 0 } }, { bonusRemaining: { gt: 0 } }],
+            },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        });
+        let remaining = amount;
+        const allocations = new Map<number, { principal: number; bonus: number }>();
+        for (const lot of lots) {
+            if (remaining <= 0) break;
+            const used = Math.min(remaining, this.toAmount2(lot.principalRemaining));
+            if (used > 0) {
+                allocations.set(lot.id, { principal: used, bonus: 0 });
+                remaining = this.toAmount2(remaining - used);
+            }
+        }
+        for (const lot of lots) {
+            if (remaining <= 0) break;
+            const used = Math.min(remaining, this.toAmount2(lot.bonusRemaining));
+            if (used > 0) {
+                const row = allocations.get(lot.id) || { principal: 0, bonus: 0 };
+                row.bonus = used;
+                allocations.set(lot.id, row);
+                remaining = this.toAmount2(remaining - used);
+            }
+        }
+        if (remaining > 0) {
+            throw new ConflictException('储值余额与充值批次余额不一致，请先完成资金对账');
+        }
+
+        const reservation = await tx.memberOrderBalanceReservation.create({
+            data: {
+                reservationNo: `MBR-${input.orderId}-${randomUUID()}`,
+                orderId: input.orderId,
+                userId: input.userId,
+                reservedAmount: amount,
+                status: 'HELD',
+            },
+        });
+        for (const [lotId, row] of allocations) {
+            await tx.memberBalanceLot.update({
+                where: { id: lotId },
+                data: {
+                    principalRemaining: { decrement: row.principal },
+                    bonusRemaining: { decrement: row.bonus },
+                },
+            });
+            await tx.memberOrderBalanceReservationLot.create({
+                data: {
+                    reservationId: reservation.id,
+                    lotId,
+                    principalReserved: row.principal,
+                    bonusReserved: row.bonus,
+                },
+            });
+        }
+        await tx.walletAccount.update({
+            where: { userId: input.userId },
+            data: {
+                availableBalance: { decrement: amount },
+                memberOrderReservedBalance: { increment: amount },
+            },
+        });
+        await tx.order.update({
+            where: { id: input.orderId },
+            data: {
+                balanceSettlementMode: 'RESERVE_CAPTURE',
+                balanceReservationStatus: 'HELD',
+                balanceReservedAmount: amount,
+                balanceCapturedAmount: 0,
+                balancePendingSupplementAmount: 0,
+            },
+        });
+        return reservation;
+    }
+
+    /** 将预占按实际金额入账；超出部分只生成待补款，不会透支或静默记账。 */
+    private async captureMemberBalanceReservationTx(tx: any, order: any, actualAmountInput: number) {
+        const actualAmount = this.toAmount2(actualAmountInput);
+        if (actualAmount < 0) throw new BadRequestException('实际结算金额非法');
+        const reservation = await tx.memberOrderBalanceReservation.findUnique({
+            where: { orderId: Number(order.id) },
+            include: { lots: { orderBy: { id: 'asc' } } },
+        });
+        if (!reservation) throw new ConflictException('储值预占记录缺失，请先完成资金对账');
+        if (reservation.status !== 'HELD') {
+            const pending = this.toAmount2(reservation.supplementAmount);
+            return { pendingSupplementAmount: pending, capturedAmount: this.toAmount2(reservation.capturedAmount) };
+        }
+
+        const reserved = this.toAmount2(reservation.reservedAmount);
+        const captureAmount = Math.min(actualAmount, reserved);
+        const releaseAmount = this.toAmount2(reserved - captureAmount);
+        const supplementAmount = this.toAmount2(Math.max(0, actualAmount - reserved));
+        const payment = await tx.orderPayment.findFirst({
+            where: { orderId: Number(order.id), channel: 'BALANCE', status: OrderPayStatus.PENDING },
+            orderBy: { id: 'asc' },
+        });
+        if (!payment) throw new ConflictException('储值预占支付流水缺失，请先完成资金对账');
+
+        let captureRemaining = captureAmount;
+        for (const row of reservation.lots) {
+            const principalReserved = this.toAmount2(row.principalReserved);
+            const bonusReserved = this.toAmount2(row.bonusReserved);
+            const principalCaptured = Math.min(captureRemaining, principalReserved);
+            captureRemaining = this.toAmount2(captureRemaining - principalCaptured);
+            const bonusCaptured = Math.min(captureRemaining, bonusReserved);
+            captureRemaining = this.toAmount2(captureRemaining - bonusCaptured);
+            const principalReleased = this.toAmount2(principalReserved - principalCaptured);
+            const bonusReleased = this.toAmount2(bonusReserved - bonusCaptured);
+            if (principalReleased > 0 || bonusReleased > 0) {
+                await tx.memberBalanceLot.update({
+                    where: { id: row.lotId },
+                    data: {
+                        principalRemaining: { increment: principalReleased },
+                        bonusRemaining: { increment: bonusReleased },
+                        status: 'ACTIVE',
+                    },
+                });
+            }
+            if (principalCaptured > 0 || bonusCaptured > 0) {
+                await tx.memberBalanceLotUsage.create({
+                    data: {
+                        lotId: row.lotId,
+                        userId: Number(order.customerUserId),
+                        sourceType: 'ORDER_PAYMENT',
+                        sourceId: payment.id,
+                        principalAmount: principalCaptured,
+                        bonusAmount: bonusCaptured,
+                    },
+                });
+            }
+            await tx.memberOrderBalanceReservationLot.update({
+                where: { id: row.id },
+                data: { principalCaptured, bonusCaptured },
+            });
+        }
+        if (captureRemaining > 0) throw new ConflictException('储值预占批次金额不足，请先完成资金对账');
+
+        await tx.$queryRawUnsafe('SELECT id FROM `wallet_accounts` WHERE `userId` = ? FOR UPDATE', Number(order.customerUserId));
+        const accountAfter = await tx.walletAccount.update({
+            where: { userId: Number(order.customerUserId) },
+            data: {
+                memberOrderReservedBalance: { decrement: reserved },
+                availableBalance: { increment: releaseAmount },
+            },
+        });
+        const now = new Date();
+        await tx.orderPayment.update({
+            where: { id: payment.id },
+            data: {
+                amount: captureAmount,
+                status: OrderPayStatus.SUCCESS,
+                paidAt: now,
+                notifyRaw: this.buildOrderBalanceReceiptMeta({
+                    deductedAmount: captureAmount,
+                    balanceAfter: Number(accountAfter.availableBalance),
+                    rewardPoints: 0,
+                    growthValue: 0,
+                }) as any,
+            },
+        });
+        if (captureAmount > 0) {
+            await tx.walletTransaction.create({
+                data: {
+                    userId: Number(order.customerUserId),
+                    direction: WalletDirection.OUT,
+                    bizType: WalletBizType.MEMBER_ORDER_CONSUME,
+                    amount: captureAmount,
+                    status: WalletTxStatus.AVAILABLE,
+                    sourceType: 'ORDER_PAYMENT_BALANCE',
+                    sourceId: payment.id,
+                    orderId: Number(order.id),
+                    availableAfter: Number(accountAfter.availableBalance),
+                    frozenAfter: Number(accountAfter.frozenBalance),
+                    remark: `储值订单结单扣款（预占${reserved}，实扣${captureAmount}，释放${releaseAmount}）`,
+                },
+            });
+        }
+        const reservationStatus = supplementAmount > 0 ? 'SUPPLEMENT_PENDING' : 'SETTLED';
+        await tx.memberOrderBalanceReservation.update({
+            where: { id: reservation.id },
+            data: {
+                capturedAmount: captureAmount,
+                releasedAmount: releaseAmount,
+                supplementAmount,
+                status: reservationStatus,
+                capturedAt: now,
+                releasedAt: releaseAmount > 0 ? now : null,
+            },
+        });
+        await tx.order.update({
+            where: { id: Number(order.id) },
+            data: {
+                paidAmount: captureAmount,
+                paymentTime: now,
+                latestPaymentId: payment.id,
+                payStatus: supplementAmount > 0 ? OrderPayStatus.PENDING : OrderPayStatus.SUCCESS,
+                balanceReservationStatus: reservationStatus,
+                balanceCapturedAmount: captureAmount,
+                balancePendingSupplementAmount: supplementAmount,
+            },
+        });
+        return { pendingSupplementAmount: supplementAmount, capturedAmount: captureAmount };
+    }
+
+    private async releaseMemberBalanceReservationTx(tx: any, orderId: number, reason: string) {
+        const reservation = await tx.memberOrderBalanceReservation.findUnique({
+            where: { orderId },
+            include: { lots: true },
+        });
+        if (!reservation || reservation.status === 'RELEASED') return null;
+        if (reservation.status !== 'HELD') {
+            throw new BadRequestException('该储值订单已发生实际扣款，请使用退款流程，不能直接取消');
+        }
+        await tx.$queryRawUnsafe('SELECT id FROM `wallet_accounts` WHERE `userId` = ? FOR UPDATE', reservation.userId);
+        const reservedAmount = this.toAmount2(Number(reservation.reservedAmount));
+        for (const row of reservation.lots) {
+            await tx.memberBalanceLot.update({
+                where: { id: row.lotId },
+                data: {
+                    principalRemaining: { increment: Number(row.principalReserved) },
+                    bonusRemaining: { increment: Number(row.bonusReserved) },
+                    status: 'ACTIVE',
+                },
+            });
+        }
+        await tx.walletAccount.update({
+            where: { userId: reservation.userId },
+            data: {
+                memberOrderReservedBalance: { decrement: reservedAmount },
+                availableBalance: { increment: reservedAmount },
+            },
+        });
+        const now = new Date();
+        await tx.memberOrderBalanceReservation.update({
+            where: { id: reservation.id },
+            data: {
+                releasedAmount: reservedAmount,
+                status: 'RELEASED',
+                releasedAt: now,
+            },
+        });
+        await tx.orderPayment.updateMany({
+            where: { orderId, channel: 'BALANCE', status: OrderPayStatus.PENDING },
+            data: { status: OrderPayStatus.CLOSED, notifyRaw: { closeReason: reason } as any },
+        });
+        await tx.order.update({
+            where: { id: orderId },
+            data: {
+                isPaid: false,
+                payStatus: OrderPayStatus.CLOSED,
+                balanceReservationStatus: 'RELEASED',
+                balancePendingSupplementAmount: 0,
+            },
+        });
+        return { releasedAmount: reservedAmount };
+    }
+
     private async reverseMemberBalanceLotsTx(tx: any, paymentId?: number | null, refundAmountInput?: number) {
         const sourceId = Number(paymentId || 0);
         if (!sourceId) return;
@@ -2344,81 +2621,28 @@ export class OrdersService {
                 let payment: { id: number };
                 if (useMemberBalancePayment) {
                     await this.wallet.ensureWalletAccount(Number(customerUserId), tx as any);
-                    const account = await tx.walletAccount.findUnique({
-                        where: { userId: Number(customerUserId) },
-                        select: {
-                            availableBalance: true,
-                            frozenBalance: true,
-                        },
-                    });
-                    const availableBalance = this.toAmount2(Number(account?.availableBalance ?? 0));
                     const consumeAmount = this.toAmount2(Number(effectivePaidAmount ?? 0));
-                    if (availableBalance < consumeAmount) {
-                        throw new BadRequestException('会员储值余额不足');
-                    }
-
-                    const accountAfter = await tx.walletAccount.update({
-                        where: { userId: Number(customerUserId) },
-                        data: {
-                            availableBalance: { decrement: consumeAmount },
-                        },
-                        select: {
-                            availableBalance: true,
-                            frozenBalance: true,
-                        },
-                    });
-
-                    const rewardBaseAmount = this.resolveMemberBenefitBaseAmount({
-                        paidAmount: consumeAmount,
-                        finalPayableAmount,
-                        receivableAmount: Number(dto.receivableAmount ?? consumeAmount),
-                        isTestPayment: false,
-                    });
-                    const rewardPointsPreview = this.getOrderRewardPointsByPaidAmount(rewardBaseAmount);
-                    const growthValuePreview = this.getMemberGrowthValueByPaidAmount(rewardBaseAmount);
-
                     payment = await tx.orderPayment.create({
                         data: {
                             orderId: Number(createdOrder.id),
                             paymentNo: this.buildOrderPaymentNo(String(paymentChannel), Number(createdOrder.id)),
                             channel: 'BALANCE',
-                            status: OrderPayStatus.SUCCESS,
+                            status: OrderPayStatus.PENDING,
                             amount: consumeAmount,
                             currency: 'CNY',
-                            paidAt: paidAt || new Date(),
-                            notifyRaw: this.buildOrderBalanceReceiptMeta({
-                                deductedAmount: consumeAmount,
-                                balanceAfter: Number(accountAfter?.availableBalance ?? 0),
-                                rewardPoints: rewardPointsPreview,
-                                growthValue: growthValuePreview,
-                            }) as any,
+                            paidAt: null,
+                            notifyRaw: {
+                                settlementMode: 'RESERVE_CAPTURE',
+                                reservedAmount: consumeAmount,
+                            } as any,
                         },
                         select: { id: true },
                     });
-
-                    await this.allocateMemberBalanceLotsTx(tx, {
+                    await this.reserveMemberBalanceForOrderTx(tx, {
+                        orderId: Number(createdOrder.id),
                         userId: Number(customerUserId),
                         amount: consumeAmount,
-                        sourceType: 'ORDER_PAYMENT',
-                        sourceId: Number(payment.id),
                     });
-
-                    await tx.walletTransaction.create({
-                        data: {
-                            userId: Number(customerUserId),
-                            direction: WalletDirection.OUT,
-                            bizType: WalletBizType.MEMBER_ORDER_CONSUME,
-                            amount: consumeAmount,
-                            status: WalletTxStatus.AVAILABLE,
-                            sourceType: 'ORDER_PAYMENT_BALANCE',
-                            sourceId: Number(payment.id),
-                            orderId: Number(createdOrder.id),
-                            availableAfter: Number(accountAfter?.availableBalance ?? 0),
-                            frozenAfter: Number(accountAfter?.frozenBalance ?? 0),
-                        } as any,
-                    });
-
-                    await this.applyOrderMemberBenefitsTx(tx, createdOrder);
                 } else {
                     payment = await tx.orderPayment.create({
                         data: {
@@ -2438,14 +2662,14 @@ export class OrdersService {
                     where: { id: Number(createdOrder.id) },
                     data: {
                         latestPaymentId: payment.id,
-                        paymentTime: paidAt || new Date(),
+                        paymentTime: useMemberBalancePayment ? null : (paidAt || new Date()),
                         isPaid: true,
-                        payStatus: OrderPayStatus.SUCCESS,
+                        payStatus: useMemberBalancePayment ? OrderPayStatus.PENDING : OrderPayStatus.SUCCESS,
                     },
                 });
 
                 (createdOrder as any).latestPaymentId = payment.id;
-                (createdOrder as any).paymentTime = paidAt || new Date();
+                (createdOrder as any).paymentTime = useMemberBalancePayment ? null : (paidAt || new Date());
             }
 
             if (selectedUserCoupon) {
@@ -3027,46 +3251,35 @@ export class OrdersService {
      * -----------------------------*/
     async cancelOrder(orderId: number, operatorId: number, remark?: string) {
         if (!orderId) throw new BadRequestException('orderId 必填');
+        return this.prisma.$transaction(async (tx) => {
+            await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
+            const order = await tx.order.findUnique({ where: { id: orderId } });
+            if (!order) throw new NotFoundException('订单不存在');
+            const forbidden = new Set(['COMPLETED', 'REFUNDED']);
+            if (forbidden.has(String(order.status))) throw new BadRequestException('当前订单状态不可取消');
 
-        const order = await this.prisma.order.findUnique({
-            where: {id: orderId},
-            select: {
-                id: true,
-                status: true,
-                isPaid: true,
-                latestPayment: { select: { channel: true, status: true } },
-            },
-        });
-
-        if (!order) throw new NotFoundException('订单不存在');
-
-        const forbidden = new Set(['COMPLETED', 'REFUNDED']);
-        if (forbidden.has(String(order.status))) {
-            throw new BadRequestException('当前订单状态不可取消');
-        }
-
-        const updated = await this.prisma.order.update({
-            where: {id: orderId},
-            data: {
-                status: OrderStatus.CANCELLED,
-            },
-        });
-
-        if (operatorId) {
-            await this.prisma.userLog.create({
-                data: {
-                    userId: operatorId,
-                    action: 'CANCEL_ORDER',
-                    targetType: 'ORDER',
-                    targetId: orderId,
-                    oldData: {status: order.status} as any,
-                    newData: {status: OrderStatus.CANCELLED} as any,
-                    remark: remark || '取消订单',
-                },
+            if ((order as any).balanceSettlementMode === 'RESERVE_CAPTURE') {
+                await this.releaseMemberBalanceReservationTx(tx, orderId, remark || '取消订单');
+            }
+            const updated = await tx.order.update({
+                where: { id: orderId },
+                data: { status: OrderStatus.CANCELLED },
             });
-        }
-
-        return updated;
+            if (operatorId) {
+                await tx.userLog.create({
+                    data: {
+                        userId: operatorId,
+                        action: 'CANCEL_ORDER',
+                        targetType: 'ORDER',
+                        targetId: orderId,
+                        oldData: { status: order.status } as any,
+                        newData: { status: OrderStatus.CANCELLED } as any,
+                        remark: remark || '取消订单',
+                    },
+                });
+            }
+            return updated;
+        });
     }
 
     async deleteOrder(orderId: number, operatorId: number, remark?: string) {
@@ -3520,6 +3733,123 @@ export class OrdersService {
         });
 
         return result;
+    }
+
+    async payMemberBalanceSupplement(orderIdInput: number, operatorIdInput: number, idempotencyKeyInput?: string) {
+        const orderId = Number(orderIdInput);
+        const operatorId = Number(operatorIdInput);
+        const idempotencyKey = String(idempotencyKeyInput || '').trim();
+        if (!orderId) throw new BadRequestException('orderId 必填');
+        if (!operatorId) throw new BadRequestException('未登录或无权限操作');
+        if (!idempotencyKey || idempotencyKey.length > 40) {
+            throw new BadRequestException('idempotencyKey 必填且不能超过40个字符');
+        }
+
+        return this.prisma.$transaction(async (tx) => {
+            await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
+            const order = await tx.order.findUnique({ where: { id: orderId } });
+            if (!order) throw new NotFoundException('订单不存在');
+            if ((order as any).balanceSettlementMode !== 'RESERVE_CAPTURE') {
+                throw new BadRequestException('该订单不是储值预占订单');
+            }
+            const paymentNo = `MBS-${orderId}-${idempotencyKey}`;
+            const existingPayment = await tx.orderPayment.findUnique({ where: { paymentNo } });
+            if (existingPayment) {
+                return {
+                    orderId,
+                    paymentId: existingPayment.id,
+                    amount: this.toAmount2(Number(existingPayment.amount)),
+                    status: existingPayment.status,
+                    idempotent: true,
+                };
+            }
+
+            const reservation = await tx.memberOrderBalanceReservation.findUnique({ where: { orderId } });
+            if (!reservation) throw new ConflictException('储值预占记录缺失，请先完成资金对账');
+            const supplementAmount = this.toAmount2(Number(reservation.supplementAmount));
+            if (reservation.status === 'SETTLED' || supplementAmount <= 0) {
+                return { orderId, amount: 0, status: 'SUCCESS', idempotent: true };
+            }
+            if (reservation.status !== 'SUPPLEMENT_PENDING') {
+                throw new ConflictException('订单当前不在待补款状态');
+            }
+
+            const userId = Number(order.customerUserId || 0);
+            if (!userId) throw new ConflictException('储值订单缺少会员用户');
+            await tx.$queryRawUnsafe('SELECT id FROM `wallet_accounts` WHERE `userId` = ? FOR UPDATE', userId);
+            const account = await tx.walletAccount.findUnique({ where: { userId } });
+            if (!account || this.toAmount2(Number(account.availableBalance)) < supplementAmount) {
+                throw new BadRequestException(`会员储值余额不足，待补 ¥${supplementAmount.toFixed(2)}`);
+            }
+
+            const payment = await tx.orderPayment.create({
+                data: {
+                    orderId,
+                    paymentNo,
+                    channel: 'BALANCE',
+                    status: OrderPayStatus.SUCCESS,
+                    amount: supplementAmount,
+                    currency: 'CNY',
+                    paidAt: new Date(),
+                    notifyRaw: { settlementMode: 'RESERVE_CAPTURE_SUPPLEMENT', idempotencyKey } as any,
+                },
+            });
+            const accountAfter = await tx.walletAccount.update({
+                where: { userId },
+                data: { availableBalance: { decrement: supplementAmount } },
+            });
+            const allocation = await this.allocateMemberBalanceLotsTx(tx, {
+                userId,
+                amount: supplementAmount,
+                sourceType: 'ORDER_PAYMENT',
+                sourceId: payment.id,
+            });
+            if (allocation.untracked > 0) {
+                throw new ConflictException('储值余额与充值批次余额不一致，请先完成资金对账');
+            }
+            await tx.walletTransaction.create({
+                data: {
+                    userId,
+                    direction: WalletDirection.OUT,
+                    bizType: WalletBizType.MEMBER_ORDER_CONSUME,
+                    amount: supplementAmount,
+                    status: WalletTxStatus.AVAILABLE,
+                    sourceType: 'ORDER_PAYMENT_BALANCE',
+                    sourceId: payment.id,
+                    orderId,
+                    availableAfter: Number(accountAfter.availableBalance),
+                    frozenAfter: Number(accountAfter.frozenBalance),
+                    remark: `储值订单补款，幂等键：${idempotencyKey}`,
+                },
+            });
+            const totalCaptured = this.toAmount2(Number(reservation.capturedAmount) + supplementAmount);
+            await tx.memberOrderBalanceReservation.update({
+                where: { id: reservation.id },
+                data: { capturedAmount: totalCaptured, supplementAmount: 0, status: 'SETTLED' },
+            });
+            await tx.order.update({
+                where: { id: orderId },
+                data: {
+                    paidAmount: totalCaptured,
+                    latestPaymentId: payment.id,
+                    payStatus: OrderPayStatus.SUCCESS,
+                    paymentTime: new Date(),
+                    balanceReservationStatus: 'SETTLED',
+                    balanceCapturedAmount: totalCaptured,
+                    balancePendingSupplementAmount: 0,
+                },
+            });
+            await this.writeUserLog(tx, {
+                userId: operatorId,
+                action: 'MEMBER_BALANCE_SUPPLEMENT_PAID',
+                targetType: 'ORDER',
+                targetId: orderId,
+                oldData: { pendingSupplementAmount: supplementAmount } as any,
+                newData: { capturedAmount: totalCaptured, paymentId: payment.id } as any,
+                remark: `储值补款 ¥${supplementAmount.toFixed(2)}`,
+            });
+            return { orderId, paymentId: payment.id, amount: supplementAmount, status: 'SUCCESS', idempotent: false };
+        });
     }
 
     /*** -----------------------------
@@ -4428,6 +4758,11 @@ export class OrdersService {
                 },
                 settlements: {select: {id: true, userId: true, paymentStatus: true, calculatedEarnings: true, finalEarnings: true}},
                 latestPayment: { select: { id: true, channel: true, status: true, amount: true, transactionId: true, paymentNo: true } },
+                payments: {
+                    where: { channel: 'BALANCE', status: OrderPayStatus.SUCCESS },
+                    select: { id: true, amount: true, createdAt: true },
+                    orderBy: { createdAt: 'desc' },
+                },
             },
         });
         if (!order) throw new NotFoundException('订单不存在');
@@ -4450,15 +4785,20 @@ export class OrdersService {
             throw new BadRequestException(this.getComplaintRefundUnsupportedReason(latestPaymentChannel) || '当前支付渠道不支持原路退款');
         }
 
-        const latestPaymentAmountFen = this.toAmountFen(
-            Number(
+        const isReservedBalanceOrder = (order as any).balanceSettlementMode === 'RESERVE_CAPTURE';
+        const reservedBalancePayments = isReservedBalanceOrder
+            ? ((order as any).payments || [])
+            : [];
+        const paidTotalForRefund = isReservedBalanceOrder
+            ? reservedBalancePayments.reduce((sum: number, item: any) => sum + Number(item.amount || 0), 0)
+            : Number(
                 (orderWithPayment as any)?.latestPayment?.amount ??
                 order.paidAmount ??
                 order.receivableAmount ??
                 order.finalPayableAmount ??
                 0,
-            ),
-        );
+            );
+        const latestPaymentAmountFen = this.toAmountFen(paidTotalForRefund);
         if ((shouldAutoRefund || shouldRefundBalance) && latestPaymentAmountFen <= 0) {
             throw new BadRequestException('订单支付金额异常，无法发起退款');
         }
@@ -4561,7 +4901,9 @@ export class OrdersService {
             await tx.orderRefund.create({
                 data: {
                     orderId,
-                    paymentId: Number((orderWithPayment as any)?.latestPayment?.id || 0) || null,
+                    paymentId: isReservedBalanceOrder
+                        ? null
+                        : (Number((orderWithPayment as any)?.latestPayment?.id || 0) || null),
                     refundNo,
                     channel: latestPaymentChannel || this.resolvePaymentChannelByOrderSource((orderWithPayment as any)?.orderSource),
                     status: manualRefundRequired ? 'MANUAL_REQUIRED' : 'SUCCESS',
@@ -4666,7 +5008,17 @@ export class OrdersService {
 
             // ✅ 5) 退款回滚订单奖励积分（会员等级仅由储值或后台人工调整）
             await this.rollbackOrderMemberBenefitsTx(tx, orderWithPayment, refundAmount);
-            await this.reverseMemberBalanceLotsTx(tx, (orderWithPayment as any)?.latestPaymentId, refundAmount);
+            if (isReservedBalanceOrder) {
+                let remainingBalanceRefund = refundAmount;
+                for (const payment of reservedBalancePayments) {
+                    if (remainingBalanceRefund <= 0) break;
+                    const paymentRefund = Math.min(remainingBalanceRefund, this.toAmount2(Number(payment.amount || 0)));
+                    await this.reverseMemberBalanceLotsTx(tx, Number(payment.id), paymentRefund);
+                    remainingBalanceRefund = this.toAmount2(remainingBalanceRefund - paymentRefund);
+                }
+            } else {
+                await this.reverseMemberBalanceLotsTx(tx, (orderWithPayment as any)?.latestPaymentId, refundAmount);
+            }
 
             // 退款后及时同步订单财务快照，避免原成本继续占用月度利润。
             await this.rebuildPerformanceAndFinanceByOrderId({ tx, orderId });
@@ -6236,7 +6588,34 @@ export class OrdersService {
                     ? undefined
                     : Number(dto.paidAmount);
 
-            if (newPaidAmount !== undefined && billingMode === BillingMode.HOURLY) {
+            const isReservedBalanceOrder = (order as any).balanceSettlementMode === 'RESERVE_CAPTURE';
+            if (isReservedBalanceOrder) {
+                const actualAmount = newPaidAmount === undefined
+                    ? Number((order as any).balanceReservedAmount ?? order.paidAmount ?? 0)
+                    : newPaidAmount;
+                const captureResult = await this.captureMemberBalanceReservationTx(tx, order, actualAmount);
+                if (captureResult.pendingSupplementAmount > 0) {
+                    await this.writeUserLog(tx, {
+                        userId: operatorId,
+                        action: 'MEMBER_BALANCE_SUPPLEMENT_REQUIRED',
+                        targetType: 'ORDER',
+                        targetId: orderId,
+                        oldData: { reservedAmount: Number((order as any).balanceReservedAmount || 0) } as any,
+                        newData: captureResult as any,
+                        remark: remark || '实际消费超过预占金额，等待补款',
+                    });
+                    return {
+                        supplementRequired: true,
+                        orderId,
+                        status: order.status,
+                        capturedAmount: captureResult.capturedAmount,
+                        pendingSupplementAmount: captureResult.pendingSupplementAmount,
+                        message: `尚需补款 ¥${captureResult.pendingSupplementAmount.toFixed(2)}，补款完成后方可最终结单`,
+                    };
+                }
+            }
+
+            if (!isReservedBalanceOrder && newPaidAmount !== undefined && billingMode === BillingMode.HOURLY) {
                 const oldPaid = Number((order as any).paidAmount ?? 0);
 
                 if (!Number.isFinite(newPaidAmount) || newPaidAmount < 0) {
@@ -6266,7 +6645,10 @@ export class OrdersService {
                 scope: 'COMPLETED_AND_ARCHIVED',
             });
 
-            const settlementBaseMode = this.normalizeSettlementBaseMode(dto?.settlementBaseMode);
+            // 储值预占订单必须按最终实际扣款结算，不能继续沿用下单时的预计金额。
+            const settlementBaseMode = isReservedBalanceOrder
+                ? 'PAID_AMOUNT'
+                : this.normalizeSettlementBaseMode(dto?.settlementBaseMode);
             const chosenSettlementBaseAmount = this.getSettlementBaseAmountForConfirmation(
                 latestOrder,
                 settlementBaseMode,
@@ -7521,6 +7903,9 @@ export class OrdersService {
         order = { ...order, ...locked };
         if (!Number.isFinite(paidAmount) || paidAmount < 0) {
             throw new BadRequestException('paidAmount 非法');
+        }
+        if ((order as any).balanceSettlementMode === 'RESERVE_CAPTURE') {
+            throw new BadRequestException('储值预占订单不能使用通用补收入口，请使用储值补款');
         }
 
         // confirmPaid 默认 true（补收一般=钱已收）

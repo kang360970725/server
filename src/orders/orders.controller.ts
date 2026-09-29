@@ -285,6 +285,19 @@ export class OrdersController {
         );
     }
 
+    /** 储值预占订单补款；idempotencyKey 用于防止重复点击或网络重试二次扣款。 */
+    @Post('member-balance/supplement')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:detail:update-paid:button')
+    payMemberBalanceSupplement(@Body() body: any, @Request() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:detail:update-paid:button', '当前角色无权进行储值补款');
+        return this.ordersService.payMemberBalanceSupplement(
+            Number(body?.id ?? body?.orderId),
+            Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub),
+            body?.idempotencyKey,
+        );
+    }
+
     /** 更新参与者（管理端） */
     @Post('dispatch/update-participants')
     @UseGuards(PermissionsGuard)

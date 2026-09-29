@@ -177,6 +177,7 @@ model User {
   memberBenefitGrants         MemberBenefitGrant[]
   memberBenefitUsages         MemberBenefitUsage[]
   memberBalanceLots           MemberBalanceLot[]
+  memberOrderReservations     MemberOrderBalanceReservation[]
   memberRechargeRefunds       MemberRechargeRefund[]
   memberLevelOperations       MemberLevelOperation[]     @relation("MemberLevelOperationMember")
   operatedLevelOperations     MemberLevelOperation[]     @relation("MemberLevelOperationOperator")
@@ -1097,9 +1098,54 @@ model MemberBalanceLot {
   user               User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
   rechargeOrder      MemberRechargeOrder?    @relation(fields: [rechargeOrderId], references: [id], onDelete: SetNull)
   usages             MemberBalanceLotUsage[]
+  reservationLots   MemberOrderBalanceReservationLot[]
 
   @@index([userId, status, createdAt], map: "idx_member_balance_lot_user_status")
   @@map("member_balance_lots")
+}
+
+/// 会员储值订单资金预占。订单创建时预占，结单时按实际金额扣款并释放差额。
+model MemberOrderBalanceReservation {
+  id               Int      @id @default(autoincrement())
+  reservationNo    String   @unique @db.VarChar(64)
+  orderId          Int      @unique
+  userId           Int
+  reservedAmount   Decimal  @db.Decimal(12, 2)
+  capturedAmount   Decimal  @default(0.00) @db.Decimal(12, 2)
+  releasedAmount   Decimal  @default(0.00) @db.Decimal(12, 2)
+  supplementAmount Decimal  @default(0.00) @db.Decimal(12, 2)
+  status           String   @default("HELD") @db.VarChar(24)
+  expiresAt        DateTime?
+  capturedAt       DateTime?
+  releasedAt       DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  order            Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lots             MemberOrderBalanceReservationLot[]
+
+  @@index([userId, status, createdAt], map: "idx_member_order_reservation_user_status")
+  @@index([status, expiresAt], map: "idx_member_order_reservation_status_expiry")
+  @@map("member_order_balance_reservations")
+}
+
+/// 预占金额在各充值批次上的拆分，保证本金/赠送金在结单与退款时可追溯。
+model MemberOrderBalanceReservationLot {
+  id                Int      @id @default(autoincrement())
+  reservationId     Int
+  lotId             Int
+  principalReserved Decimal  @default(0.00) @db.Decimal(12, 2)
+  bonusReserved     Decimal  @default(0.00) @db.Decimal(12, 2)
+  principalCaptured Decimal  @default(0.00) @db.Decimal(12, 2)
+  bonusCaptured     Decimal  @default(0.00) @db.Decimal(12, 2)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  reservation       MemberOrderBalanceReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  lot               MemberBalanceLot @relation(fields: [lotId], references: [id], onDelete: Restrict)
+
+  @@unique([reservationId, lotId], map: "uniq_member_order_reservation_lot")
+  @@index([lotId], map: "idx_member_order_reservation_lot_lot")
+  @@map("member_order_balance_reservation_lots")
 }
 
 model MemberBalanceLotUsage {
@@ -1265,6 +1311,12 @@ model Order {
   discountType               String?                 @db.VarChar(20)
   appliedUserCoupon          UserCoupon?             @relation("OrderAppliedUserCoupon")
   latestPaymentId            Int?
+  /// 储值结算 V2：RESERVE_CAPTURE。为空表示历史订单继续使用旧链路。
+  balanceSettlementMode      String?                 @db.VarChar(32)
+  balanceReservationStatus   String?                 @db.VarChar(24)
+  balanceReservedAmount      Decimal                 @default(0.00) @db.Decimal(12, 2)
+  balanceCapturedAmount      Decimal                 @default(0.00) @db.Decimal(12, 2)
+  balancePendingSupplementAmount Decimal             @default(0.00) @db.Decimal(12, 2)
   currentDispatch            OrderDispatch?          @relation("OrderCurrentDispatch", fields: [currentDispatchId], references: [id])
   dispatcher                 User?                   @relation("OrderDispatcher", fields: [dispatcherId], references: [id])
   initialDispatcher          User?                   @relation("OrderInitialDispatcher", fields: [initialDispatcherId], references: [id])
@@ -1276,6 +1328,7 @@ model Order {
   review                     ProductReview?
   playerEvaluations          OrderPlayerEvaluation[]
   latestPayment              OrderPayment?           @relation("OrderLatestPayment", fields: [latestPaymentId], references: [id])
+  memberBalanceReservation   MemberOrderBalanceReservation?
   payments                   OrderPayment[]          @relation("OrderPayments")
   refunds                    OrderRefund[]
   renewalGroups              OrderRenewalGroup[]
@@ -1707,6 +1760,8 @@ model WalletAccount {
   earningFrozenBalance  Decimal  @default(0.0) @db.Decimal(12, 2)
   /// 提现冻结余额（由 wallet_withdrawal_requests 驱动）
   withdrawFrozenBalance Decimal  @default(0.0) @db.Decimal(12, 2)
+  /// 会员储值订单预占余额；不与员工收益/提现冻结混用
+  memberOrderReservedBalance Decimal @default(0.00) @db.Decimal(12, 2)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   /// 钱包UID：展示级唯一号（大写字母+数字混合），兼容老数据先允许为空

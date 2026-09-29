@@ -2,7 +2,6 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { randomInt } from 'node:crypto';
 import { PrismaService } from '../prisma.service';
 import { WalletService } from '../wallet/wallet.service';
-import { inspectWalletFundingTx } from '../wallet/wallet-funding.util';
 import { BatchReconcileAdminRentalOrderDto, CreateAdminRentalOrderDto, ReconcileAdminRentalOrderDto, SettleAdminRentalOrderDto } from './dto/admin-rental-order.dto';
 import { dateOnly, money, settleAmounts, shanghaiDay, startDateFor, textField, todayRange } from './rental-order.rules';
 
@@ -41,6 +40,17 @@ export class RentalOrdersService {
   }
   private async post(tx: any, order: any, amount: number, bizType: string, direction: 'IN' | 'OUT', remark: string) {
     if (amount === 0) return;
+    if (direction === 'OUT') {
+      const account = await tx.walletAccount.findUnique({
+        where: { userId: order.staffUserId },
+        select: { availableBalance: true },
+      });
+      const availableCents = Math.round(Number(account?.availableBalance || 0) * 100);
+      const amountCents = Math.round(amount * 100);
+      if (availableCents < amountCents) {
+        throw new BadRequestException('商行扣款失败：已解冻可用余额不足，冻结余额不可使用');
+      }
+    }
     const after = await this.wallet.applyWalletAccountDelta(tx, order.staffUserId, {
       availableDelta: direction === 'IN' ? amount : -amount,
     });
@@ -70,9 +80,13 @@ export class RentalOrdersService {
           throw new BadRequestException('仅支持正常或冻结中的服务者，退店或限制服务账号不能创建租号订单');
         }
         await this.wallet.ensureWalletAccountBucketsReady(userId, tx as any);
-        const funding = await inspectWalletFundingTx(tx, userId);
-        if (Math.round(funding.spendableAssets * 100) < Math.round(prepaidAmount * 100) + Math.round(depositAmount * 100)) {
-          throw new BadRequestException('租号可用资产不足（仅计可用余额与收益冻结，不含提现冻结、平台保证金）');
+        const account = await tx.walletAccount.findUnique({
+          where: { userId },
+          select: { availableBalance: true },
+        });
+        const requiredCents = Math.round(prepaidAmount * 100) + Math.round(depositAmount * 100);
+        if (Math.round(Number(account?.availableBalance || 0) * 100) < requiredCents) {
+          throw new BadRequestException('商行可用余额不足（仅可使用已解冻的可用余额）');
         }
         const now = new Date();
         const startDate = startDateFor(now);
