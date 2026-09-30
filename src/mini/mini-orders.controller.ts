@@ -942,7 +942,8 @@ export class MiniOrdersController {
     if (!own) throw new BadRequestException('订单不存在或无权限操作');
 
     const score = Number(body?.score ?? 5);
-    if (!Number.isFinite(score) || score < 1 || score > 5) throw new BadRequestException('score 范围为 1-5');
+    const isHalfStarScore = (value: number) => Number.isFinite(value) && value >= 1 && value <= 5 && Number.isInteger(value * 2);
+    if (!isHalfStarScore(score)) throw new BadRequestException('score 范围为 1-5，且仅支持半星');
 
     const tags = Array.isArray(body?.tags) ? body.tags.map((item: any) => String(item || '').trim()).filter(Boolean) : [];
     const content = this.normalizeReviewText(body?.content);
@@ -974,10 +975,16 @@ export class MiniOrdersController {
       });
       if (!order) throw new BadRequestException('订单不存在');
 
-      await tx.order.update({
-        where: { id },
-        data: { status: OrderStatus.REVIEWED },
-      });
+      const hasProgress = order.dispatches.length > 0;
+      const reviewableStatus = [OrderStatus.COMPLETED, OrderStatus.WAIT_REVIEW, OrderStatus.COMPLETED_PENDING_CONFIRM].includes(own.status as any)
+        || (own.status === OrderStatus.REFUNDED && hasProgress);
+      if (!reviewableStatus && own.status !== OrderStatus.REVIEWED) {
+        throw new BadRequestException('当前订单状态不可评价');
+      }
+
+      if (own.status !== OrderStatus.REFUNDED) {
+        await tx.order.update({ where: { id }, data: { status: OrderStatus.REVIEWED } });
+      }
 
       await tx.productReview.upsert({
         where: { orderId: id },
@@ -1013,10 +1020,13 @@ export class MiniOrdersController {
 
       const normalizedPlayerReviews = playerReviewsRaw.map((item: any) => {
         const playerUserId = Number(item?.userId || 0);
-        const itemScore = Number(item?.score ?? 5);
+        const technicalScore = Number(item?.technicalScore ?? item?.score ?? 5);
+        const serviceScore = Number(item?.serviceScore ?? item?.score ?? 5);
+        const comprehensiveScore = Number(item?.comprehensiveScore ?? item?.score ?? 5);
+        const itemScore = Math.round(((technicalScore + serviceScore + comprehensiveScore) / 3) * 100) / 100;
         if (!playerUserId) throw new BadRequestException('playerReviews.userId 缺失');
-        if (!Number.isFinite(itemScore) || itemScore < 1 || itemScore > 5) {
-          throw new BadRequestException('playerReviews.score 范围为 1-5');
+        if (![technicalScore, serviceScore, comprehensiveScore].every(isHalfStarScore)) {
+          throw new BadRequestException('服务者各项评分范围为 1-5，且仅支持半星');
         }
         const dispatchId = Number(dispatchByPlayer.get(playerUserId) || 0);
         if (!dispatchId) throw new BadRequestException(`陪玩师 ${playerUserId} 不属于该订单`);
@@ -1026,6 +1036,9 @@ export class MiniOrdersController {
           playerUserId,
           evaluatorId: uid,
           score: itemScore,
+          technicalScore,
+          serviceScore,
+          comprehensiveScore,
           ratingLabel: this.normalizeReviewLabel(itemScore),
           reviewRemark: this.normalizeReviewText(item?.content) || null,
         };
@@ -1044,9 +1057,12 @@ export class MiniOrdersController {
       }
 
       if (dispatcherReviewRaw) {
-        const dispatcherScore = Number(dispatcherReviewRaw?.score ?? 5);
-        if (!Number.isFinite(dispatcherScore) || dispatcherScore < 1 || dispatcherScore > 5) {
-          throw new BadRequestException('dispatcherReview.score 范围为 1-5');
+        const responseScore = Number(dispatcherReviewRaw?.responseScore ?? dispatcherReviewRaw?.score ?? 5);
+        const serviceScore = Number(dispatcherReviewRaw?.serviceScore ?? dispatcherReviewRaw?.score ?? 5);
+        const comprehensiveScore = Number(dispatcherReviewRaw?.comprehensiveScore ?? dispatcherReviewRaw?.score ?? 5);
+        const dispatcherScore = Math.round(((responseScore + serviceScore + comprehensiveScore) / 3) * 100) / 100;
+        if (![responseScore, serviceScore, comprehensiveScore].every(isHalfStarScore)) {
+          throw new BadRequestException('客服各项评分范围为 1-5，且仅支持半星');
         }
         const dispatcherUserId = Number(dispatcherReviewRaw?.userId || order.dispatcherId || 0);
         if (!dispatcherUserId) throw new BadRequestException('当前订单无可评价客服');
@@ -1060,6 +1076,9 @@ export class MiniOrdersController {
               dispatcherUserId,
               dispatcherUserName: this.normalizeReviewText(dispatcherReviewRaw?.userName),
               score: dispatcherScore,
+              responseScore,
+              serviceScore,
+              comprehensiveScore,
               ratingLabel: this.normalizeReviewLabel(dispatcherScore),
               content: this.normalizeReviewText(dispatcherReviewRaw?.content),
               anonymous,
@@ -1103,7 +1122,7 @@ export class MiniOrdersController {
       await this.miniSubscribeMessageService.pushOrderProgressMessage(id, '订单已评价，感谢你的反馈', '已评价');
     } catch {}
 
-    return miniOk({ success: true, status: OrderStatus.REVIEWED }, '评价提交成功');
+    return miniOk({ success: true, status: own.status === OrderStatus.REFUNDED ? OrderStatus.REFUNDED : OrderStatus.REVIEWED }, '评价提交成功');
   }
 
   @Get(':id/after-sales')

@@ -843,8 +843,14 @@ model StaffPublicCard {
   avatarUrl    String?   @db.VarChar(500)
   slogan       String?   @db.VarChar(120)
   bio          String?   @db.Text
+  imageUrls    Json?
+  audioUrl     String?   @db.VarChar(500)
+  videoUrl     String?   @db.VarChar(500)
   gameTags     Json?
   skillTags    Json?
+  assessmentAt DateTime?
+  antiCheatImages Json?
+  resultImages Json?
   serviceYears Int       @default(0)
   status       String    @default("DRAFT") @db.VarChar(24)
   reviewRemark String?   @db.VarChar(255)
@@ -1452,7 +1458,7 @@ model ProductReview {
   projectId    Int
   orderId      Int         @unique
   userId       Int
-  score        Int
+  score        Float
   tags         Json?
   content      String?     @db.Text
   anonymous    Boolean     @default(false)
@@ -1701,7 +1707,10 @@ model OrderPlayerEvaluation {
   dispatchId           Int
   playerUserId         Int
   evaluatorId          Int
-  score                Int
+  score                Float
+  technicalScore       Float         @default(5)
+  serviceScore         Float         @default(5)
+  comprehensiveScore   Float         @default(5)
   ratingLabel          String        @db.VarChar(20)
   afterSaleHandled     Boolean       @default(false)
   afterSaleAction      String?       @db.VarChar(40)

@@ -27,4 +27,11 @@ export class PerformanceController {
     async dashboardList(@Body() body: PerformanceDashboardListDto) {
         return this.performanceService.dashboardList(body);
     }
+
+    @Post('leaderboard/overview')
+    @Permissions('performance:dashboard:view')
+    async leaderboardOverview(@Body() body: any) {
+        return this.performanceService.leaderboardOverview(body || {});
+    }
+
 }

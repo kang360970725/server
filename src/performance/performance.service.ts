@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { PerformanceDashboardOverviewDto } from './dto/performance-dashboard-overview.dto';
 import { PerformanceDashboardListDto } from './dto/performance-dashboard-list.dto';
@@ -736,6 +736,96 @@ export class PerformanceService {
             const bv = Number(b?.[sortField] ?? 0);
             return sortOrder === 'ascend' ? av - bv : bv - av;
         });
+    }
+
+    private leaderboardRange(input: { startAt?: string; endAt?: string }) {
+        const now = new Date();
+        const defaultStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+        const defaultEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+        const startAt = input.startAt ? new Date(input.startAt) : defaultStart;
+        const endAt = input.endAt ? new Date(input.endAt) : defaultEnd;
+        if (!Number.isFinite(startAt.getTime()) || !Number.isFinite(endAt.getTime()) || startAt > endAt) {
+            throw new BadRequestException('排行榜时间范围无效');
+        }
+        if (endAt.getTime() - startAt.getTime() > 366 * 24 * 60 * 60 * 1000) {
+            throw new BadRequestException('排行榜单次最多查询366天');
+        }
+        return { startAt, endAt };
+    }
+
+    async leaderboardOverview(input: { startAt?: string; endAt?: string }) {
+        const { startAt, endAt } = this.leaderboardRange(input);
+        const records = await this.prisma.performanceRecord.findMany({
+            where: {
+                statsDate: { gte: startAt, lte: endAt },
+                status: 'EFFECTIVE',
+                ownerRoleType: 'PLAYER',
+                isCompleted: true,
+            },
+            select: {
+                orderId: true,
+                ownerUserId: true,
+                grossPerformanceAmount: true,
+                netIncomeAmount: true,
+                statsDate: true,
+            },
+            orderBy: { statsDate: 'desc' },
+        });
+        const userIds = [...new Set(records.map(item => Number(item.ownerUserId)).filter(Boolean))];
+        const users = userIds.length ? await this.prisma.user.findMany({
+            where: { id: { in: userIds }, userType: 'STAFF' },
+            select: { id: true, name: true, avatar: true, phone: true, staffRating: { select: { name: true } } },
+        }) : [];
+        const userMap = new Map(users.map(user => [Number(user.id), user]));
+        const playerMap = new Map<number, any>();
+        for (const item of records) {
+            const userId = Number(item.ownerUserId);
+            const user = userMap.get(userId);
+            if (!user) continue;
+            const player = playerMap.get(userId) || {
+                userId,
+                name: user.name || `陪玩#${userId}`,
+                avatar: user.avatar || null,
+                phone: user.phone || '',
+                staffRatingName: user.staffRating?.name || '-',
+                orderIds: new Set<number>(),
+                grossPerformanceAmount: 0,
+                netIncomeAmount: 0,
+                latestAt: null as Date | null,
+            };
+            player.orderIds.add(Number(item.orderId));
+            player.grossPerformanceAmount += Number(item.grossPerformanceAmount || 0);
+            player.netIncomeAmount += Number(item.netIncomeAmount || 0);
+            if (!player.latestAt || item.statsDate > player.latestAt) player.latestAt = item.statsDate;
+            playerMap.set(userId, player);
+        }
+        const players = [...playerMap.values()].map(item => ({
+                userId: item.userId,
+                name: item.name,
+                avatar: item.avatar,
+                phone: item.phone,
+                staffRatingName: item.staffRatingName,
+                completedOrders: item.orderIds.size,
+                grossPerformanceAmount: this.round2(item.grossPerformanceAmount),
+                netIncomeAmount: this.round2(item.netIncomeAmount),
+                latestAt: item.latestAt,
+            }));
+        const rank = (compare: (a: any, b: any) => number) => [...players].sort(compare).map((item, index) => ({ ...item, rank: index + 1 }));
+        const netIncomeRanking = rank((a, b) => b.netIncomeAmount - a.netIncomeAmount || b.completedOrders - a.completedOrders || a.userId - b.userId);
+        const orderRanking = rank((a, b) => b.completedOrders - a.completedOrders || b.grossPerformanceAmount - a.grossPerformanceAmount || a.userId - b.userId);
+        const grossPerformanceRanking = rank((a, b) => b.grossPerformanceAmount - a.grossPerformanceAmount || b.netIncomeAmount - a.netIncomeAmount || a.userId - b.userId);
+        const orderIds = [...new Set(records.map(item => Number(item.orderId)))];
+        return {
+            range: { startAt, endAt },
+            summary: {
+                completedOrders: orderIds.length,
+                activePlayers: players.length,
+                totalGrossPerformanceAmount: this.round2(players.reduce((sum, item) => sum + item.grossPerformanceAmount, 0)),
+                totalNetIncomeAmount: this.round2(players.reduce((sum, item) => sum + item.netIncomeAmount, 0)),
+            },
+            rankings: { netIncome: netIncomeRanking, orders: orderRanking, grossPerformance: grossPerformanceRanking },
+            generatedAt: new Date(),
+        };
     }
 
     private round2(n: any) {

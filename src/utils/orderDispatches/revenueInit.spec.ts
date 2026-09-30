@@ -30,7 +30,7 @@ describe('保底单末轮项目级策略', () => {
     expect(rows[2].clubEarnings).toBe(22);
   });
 
-  it('全额模式末轮不再被默认中评降为65%，历史零收益参与人不能获得打赏', async () => {
+  it('全额模式末轮按默认好评结算，历史零收益参与人不能获得打赏', async () => {
     const order: any = { id: 11, status: 'COMPLETED_PENDING_CONFIRM', baseAmountWan: 1000,
       settlementBaseAmount: 100, projectSnapshot: { clubRate: 0.2, billingMode: 'GUARANTEED', guaranteedSettlementMode: 'FINAL_ROUND_TAKES_ALL' },
       dispatches: [guaranteedRound(11, 1, DispatchStatus.ARCHIVED, [[111, 300]]),
@@ -39,6 +39,7 @@ describe('保底单末轮项目级策略', () => {
     const service: any = Object.create(OrdersService.prototype);
     const applied = await service.applyPlayerEvaluationAdjustmentsToSettlements({ order, settlementsToCreate: rows, autoConfirm: true });
     expect(applied.settlementsToCreate.map((r: any) => [r.dispatchId, r.finalEarnings])).toEqual([[11, 0], [12, 79]]);
+    expect(applied.evaluationRows.every((row: any) => row.ratingLabel === 'GOOD' && row.score === 5 && row.isSettlementDefault)).toBe(true);
     await expect(service.applyPlayerEvaluationAdjustmentsToSettlements({ order,
       settlementsToCreate: computeBillingGuaranteed(order), autoConfirm: true, orderTipEnabled: true, orderTipUserIds: [111] }))
       .rejects.toThrow('不允许打赏');

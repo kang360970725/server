@@ -1143,11 +1143,13 @@ export class OrdersService {
         orderTipEnabled?: boolean;
         orderTipUserIds?: any[];
         skipValidation?: boolean;
+        defaultToGood?: boolean;
     }) {
         const { order, settlementsToCreate } = params;
         const playerEvaluations = Array.isArray(params.playerEvaluations) ? params.playerEvaluations : [];
         const autoConfirm = Boolean(params.autoConfirm);
         const skipValidation = Boolean(params.skipValidation);
+        const defaultToGood = Boolean(params.defaultToGood);
         const hasOrderTipPayload = params.orderTipEnabled !== undefined || Array.isArray(params.orderTipUserIds);
         const orderTipEnabled = hasOrderTipPayload ? Boolean(params.orderTipEnabled) : false;
         const requestedTipUserIds = this.normalizeIdArray(params.orderTipUserIds);
@@ -1173,14 +1175,15 @@ export class OrdersService {
         }
 
         const evalMap = new Map<string, any>();
-        if (autoConfirm) {
+        if (autoConfirm || defaultToGood) {
             for (const row of adjustablePlayerRows) {
                 const key = this.buildPlayerEvaluationKey(Number(row.dispatchId), Number(row.userId));
                 evalMap.set(key, {
                     dispatchId: Number(row.dispatchId),
                     playerUserId: Number(row.userId),
-                    score: 3,
-                    ratingLabel: 'MEDIUM',
+                    score: 5,
+                    ratingLabel: 'GOOD',
+                    isSettlementDefault: true,
                     responsibleUserIds: [],
                     tippedUserIds: [],
                     afterSaleHandled: false,
@@ -1189,7 +1192,7 @@ export class OrdersService {
                     tipAmount: 0,
                     penaltyAmount: 0,
                     maintenanceFeeAmount: 0,
-                    reviewRemark: 'SYSTEM_AUTO_CONFIRM_72H',
+                    reviewRemark: autoConfirm ? 'SYSTEM_AUTO_CONFIRM_DEFAULT_GOOD' : 'CUSTOMER_SERVICE_CONFIRM_DEFAULT_GOOD',
                 });
             }
         }
@@ -1218,7 +1221,7 @@ export class OrdersService {
         }
 
         const missingKeys: string[] = [];
-        if (!autoConfirm) {
+        if (!autoConfirm && !defaultToGood) {
             for (const row of adjustablePlayerRows) {
                 const key = this.buildPlayerEvaluationKey(Number(row.dispatchId), Number(row.userId));
                 if (!evalMap.has(key)) missingKeys.push(key);
@@ -1429,6 +1432,7 @@ export class OrdersService {
                     maintenanceFeeAmount: 0,
                     reviewRemark: st.evalItem.reviewRemark || null,
                     playerName: row.userName,
+                    isSettlementDefault: Boolean(st.evalItem.isSettlementDefault),
                 });
                 return;
             }
@@ -1483,6 +1487,7 @@ export class OrdersService {
                 maintenanceFeeAmount: roundMix1(Number(adjust.maintenanceFeeAmount ?? 0)),
                 reviewRemark: st.evalItem.reviewRemark || null,
                 playerName: row.userName,
+                isSettlementDefault: Boolean(st.evalItem.isSettlementDefault),
             });
         });
 
@@ -5909,6 +5914,7 @@ export class OrdersService {
         orderTipEnabled?: boolean;
         orderTipUserIds?: any[];
         skipValidation?: boolean;
+        defaultToGood?: boolean;
     }) {
         const { order, modePlayAllocList } = params;
         const skipValidation = Boolean(params.skipValidation);
@@ -5950,6 +5956,7 @@ export class OrdersService {
             orderTipEnabled: params.orderTipEnabled,
             orderTipUserIds: params.orderTipUserIds,
             skipValidation,
+            defaultToGood: Boolean(params.defaultToGood),
         });
         settlementsToCreate = applied.settlementsToCreate;
 
@@ -6829,10 +6836,12 @@ export class OrdersService {
                 const { settlementsToCreate, evaluationRows } = await this.buildSettlementPlanFromOrder({
                     order: latestOrder,
                     modePlayAllocList: dto?.modePlayAllocList,
-                    playerEvaluations: dto?.playerEvaluations,
+                    // 客服确认结单不再采集评价；结算统一按默认好评计算。
+                    playerEvaluations: [],
                     autoConfirm: isAutoConfirm,
-                    orderTipEnabled: dto?.orderTipEnabled,
-                    orderTipUserIds: dto?.orderTipUserIds,
+                    orderTipEnabled: false,
+                    orderTipUserIds: [],
+                    defaultToGood: true,
                 });
 
                 /**
@@ -6856,8 +6865,9 @@ export class OrdersService {
                     invalidateReason: dto?.renewalInvalidateReason || remark,
                 });
 
-                if (evaluationRows.length) {
-                    for (const item of evaluationRows) {
+                const realEvaluationRows = evaluationRows.filter((item: any) => !item?.isSettlementDefault);
+                if (realEvaluationRows.length) {
+                    for (const item of realEvaluationRows) {
                         await tx.orderPlayerEvaluation.upsert({
                             where: {
                                 orderId_dispatchId_playerUserId: {
@@ -6869,6 +6879,9 @@ export class OrdersService {
                             update: {
                                 evaluatorId: operatorId,
                                 score: Number(item.score ?? 0),
+                                technicalScore: Number(item.score ?? 0),
+                                serviceScore: Number(item.score ?? 0),
+                                comprehensiveScore: Number(item.score ?? 0),
                                 ratingLabel: String(item.ratingLabel || 'MEDIUM'),
                                 afterSaleHandled: Boolean(item.afterSaleHandled),
                                 afterSaleAction: item.afterSaleAction || null,
@@ -6886,6 +6899,9 @@ export class OrdersService {
                                 playerUserId: Number(item.playerUserId),
                                 evaluatorId: operatorId,
                                 score: Number(item.score ?? 0),
+                                technicalScore: Number(item.score ?? 0),
+                                serviceScore: Number(item.score ?? 0),
+                                comprehensiveScore: Number(item.score ?? 0),
                                 ratingLabel: String(item.ratingLabel || 'MEDIUM'),
                                 afterSaleHandled: Boolean(item.afterSaleHandled),
                                 afterSaleAction: item.afterSaleAction || null,
@@ -6948,11 +6964,12 @@ export class OrdersService {
                     const preview = await this.buildSettlementPlanFromOrder({
                         order: latestOrder,
                         modePlayAllocList: dto?.modePlayAllocList,
-                        playerEvaluations: dto?.playerEvaluations,
+                        playerEvaluations: [],
                         autoConfirm: isAutoConfirm,
-                        orderTipEnabled: dto?.orderTipEnabled,
-                        orderTipUserIds: dto?.orderTipUserIds,
+                        orderTipEnabled: false,
+                        orderTipUserIds: [],
                         skipValidation: true,
+                        defaultToGood: true,
                     });
 
                     return {

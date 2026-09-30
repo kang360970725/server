@@ -169,10 +169,44 @@ export class MiniEngagementService {
     return this.prisma.memberProjectFavorite.findMany({where: {userId}, include: {project: true}, orderBy: {createdAt: 'desc'}});
   }
 
-  async myStaffCard(userId:number){const user=await this.prisma.user.findUnique({where:{id:userId},select:{userType:true,name:true,avatar:true}});const type=String(user?.userType||'').toUpperCase();if(!['STAFF','SUPER_ADMIN'].includes(type))return{eligible:false,card:null};return{eligible:true,card:await this.prisma.staffPublicCard.findUnique({where:{userId}}),defaults:{displayName:user?.name,avatarUrl:user?.avatar}};}
-  async saveMyStaffCard(userId:number,body:any){const own=await this.myStaffCard(userId);if(!own.eligible)throw new BadRequestException('仅服务者可维护公开名片');const displayName=String(body?.displayName||'').trim().slice(0,64);if(!displayName)throw new BadRequestException('请填写展示名称');const submit=body?.submit===true;return this.prisma.staffPublicCard.upsert({where:{userId},update:{displayName,avatarUrl:String(body?.avatarUrl||'').trim()||null,slogan:String(body?.slogan||'').trim().slice(0,120)||null,bio:String(body?.bio||'').trim()||null,gameTags:Array.isArray(body?.gameTags)?body.gameTags:[],skillTags:Array.isArray(body?.skillTags)?body.skillTags:[],serviceYears:Math.max(0,Math.min(50,Number(body?.serviceYears||0))),status:submit?'PENDING':'DRAFT',submittedAt:submit?new Date():null,reviewRemark:null},create:{userId,displayName,avatarUrl:String(body?.avatarUrl||'').trim()||null,slogan:String(body?.slogan||'').trim().slice(0,120)||null,bio:String(body?.bio||'').trim()||null,gameTags:Array.isArray(body?.gameTags)?body.gameTags:[],skillTags:Array.isArray(body?.skillTags)?body.skillTags:[],serviceYears:Math.max(0,Math.min(50,Number(body?.serviceYears||0))),status:submit?'PENDING':'DRAFT',submittedAt:submit?new Date():null}});}
+  async myStaffCard(userId:number){
+    const user=await this.prisma.user.findUnique({where:{id:userId},select:{userType:true,name:true,avatar:true}});const type=String(user?.userType||'').toUpperCase();if(!['STAFF','SUPER_ADMIN'].includes(type))return{eligible:false,card:null};
+    const [card,aggregate]=await Promise.all([this.prisma.staffPublicCard.findUnique({where:{userId}}),this.prisma.orderPlayerEvaluation.aggregate({where:{playerUserId:userId},_avg:{score:true,technicalScore:true,serviceScore:true,comprehensiveScore:true},_count:{id:true}})]);
+    const ratings={overall:Number(aggregate._avg.score||0),technical:Number(aggregate._avg.technicalScore||0),service:Number(aggregate._avg.serviceScore||0),comprehensive:Number(aggregate._avg.comprehensiveScore||0),count:aggregate._count.id};
+    return{eligible:true,card:card?{...card,ratings}:null,defaults:{displayName:user?.name,avatarUrl:user?.avatar,ratings}};
+  }
+  async saveMyStaffCard(userId:number,body:any){
+    const own=await this.myStaffCard(userId);if(!own.eligible)throw new BadRequestException('仅服务者可维护公开名片');
+    const displayName=String(body?.displayName||'').trim().slice(0,64);if(!displayName)throw new BadRequestException('请填写展示名称');
+    const text=(value:any,max:number)=>String(value||'').trim().slice(0,max)||null;
+    const urls=(value:any,max:number)=>Array.isArray(value)?value.map((item:any)=>String(item||'').trim()).filter(Boolean).slice(0,max):[];
+    const submit=body?.submit===true;
+    const data={displayName,avatarUrl:text(body?.avatarUrl,500),slogan:text(body?.slogan,30),bio:text(body?.bio,500),imageUrls:urls(body?.imageUrls,3),audioUrl:text(body?.audioUrl,500),videoUrl:text(body?.videoUrl,500),gameTags:Array.isArray(body?.gameTags)?body.gameTags:[],skillTags:Array.isArray(body?.skillTags)?body.skillTags:[],serviceYears:Math.max(0,Math.min(50,Number(body?.serviceYears||0))),assessmentAt:body?.assessmentAt?new Date(body.assessmentAt):null,antiCheatImages:urls(body?.antiCheatImages,1),resultImages:urls(body?.resultImages,3),status:submit?'PENDING':'DRAFT',submittedAt:submit?new Date():null,reviewRemark:null};
+    return this.prisma.staffPublicCard.upsert({where:{userId},update:data,create:{userId,...data}});
+  }
   async approvedStaffCards(){return this.prisma.staffPublicCard.findMany({where:{status:'APPROVED'},orderBy:{reviewedAt:'desc'},take:50});}
+  async approvedStaffCard(userId:number){
+    const card=await this.prisma.staffPublicCard.findFirst({where:{userId,status:'APPROVED'}});
+    if(!card)throw new NotFoundException('服务者主页不存在或尚未通过审核');
+    const aggregate=await this.prisma.orderPlayerEvaluation.aggregate({
+      where:{playerUserId:userId},
+      _avg:{score:true,technicalScore:true,serviceScore:true,comprehensiveScore:true},
+      _count:{id:true},
+    });
+    return {...card,ratings:{overall:Number(aggregate._avg.score||0),technical:Number(aggregate._avg.technicalScore||0),service:Number(aggregate._avg.serviceScore||0),comprehensive:Number(aggregate._avg.comprehensiveScore||0),count:aggregate._count.id}};
+  }
   async adminStaffCards(status?:string){return this.prisma.staffPublicCard.findMany({where:status?{status}:undefined,include:{user:{select:{id:true,name:true,phone:true,userType:true}}},orderBy:{updatedAt:'desc'}});}
+  async adminUpdateStaffCard(id:number,body:any){
+    const text=(value:any,max:number)=>String(value||'').trim().slice(0,max)||null;
+    const urls=(value:any,max:number)=>Array.isArray(value)?value.map((item:any)=>String(item||'').trim()).filter(Boolean).slice(0,max):[];
+    const submit=body?.submit===true;
+    return this.prisma.staffPublicCard.update({where:{id},data:{
+      displayName:String(body?.displayName||'').trim().slice(0,64),avatarUrl:text(body?.avatarUrl,500),slogan:text(body?.slogan,30),bio:text(body?.bio,500),
+      imageUrls:urls(body?.imageUrls,3),audioUrl:text(body?.audioUrl,500),videoUrl:text(body?.videoUrl,500),gameTags:Array.isArray(body?.gameTags)?body.gameTags:[],skillTags:Array.isArray(body?.skillTags)?body.skillTags:[],
+      assessmentAt:body?.assessmentAt?new Date(body.assessmentAt):null,antiCheatImages:urls(body?.antiCheatImages,1),resultImages:urls(body?.resultImages,3),
+      status:submit?'PENDING':'DRAFT',submittedAt:submit?new Date():null,reviewRemark:null,
+    }});
+  }
   async reviewStaffCard(id:number,body:any,reviewerId:number){const status=String(body?.status||'').toUpperCase();if(!['APPROVED','REJECTED'].includes(status))throw new BadRequestException('审核状态无效');return this.prisma.staffPublicCard.update({where:{id},data:{status,reviewRemark:String(body?.reviewRemark||'').trim().slice(0,255)||null,reviewedAt:new Date(),reviewedBy:reviewerId||null}});}
 
   private async assertProject(projectId: number) {

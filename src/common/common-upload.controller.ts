@@ -18,10 +18,22 @@ export class CommonUploadController {
         'announcement',
         'miniapp-protocol',
         'penalties',
+        'staff-card',
         'general',
     ]);
 
-    private readonly allowedScenes = new Set(['cover', 'rich', 'image', 'file', 'avatar']);
+    private readonly allowedScenes = new Set([
+        'cover',
+        'rich',
+        'image',
+        'file',
+        'avatar',
+        'profile-images',
+        'audio',
+        'video',
+        'anti-cheat',
+        'assessment-results',
+    ]);
 
     @Post('file')
     @UseInterceptors(FileInterceptor('file', {limits: {fileSize: 8 * 1024 * 1024}}))
@@ -87,6 +99,8 @@ export class CommonUploadController {
             module?: string;
             scene?: string;
             filename?: string;
+            fileSize?: number;
+            mimeType?: string;
         },
     ) {
         try {
@@ -116,7 +130,28 @@ export class CommonUploadController {
 
             const rawName = String(body?.filename || 'file').trim();
             const safeName = rawName.replace(/[^\w.\-]/g, '_').slice(-80) || 'file';
-            const ext = safeName.includes('.') ? safeName.split('.').pop() : 'bin';
+            const ext = (safeName.includes('.') ? safeName.split('.').pop() : 'bin')?.toLowerCase() || 'bin';
+            const fileSize = Number(body?.fileSize || 0);
+            const mimeType = String(body?.mimeType || '').trim().toLowerCase();
+            const imageScenes = new Set(['avatar', 'cover', 'image', 'profile-images', 'anti-cheat', 'assessment-results']);
+            const maxBytes = scene === 'avatar'
+                ? 1 * 1024 * 1024
+                : imageScenes.has(scene)
+                    ? 2 * 1024 * 1024
+                    : scene === 'audio'
+                        ? 5 * 1024 * 1024
+                        : scene === 'video'
+                            ? 20 * 1024 * 1024
+                            : 8 * 1024 * 1024;
+            if (moduleKey === 'staff-card') {
+                if (!Number.isFinite(fileSize) || fileSize <= 0) throw new BadRequestException('无法识别文件大小');
+                if (fileSize > maxBytes) throw new BadRequestException(`文件不能超过 ${Math.round(maxBytes / 1024 / 1024)}MB`);
+                if (imageScenes.has(scene) && mimeType && !mimeType.startsWith('image/')) throw new BadRequestException('该位置仅支持图片文件');
+                if (scene === 'audio' && mimeType && !mimeType.startsWith('audio/')) throw new BadRequestException('语音介绍仅支持音频文件');
+                if (scene === 'video' && mimeType && !mimeType.startsWith('video/')) throw new BadRequestException('视频介绍仅支持视频文件');
+                if (scene === 'audio' && !['mp3', 'm4a', 'aac'].includes(ext)) throw new BadRequestException('语音介绍仅支持 MP3、M4A 或 AAC 格式');
+                if (scene === 'video' && ext !== 'mp4') throw new BadRequestException('视频介绍仅支持 MP4 格式');
+            }
             const date = new Date();
             const y = date.getFullYear();
             const m = `${date.getMonth() + 1}`.padStart(2, '0');
