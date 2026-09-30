@@ -764,13 +764,21 @@ export class PerformanceService {
             },
             select: {
                 orderId: true,
+                settlementId: true,
                 ownerUserId: true,
                 grossPerformanceAmount: true,
                 netIncomeAmount: true,
                 statsDate: true,
+                createdAt: true,
             },
             orderBy: { statsDate: 'desc' },
         });
+        const settlementIds = [...new Set(records.map(item => Number(item.settlementId)).filter(Boolean))];
+        const settlements = settlementIds.length ? await this.prisma.orderSettlement.findMany({
+            where: { id: { in: settlementIds } },
+            select: { id: true, settledAt: true },
+        }) : [];
+        const settledAtMap = new Map(settlements.map(item => [Number(item.id), item.settledAt]));
         const userIds = [...new Set(records.map(item => Number(item.ownerUserId)).filter(Boolean))];
         const users = userIds.length ? await this.prisma.user.findMany({
             where: { id: { in: userIds }, userType: 'STAFF' },
@@ -796,7 +804,9 @@ export class PerformanceService {
             player.orderIds.add(Number(item.orderId));
             player.grossPerformanceAmount += Number(item.grossPerformanceAmount || 0);
             player.netIncomeAmount += Number(item.netIncomeAmount || 0);
-            if (!player.latestAt || item.statsDate > player.latestAt) player.latestAt = item.statsDate;
+            // statsDate 是 DATE 类型，只适合统计归属日；最近业绩应展示实际结算时间。
+            const performanceAt = settledAtMap.get(Number(item.settlementId)) || item.createdAt || item.statsDate;
+            if (!player.latestAt || performanceAt > player.latestAt) player.latestAt = performanceAt;
             playerMap.set(userId, player);
         }
         const players = [...playerMap.values()].map(item => ({
