@@ -2127,6 +2127,11 @@ export class OrdersService {
     }
 
     private async ensureLegacySuccessfulPaymentForRefund(order: any) {
+        // 储值预占订单有自己的支付生命周期：HELD 只是占用可用余额，并不代表已扣款。
+        // 这里若按历史订单补建支付，会把客服下单误识别为线下收钱吧支付，进而绕过预占释放。
+        if (String(order?.balanceSettlementMode || '') === 'RESERVE_CAPTURE') {
+            return order;
+        }
         const latestPaymentStatus = String(order?.latestPayment?.status || '').trim().toUpperCase();
         if (latestPaymentStatus === OrderPayStatus.SUCCESS) {
             return order;
@@ -4775,9 +4780,12 @@ export class OrdersService {
                 settlements: {select: {id: true, userId: true, paymentStatus: true, calculatedEarnings: true, finalEarnings: true}},
                 latestPayment: { select: { id: true, channel: true, status: true, amount: true, transactionId: true, paymentNo: true } },
                 payments: {
-                    where: { channel: 'BALANCE', status: OrderPayStatus.SUCCESS },
-                    select: { id: true, amount: true, createdAt: true },
+                    where: { channel: 'BALANCE' },
+                    select: { id: true, amount: true, status: true, createdAt: true },
                     orderBy: { createdAt: 'desc' },
+                },
+                memberBalanceReservation: {
+                    select: { id: true, status: true, reservedAmount: true, capturedAmount: true },
                 },
             },
         });
@@ -4787,10 +4795,17 @@ export class OrdersService {
             throw new BadRequestException('订单已退款，禁止重复退款');
         }
 
-        const orderWithPayment = await this.ensureLegacySuccessfulPaymentForRefund(order);
+        const isReservedBalanceOrder = (order as any).balanceSettlementMode === 'RESERVE_CAPTURE';
+        const reservation = (order as any).memberBalanceReservation;
+        const isHeldReservedBalanceOrder = isReservedBalanceOrder
+            && String(reservation?.status || '') === 'HELD'
+            && this.toAmount2(Number(reservation?.capturedAmount || 0)) <= 0;
+        const orderWithPayment = isReservedBalanceOrder
+            ? order
+            : await this.ensureLegacySuccessfulPaymentForRefund(order);
         const latestPaymentChannel = String((orderWithPayment as any)?.latestPayment?.channel || '').trim().toUpperCase();
         const latestPaymentStatus = String((orderWithPayment as any)?.latestPayment?.status || '').trim().toUpperCase();
-        if (latestPaymentStatus !== OrderPayStatus.SUCCESS) {
+        if (!isHeldReservedBalanceOrder && latestPaymentStatus !== OrderPayStatus.SUCCESS) {
             throw new BadRequestException('订单未支付完成，无法退款');
         }
 
@@ -4801,11 +4816,15 @@ export class OrdersService {
             throw new BadRequestException(this.getComplaintRefundUnsupportedReason(latestPaymentChannel) || '当前支付渠道不支持原路退款');
         }
 
-        const isReservedBalanceOrder = (order as any).balanceSettlementMode === 'RESERVE_CAPTURE';
         const reservedBalancePayments = isReservedBalanceOrder
-            ? ((order as any).payments || [])
+            ? ((order as any).payments || []).filter((item: any) => String(item?.status || '') === OrderPayStatus.SUCCESS)
             : [];
-        const paidTotalForRefund = isReservedBalanceOrder
+        const heldReservedAmount = isHeldReservedBalanceOrder
+            ? this.toAmount2(Number(reservation?.reservedAmount || 0))
+            : 0;
+        const paidTotalForRefund = isHeldReservedBalanceOrder
+            ? heldReservedAmount
+            : isReservedBalanceOrder
             ? reservedBalancePayments.reduce((sum: number, item: any) => sum + Number(item.amount || 0), 0)
             : Number(
                 (orderWithPayment as any)?.latestPayment?.amount ??
@@ -4815,7 +4834,7 @@ export class OrdersService {
                 0,
             );
         const latestPaymentAmountFen = this.toAmountFen(paidTotalForRefund);
-        if ((shouldAutoRefund || shouldRefundBalance) && latestPaymentAmountFen <= 0) {
+        if ((shouldAutoRefund || shouldRefundBalance || isHeldReservedBalanceOrder) && latestPaymentAmountFen <= 0) {
             throw new BadRequestException('订单支付金额异常，无法发起退款');
         }
         const requestedRefundAmount =
@@ -4827,6 +4846,11 @@ export class OrdersService {
         }
         if (requestedRefundAmount !== null && requestedRefundAmount > this.toAmount2(Number(latestPaymentAmountFen / 100))) {
             throw new BadRequestException('退款金额不能超过订单实付金额');
+        }
+        if (isHeldReservedBalanceOrder
+            && requestedRefundAmount !== null
+            && requestedRefundAmount !== heldReservedAmount) {
+            throw new BadRequestException('未扣款的储值预占订单仅支持全额释放');
         }
         const refundAmountFen = requestedRefundAmount === null ? latestPaymentAmountFen : this.toAmountFen(requestedRefundAmount);
         const refundAmount = this.toAmount2(Number(refundAmountFen / 100));
@@ -4917,12 +4941,14 @@ export class OrdersService {
             await tx.orderRefund.create({
                 data: {
                     orderId,
-                    paymentId: isReservedBalanceOrder
+                    paymentId: isHeldReservedBalanceOrder
+                        ? (Number((orderWithPayment as any)?.latestPayment?.id || 0) || null)
+                        : isReservedBalanceOrder
                         ? null
                         : (Number((orderWithPayment as any)?.latestPayment?.id || 0) || null),
                     refundNo,
                     channel: latestPaymentChannel || this.resolvePaymentChannelByOrderSource((orderWithPayment as any)?.orderSource),
-                    status: manualRefundRequired ? 'MANUAL_REQUIRED' : 'SUCCESS',
+                    status: isHeldReservedBalanceOrder ? 'SUCCESS' : (manualRefundRequired ? 'MANUAL_REQUIRED' : 'SUCCESS'),
                     amount: refundAmount,
                     currency: 'CNY',
                     reason: refundReason,
@@ -4933,7 +4959,9 @@ export class OrdersService {
                 },
             });
 
-            if (shouldRefundBalance) {
+            if (isHeldReservedBalanceOrder) {
+                await this.releaseMemberBalanceReservationTx(tx, orderId, refundReason);
+            } else if (shouldRefundBalance) {
                 const customerUserId = Number((order as any)?.customerUserId || 0);
                 if (!customerUserId) {
                     throw new BadRequestException('订单缺少付款用户，无法退款');
@@ -5024,7 +5052,9 @@ export class OrdersService {
 
             // ✅ 5) 退款回滚订单奖励积分（会员等级仅由储值或后台人工调整）
             await this.rollbackOrderMemberBenefitsTx(tx, orderWithPayment, refundAmount);
-            if (isReservedBalanceOrder) {
+            if (isHeldReservedBalanceOrder) {
+                // 预占释放已经还原批次余额，不存在实际消费记录，无需再次冲正。
+            } else if (isReservedBalanceOrder) {
                 let remainingBalanceRefund = refundAmount;
                 for (const payment of reservedBalancePayments) {
                     if (remainingBalanceRefund <= 0) break;
@@ -6709,8 +6739,10 @@ export class OrdersService {
             const isReservedBalanceOrder = (order as any).balanceSettlementMode === 'RESERVE_CAPTURE';
             if (isReservedBalanceOrder) {
                 let pricing: any = null;
-                let actualAmount = Number(order.paidAmount || 0);
-                if ((order as any).balanceReservationStatus === 'HELD') {
+                let actualAmount = this.toAmount2(Number(
+                    (order as any).finalPayableAmount ?? order.paidAmount ?? 0,
+                ));
+                if ((order as any).balanceReservationStatus === 'HELD' && billingMode === BillingMode.HOURLY) {
                     const fallbackHours = (order.dispatches || []).reduce(
                         (sum: number, dispatch: any) => sum + Number(dispatch?.billableHours || 0),
                         0,
@@ -6797,8 +6829,8 @@ export class OrdersService {
                 scope: 'COMPLETED_AND_ARCHIVED',
             });
 
-            // 储值预占订单必须按最终实际扣款结算，不能继续沿用下单时的预计金额。
-            const settlementBaseMode = isReservedBalanceOrder
+            // 仅储值小时单按最终实际扣款结算；玩法单/保底单继续沿用历史结算基数选择。
+            const settlementBaseMode = isReservedBalanceOrder && billingMode === BillingMode.HOURLY
                 ? 'PAID_AMOUNT'
                 : this.normalizeSettlementBaseMode(dto?.settlementBaseMode);
             const chosenSettlementBaseAmount = this.getSettlementBaseAmountForConfirmation(
