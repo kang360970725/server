@@ -106,6 +106,38 @@ describe('EquipmentRentalFeeService', () => {
     expect(createdBills[0].dueAt.toISOString()).toBe('2026-09-15T00:00:00.000Z');
   });
 
+  it('generates one bill per contract when a staff user has multiple active configurations', async () => {
+    const createdBills: any[] = [];
+    const prisma = {
+      equipmentRentalContract: {
+        findMany: jest.fn().mockResolvedValue([
+          { id: 31, userId: 7, status: 'ACTIVE', monthlyAmount: 100, startDate: new Date(Date.UTC(2026, 6, 15)), endDate: null },
+          { id: 32, userId: 7, status: 'ACTIVE', monthlyAmount: 80, startDate: new Date(Date.UTC(2026, 7, 20)), endDate: null },
+        ]),
+      },
+      equipmentRentalBill: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn((payload) => {
+          createdBills.push(payload.data);
+          return Promise.resolve({ id: 40 + createdBills.length, ...payload.data });
+        }),
+      },
+    } as any;
+    const service = new EquipmentRentalFeeService(prisma);
+
+    await expect(service.generateBillsForMonth('2026-09')).resolves.toMatchObject({ affected: 2 });
+    expect(createdBills).toEqual(expect.arrayContaining([
+      expect.objectContaining({ contractId: 31, userId: 7, billMonth: '2026-09', amount: 100 }),
+      expect.objectContaining({ contractId: 32, userId: 7, billMonth: '2026-09', amount: 80 }),
+    ]));
+    expect(prisma.equipmentRentalBill.findUnique).toHaveBeenCalledWith(expect.objectContaining({
+      where: { contractId_billMonth: { contractId: 31, billMonth: '2026-09' } },
+    }));
+    expect(prisma.equipmentRentalBill.findUnique).toHaveBeenCalledWith(expect.objectContaining({
+      where: { contractId_billMonth: { contractId: 32, billMonth: '2026-09' } },
+    }));
+  });
+
   it('reports the correct recalculated amount for a paid bill and offers only the overpaid difference', async () => {
     const prisma = {
       equipmentRentalContract: {
@@ -417,7 +449,7 @@ describe('EquipmentRentalFeeService', () => {
     const db = {
       equipmentRentalBill: {
         aggregate,
-        findUnique: jest.fn().mockResolvedValue({ id: 81 }),
+        findMany: jest.fn().mockResolvedValue([{ id: 81, contractId: 31 }]),
       },
       equipmentRentalContract: {
         findMany: jest.fn().mockResolvedValue([]),
@@ -449,11 +481,12 @@ describe('EquipmentRentalFeeService', () => {
     const db = {
       equipmentRentalBill: {
         aggregate: jest.fn().mockResolvedValue({ _sum: { remainingAmount: 0 } }),
-        findUnique: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
       },
       equipmentRentalContract: {
         findMany: jest.fn().mockResolvedValue([
           {
+            id: 31,
             monthlyAmount: 120,
             startDate: new Date('2026-07-01T00:00:00.000Z'),
             endDate: null,

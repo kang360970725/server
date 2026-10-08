@@ -1989,8 +1989,8 @@ model EquipmentRentalBill {
   user            User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
   walletTx        WalletTransaction?        @relation("EquipmentRentalWalletTx", fields: [walletTxId], references: [id])
 
-  @@unique([userId, billMonth], map: "uniq_equipment_rental_user_month")
-  @@index([contractId, billMonth], map: "idx_equipment_rental_bill_contract_month")
+  @@unique([contractId, billMonth], map: "uniq_equipment_rental_contract_month")
+  @@index([userId, billMonth], map: "idx_equipment_rental_bill_user_month")
   @@index([status, billMonth], map: "idx_equipment_rental_bill_status_month")
   @@index([userId, status], map: "idx_equipment_rental_bill_user_status")
   @@map("equipment_rental_bills")

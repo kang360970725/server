@@ -286,7 +286,7 @@ export class EquipmentRentalFeeService {
       const { periodStart, periodEnd, dueAt } = this.getBillingSchedule(contract, month);
       const amount = this.toAmount(contract.monthlyAmount);
       const existing = await (this.prisma as any).equipmentRentalBill.findUnique({
-        where: { userId_billMonth: { userId: contract.userId, billMonth: month } },
+        where: { contractId_billMonth: { contractId: contract.id, billMonth: month } },
         include: {
           user: { select: { id: true, name: true, phone: true } },
           walletTx: {
@@ -794,7 +794,7 @@ export class EquipmentRentalFeeService {
     // 账单才需要在提现时预留，避免未来月份的账单提前限制正常提现。
     const withdrawalGuardAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     const nextMonth = this.getNextMonth();
-    const [billAgg, nextMonthBill, contracts] = await Promise.all([
+    const [billAgg, nextMonthBills, contracts] = await Promise.all([
       (db as any).equipmentRentalBill.aggregate({
         where: {
           userId,
@@ -807,13 +807,14 @@ export class EquipmentRentalFeeService {
         },
         _sum: { remainingAmount: true },
       }),
-      (db as any).equipmentRentalBill.findUnique({
-        where: { userId_billMonth: { userId, billMonth: nextMonth } },
-        select: { id: true },
+      (db as any).equipmentRentalBill.findMany({
+        where: { userId, billMonth: nextMonth },
+        select: { id: true, contractId: true },
       }),
       (db as any).equipmentRentalContract.findMany({
         where: { userId, status: 'ACTIVE' },
         select: {
+          id: true,
           monthlyAmount: true,
           startMonth: true,
           endMonth: true,
@@ -824,18 +825,12 @@ export class EquipmentRentalFeeService {
       }),
     ]);
     const outstanding = this.toAmount(billAgg?._sum?.remainingAmount || 0);
-    const upcomingDueAt = contracts.length
-      ? Math.min(
-          ...contracts
-            .filter((contract: any) => this.isContractEffectiveForMonth(contract, nextMonth))
-            .map((contract: any) => this.getBillingSchedule(contract, nextMonth).dueAt.getTime()),
-        )
-      : Number.POSITIVE_INFINITY;
-    const upcoming = nextMonthBill || upcomingDueAt > withdrawalGuardAt.getTime()
-      ? 0
-      : contracts
-        .filter((contract: any) => this.isContractEffectiveForMonth(contract, nextMonth))
-        .reduce((sum: number, contract: any) => sum + this.toAmount(contract.monthlyAmount), 0);
+    const generatedContractIds = new Set((nextMonthBills || []).map((bill: any) => Number(bill.contractId)));
+    const upcoming = contracts
+      .filter((contract: any) => this.isContractEffectiveForMonth(contract, nextMonth))
+      .filter((contract: any) => !generatedContractIds.has(Number(contract.id)))
+      .filter((contract: any) => this.getBillingSchedule(contract, nextMonth).dueAt.getTime() <= withdrawalGuardAt.getTime())
+      .reduce((sum: number, contract: any) => sum + this.toAmount(contract.monthlyAmount), 0);
     return {
       outstanding,
       upcoming: round2(upcoming),
