@@ -8004,7 +8004,7 @@ export class OrdersService {
             },
         };
 
-        const [todayArchiveCount, todayCompleteCount, monthArchiveCount, monthCompleteCount] =
+        const [todayArchiveCount, todayCompleteCount, monthRankingRecords] =
             await Promise.all([
                 this.prisma.orderDispatch.count({
                     where: {...dispatchParticipantWhere, archivedAt: {gte: startToday, lte: endToday}},
@@ -8012,16 +8012,56 @@ export class OrdersService {
                 this.prisma.orderDispatch.count({
                     where: {...dispatchParticipantWhere, completedAt: {gte: startToday, lte: endToday}},
                 }),
-                this.prisma.orderDispatch.count({
-                    where: {...dispatchParticipantWhere, archivedAt: {gte: startMonth, lte: endMonth}},
-                }),
-                this.prisma.orderDispatch.count({
-                    where: {...dispatchParticipantWhere, completedAt: {gte: startMonth, lte: endMonth}},
+                this.prisma.performanceRecord.findMany({
+                    where: {
+                        statsDate: {gte: startMonth, lte: endMonth},
+                        status: 'EFFECTIVE',
+                        ownerRoleType: 'PLAYER',
+                        isCompleted: true,
+                    },
+                    select: {
+                        ownerUserId: true,
+                        orderId: true,
+                        grossPerformanceAmount: true,
+                    },
                 }),
             ]);
 
         const todayCount = Number(todayArchiveCount) + Number(todayCompleteCount);
-        const monthCount = Number(monthArchiveCount) + Number(monthCompleteCount);
+        // 本月接单及排名与“接单榜”保持同一口径：已结算业绩记录中的订单去重数。
+        const monthPlayerMap = new Map<number, {userId: number; orderIds: Set<number>; grossPerformanceAmount: number}>();
+        for (const record of monthRankingRecords) {
+            const ownerUserId = Number(record.ownerUserId);
+            if (!ownerUserId) continue;
+            const item = monthPlayerMap.get(ownerUserId) || {
+                userId: ownerUserId,
+                orderIds: new Set<number>(),
+                grossPerformanceAmount: 0,
+            };
+            item.orderIds.add(Number(record.orderId));
+            item.grossPerformanceAmount += Number(record.grossPerformanceAmount || 0);
+            monthPlayerMap.set(ownerUserId, item);
+        }
+        if (!monthPlayerMap.has(userId)) {
+            monthPlayerMap.set(userId, {userId, orderIds: new Set<number>(), grossPerformanceAmount: 0});
+        }
+        const monthOrderRanking = [...monthPlayerMap.values()]
+            .map(item => ({
+                userId: item.userId,
+                completedOrders: item.orderIds.size,
+                grossPerformanceAmount: item.grossPerformanceAmount,
+            }))
+            .sort((a, b) =>
+                b.completedOrders - a.completedOrders
+                || b.grossPerformanceAmount - a.grossPerformanceAmount
+                || a.userId - b.userId,
+            );
+        const monthRankIndex = monthOrderRanking.findIndex(item => item.userId === userId);
+        const monthRank = monthRankIndex + 1;
+        const monthCount = monthOrderRanking[monthRankIndex]?.completedOrders || 0;
+        const previousCount = monthRankIndex > 0 ? monthOrderRanking[monthRankIndex - 1].completedOrders : monthCount;
+        const gapToPreviousOrders = monthRankIndex > 0 ? Math.max(0, previousCount - monthCount) : 0;
+        const ordersToOvertake = monthRankIndex > 0 ? gapToPreviousOrders + 1 : 0;
 
         // ✅ 2) 收入净额：IN - OUT（包含冻结），排除 REVERSED
         // 说明：
@@ -8082,7 +8122,16 @@ export class OrdersService {
         const todayIncome = todayTotal - todayOut;
         const monthIncome = monthTotal - monthOut;
 
-        return {todayCount, todayIncome, monthCount, monthIncome};
+        return {
+            todayCount,
+            todayIncome,
+            monthCount,
+            monthIncome,
+            monthRank,
+            monthRankParticipantCount: monthOrderRanking.length,
+            gapToPreviousOrders,
+            ordersToOvertake,
+        };
     }
 
     /** ====== 公共方法区（后续应提到utils）========== */

@@ -75,6 +75,20 @@ export class EquipmentRentalFeeController {
       Number(body?.billId),
       Number.isFinite(operatorId) ? operatorId : undefined,
       body?.remark,
+      body?.amount,
+    );
+  }
+
+  @Post('bills/refund')
+  @UseGuards(PermissionsGuard)
+  @Permissions(FINANCE_EQUIPMENT_RENTAL_FEES_PAGE, FINANCE_RECORDS_PAGE)
+  refundBill(@Body() body: any, @Req() req: any) {
+    const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return this.service.refundBill(
+      Number(body?.billId),
+      body?.amount,
+      body?.remark,
+      Number.isFinite(operatorId) ? operatorId : undefined,
     );
   }
 

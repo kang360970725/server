@@ -199,7 +199,7 @@ export class UsersController {
 
   @Post(':id/withdraw-qr-code/reset')
   @UseGuards(PermissionsGuard)
-  @Permissions('users:staff:withdraw-qr-reset:button')
+  @Permissions('users:staff:withdraw-qr-reset:button', 'users:staff:page')
   resetWithdrawQrCode(
       @Param('id', ParseIntPipe) id: number,
       @Body() body: { remark?: string },

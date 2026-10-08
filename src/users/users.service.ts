@@ -2202,7 +2202,7 @@ export class UsersService {
   async resetWithdrawQrCode(
     id: number,
     operatorId?: number,
-    actor?: { userType?: UserType; permissions?: string[] },
+    actor?: { userType?: UserType; roleName?: string; permissions?: string[] },
     remark?: string,
   ) {
     const user = await this.prisma.user.findUnique({
@@ -2214,7 +2214,10 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     this.assertActorCanAccessUser(actor, user.userType);
-    this.assertUserButtonPermission(actor, user.userType, 'withdraw-qr-reset', '当前角色无权重置收款码');
+    const roleName = String(actor?.roleName || '').trim().toUpperCase();
+    if (roleName !== 'STORE_MANAGER') {
+      this.assertUserButtonPermission(actor, user.userType, 'withdraw-qr-reset', '当前角色无权重置收款码');
+    }
 
     if (!user.withdrawQrCodeKey) {
       throw new BadRequestException('该用户当前没有已上传的收款码');

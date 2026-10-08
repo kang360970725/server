@@ -106,6 +106,50 @@ describe('EquipmentRentalFeeService', () => {
     expect(createdBills[0].dueAt.toISOString()).toBe('2026-09-15T00:00:00.000Z');
   });
 
+  it('reports the correct recalculated amount for a paid bill and offers only the overpaid difference', async () => {
+    const prisma = {
+      equipmentRentalContract: {
+        findMany: jest.fn().mockResolvedValue([{
+          id: 31,
+          userId: 7,
+          status: 'ACTIVE',
+          monthlyAmount: 80,
+          startDate: new Date(Date.UTC(2026, 7, 15)),
+          endDate: null,
+        }]),
+      },
+      equipmentRentalBill: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 41,
+          userId: 7,
+          billMonth: '2026-09',
+          status: 'PAID',
+          amount: 100,
+          paidAmount: 100,
+          walletTxId: 91,
+          user: { id: 7, name: '测试服务者' },
+          walletTx: { id: 91, amount: 100, sourceType: 'EQUIPMENT_RENTAL_BILL_SELF_CONFIRM', reversals: [] },
+        }),
+        update: jest.fn(),
+      },
+      userLog: { findFirst: jest.fn().mockResolvedValue(null) },
+    } as any;
+    const service = new EquipmentRentalFeeService(prisma);
+
+    await expect(service.generateBillsForMonth('2026-09', 1)).resolves.toMatchObject({
+      affected: 0,
+      correct: 0,
+      reconciliations: [{
+        billId: 41,
+        currentAmount: 100,
+        correctAmount: 80,
+        difference: 20,
+        canRefund: true,
+      }],
+    });
+    expect(prisma.equipmentRentalBill.update).not.toHaveBeenCalled();
+  });
+
   it('allows rental confirmation to make available balance negative when total assets stay non-negative', async () => {
     const tx: any = {
       equipmentRentalBill: {
@@ -236,6 +280,135 @@ describe('EquipmentRentalFeeService', () => {
     );
     expect(tx.walletAccount.update).not.toHaveBeenCalled();
     expect(tx.walletTransaction.create).not.toHaveBeenCalled();
+  });
+
+  it('allows an unpaid external-channel bill to be confirmed with an adjusted amount and required reason', async () => {
+    const tx: any = {
+      userLog: { create: jest.fn() },
+      equipmentRentalBill: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 14,
+          userId: 7,
+          billMonth: '2026-07',
+          remainingAmount: 120,
+          amount: 120,
+          status: 'PENDING',
+        }),
+        update: jest.fn().mockResolvedValue({ id: 14, amount: 88, paidAmount: 88, status: 'PAID' }),
+      },
+    };
+    const prisma = { $transaction: jest.fn((callback) => callback(tx)) } as any;
+    const service = new EquipmentRentalFeeService(prisma);
+
+    await service.confirmPaidByOtherChannel(14, 1, '线下实收调整', 88);
+
+    expect(tx.equipmentRentalBill.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 14 },
+      data: expect.objectContaining({ amount: 88, paidAmount: 88, remainingAmount: 0, status: 'PAID' }),
+    }));
+    await expect(service.confirmPaidByOtherChannel(14, 1, '  ', 88)).rejects.toThrow('请填写其他渠道缴费说明');
+  });
+
+  it('refunds a wallet-paid equipment bill partially and links the refund to the original transaction', async () => {
+    const tx: any = {
+      $queryRawUnsafe: jest.fn().mockResolvedValue([{ id: 15 }]),
+      userLog: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({ id: 501 }),
+        update: jest.fn().mockResolvedValue({ id: 501 }),
+      },
+      equipmentRentalBill: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 15,
+          userId: 7,
+          amount: 120,
+          paidAmount: 120,
+          remainingAmount: 0,
+          status: 'PAID',
+          walletTxId: 91,
+          walletTx: {
+            id: 91,
+            direction: 'OUT',
+            bizType: 'EQUIPMENT_RENTAL_FEE',
+            status: 'AVAILABLE',
+            amount: 120,
+            sourceType: 'EQUIPMENT_RENTAL_BILL_SELF_CONFIRM',
+            reversals: [{ amount: 20, status: 'AVAILABLE' }],
+          },
+        }),
+        update: jest.fn().mockResolvedValue({ id: 15, amount: 90, paidAmount: 90, status: 'PAID' }),
+      },
+      walletAccount: {
+        update: jest.fn().mockResolvedValue({ availableBalance: 130, frozenBalance: 40 }),
+      },
+      walletTransaction: {
+        create: jest.fn().mockResolvedValue({ id: 92 }),
+      },
+    };
+    const prisma = { $transaction: jest.fn((callback) => callback(tx)) } as any;
+    const service = new EquipmentRentalFeeService(prisma);
+
+    await expect(service.refundBill(15, 30, '重算后退还差额', 1)).resolves.toMatchObject({
+      id: 15,
+      amount: 90,
+      paidAmount: 90,
+      refundedAmount: 50,
+      refundableAmount: 70,
+    });
+    expect(tx.walletAccount.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { userId: 7 },
+      data: { availableBalance: { increment: 30 } },
+    }));
+    expect(tx.walletTransaction.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        direction: 'IN',
+        bizType: 'EQUIPMENT_RENTAL_FEE',
+        sourceType: 'EQUIPMENT_RENTAL_BILL_REFUND',
+        sourceId: 501,
+        reversalOfTxId: 91,
+        amount: 30,
+      }),
+    }));
+  });
+
+  it('rejects refund when the bill has no wallet payment flow', async () => {
+    const tx: any = {
+      $queryRawUnsafe: jest.fn().mockResolvedValue([{ id: 16 }]),
+      userLog: { findFirst: jest.fn().mockResolvedValue(null) },
+      equipmentRentalBill: {
+        findUnique: jest.fn().mockResolvedValue({ id: 16, walletTxId: null, walletTx: null }),
+      },
+    };
+    const prisma = { $transaction: jest.fn((callback) => callback(tx)) } as any;
+    const service = new EquipmentRentalFeeService(prisma);
+
+    await expect(service.refundBill(16, 10, '测试退费', 1)).rejects.toThrow('没有钱包支付流水');
+  });
+
+  it('rejects refund for an admin-paid equipment bill even when it has a wallet flow', async () => {
+    const tx: any = {
+      $queryRawUnsafe: jest.fn().mockResolvedValue([{ id: 17 }]),
+      userLog: { findFirst: jest.fn().mockResolvedValue({ id: 601 }) },
+      equipmentRentalBill: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 17,
+          walletTxId: 93,
+          walletTx: {
+            id: 93,
+            direction: 'OUT',
+            bizType: 'EQUIPMENT_RENTAL_FEE',
+            status: 'AVAILABLE',
+            amount: 100,
+            sourceType: 'EQUIPMENT_RENTAL_BILL_ADMIN_PAY',
+            reversals: [],
+          },
+        }),
+      },
+    };
+    const prisma = { $transaction: jest.fn((callback) => callback(tx)) } as any;
+    const service = new EquipmentRentalFeeService(prisma);
+
+    await expect(service.refundBill(17, 10, '测试退费', 1)).rejects.toThrow('仅服务者自行确认扣缴');
   });
 
   it('only reserves pending rental bills within 24 hours before their due time', async () => {

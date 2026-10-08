@@ -279,16 +279,70 @@ export class EquipmentRentalFeeService {
     });
 
     let affected = 0;
+    let correct = 0;
+    const reconciliations: any[] = [];
     for (const contract of contracts) {
       if (!this.isContractEffectiveForMonth(contract, month)) continue;
       const { periodStart, periodEnd, dueAt } = this.getBillingSchedule(contract, month);
       const amount = this.toAmount(contract.monthlyAmount);
       const existing = await (this.prisma as any).equipmentRentalBill.findUnique({
         where: { userId_billMonth: { userId: contract.userId, billMonth: month } },
-        select: { id: true, status: true },
+        include: {
+          user: { select: { id: true, name: true, phone: true } },
+          walletTx: {
+            select: {
+              id: true,
+              amount: true,
+              sourceType: true,
+              reversals: { select: { amount: true, direction: true, status: true } },
+            },
+          },
+        },
       });
-      if (existing && existing.status !== 'PENDING') continue;
+      if (existing && existing.status !== 'PENDING') {
+        const currentAmount = this.toAmount(existing.amount);
+        const difference = round2(currentAmount - amount);
+        const refundedAmount = round2(
+          (existing.walletTx?.reversals || [])
+            .filter((item: any) => item.direction === 'IN' && item.status !== 'REVERSED')
+            .reduce((sum: number, item: any) => sum + Number(item.amount || 0), 0),
+        );
+        if (Math.abs(difference) < 0.005) {
+          correct += 1;
+        } else {
+          const adminPayLog = existing.walletTxId
+            ? await (this.prisma as any).userLog.findFirst({
+                where: {
+                  targetType: 'EQUIPMENT_RENTAL_BILL',
+                  targetId: existing.id,
+                  action: 'EQUIPMENT_RENTAL_BILL_ADMIN_PAY',
+                },
+                select: { id: true },
+              })
+            : null;
+          const isSelfConfirmedPayment = Boolean(existing.walletTxId)
+            && existing.walletTx?.sourceType !== 'EQUIPMENT_RENTAL_BILL_ADMIN_PAY'
+            && !adminPayLog;
+          reconciliations.push({
+            billId: existing.id,
+            billMonth: month,
+            userId: contract.userId,
+            user: existing.user,
+            currentAmount,
+            correctAmount: amount,
+            difference,
+            refundedAmount,
+            refundableAmount: round2(Math.max(0, Number(existing.paidAmount || 0))),
+            canRefund: difference > 0 && isSelfConfirmedPayment && Number(existing.paidAmount || 0) > 0,
+            reason: difference > 0
+              ? (isSelfConfirmedPayment ? '重算金额低于已扣金额，可确认退还差额' : '仅服务者自行确认扣缴且存在钱包流水的账单可退费')
+              : '重算金额高于当前账单，请人工核对后处理',
+          });
+        }
+        continue;
+      }
       if (existing) {
+        const paidAmount = this.toAmount(existing.paidAmount);
         const updated = await (this.prisma as any).equipmentRentalBill.update({
           where: { id: existing.id },
           data: {
@@ -296,7 +350,7 @@ export class EquipmentRentalFeeService {
             periodStart,
             periodEnd,
             amount,
-            remainingAmount: amount,
+            remainingAmount: round2(Math.max(0, amount - paidAmount)),
             dueAt,
             generatedAt: new Date(),
           },
@@ -335,7 +389,7 @@ export class EquipmentRentalFeeService {
       }
       affected += 1;
     }
-    return { month, affected };
+    return { month, affected, correct, reconciliations };
   }
 
   @Cron('0 10 1 * * *', { timeZone: 'Asia/Shanghai' })
@@ -352,13 +406,26 @@ export class EquipmentRentalFeeService {
     if (query?.userId) where.userId = Number(query.userId);
     if (query?.onlyRisk) where.status = 'PENDING';
 
-    const { rows, total, stats } = await this.prisma.$transaction(async (tx) => {
+    const { rows, total, stats, logs } = await this.prisma.$transaction(async (tx) => {
       const scopedRows = await (tx as any).equipmentRentalBill.findMany({
         where,
         skip: (page - 1) * limit,
         take: limit,
         orderBy: [{ billMonth: 'desc' }, { id: 'desc' }],
         include: {
+          walletTx: {
+            select: {
+              id: true,
+              amount: true,
+              direction: true,
+              bizType: true,
+              sourceType: true,
+              reversals: {
+                where: { direction: 'IN' },
+                select: { id: true, amount: true, status: true, createdAt: true, remark: true },
+              },
+            },
+          },
           user: {
             select: {
               id: true,
@@ -372,7 +439,28 @@ export class EquipmentRentalFeeService {
       });
       const scopedTotal = await (tx as any).equipmentRentalBill.count({ where });
       const scopedStats = await this.getBillStatsTx(tx as any, where);
-      return { rows: scopedRows, total: scopedTotal, stats: scopedStats };
+      const billIds = scopedRows.map((row: any) => Number(row.id));
+      const logs = billIds.length
+        ? await (tx as any).userLog.findMany({
+            where: {
+              targetType: 'EQUIPMENT_RENTAL_BILL',
+              targetId: { in: billIds },
+            },
+            orderBy: { createdAt: 'desc' },
+            select: {
+              id: true,
+              userId: true,
+              action: true,
+              targetId: true,
+              remark: true,
+              oldData: true,
+              newData: true,
+              createdAt: true,
+              user: { select: { id: true, name: true, phone: true } },
+            },
+          })
+        : [];
+      return { rows: scopedRows, total: scopedTotal, stats: scopedStats, logs };
     });
 
     const list = rows.map((row: any) => {
@@ -380,8 +468,22 @@ export class EquipmentRentalFeeService {
       const frozen = Number(row?.user?.walletAccount?.frozenBalance || 0);
       const totalAssets = round2(available + frozen);
       const remaining = Number(row?.remainingAmount || 0);
+      const refundedAmount = round2(
+        (row?.walletTx?.reversals || [])
+          .filter((item: any) => item.status !== 'REVERSED')
+          .reduce((sum: number, item: any) => sum + Number(item.amount || 0), 0),
+      );
+      const rowLogs = logs.filter((item: any) => Number(item.targetId) === Number(row.id));
+      const hasAdminPayLog = rowLogs.some((item: any) => item.action === 'EQUIPMENT_RENTAL_BILL_ADMIN_PAY');
+      const isSelfConfirmedPayment = Boolean(row.walletTxId)
+        && row.walletTx?.sourceType !== 'EQUIPMENT_RENTAL_BILL_ADMIN_PAY'
+        && !hasAdminPayLog;
       return {
         ...row,
+        refundedAmount,
+        refundableAmount: isSelfConfirmedPayment ? round2(Math.max(0, Number(row.paidAmount || 0))) : 0,
+        canRefund: isSelfConfirmedPayment && Number(row.paidAmount || 0) > 0,
+        adjustmentLogs: rowLogs,
         totalAssets,
         insufficient: row.status === 'PENDING' && totalAssets < remaining,
       };
@@ -440,7 +542,7 @@ export class EquipmentRentalFeeService {
         bizType: 'EQUIPMENT_RENTAL_FEE',
         amount,
         status: 'AVAILABLE',
-        sourceType: 'EQUIPMENT_RENTAL_BILL',
+        sourceType: operatorId ? 'EQUIPMENT_RENTAL_BILL_ADMIN_PAY' : 'EQUIPMENT_RENTAL_BILL_SELF_CONFIRM',
         sourceId: bill.id,
         availableAfter: round2(Number(after.availableBalance || 0)),
         frozenAfter: round2(Number(after.frozenBalance || 0)),
@@ -490,7 +592,7 @@ export class EquipmentRentalFeeService {
     });
   }
 
-  async confirmPaidByOtherChannel(billId: number, operatorId?: number, remark?: string) {
+  async confirmPaidByOtherChannel(billId: number, operatorId?: number, remark?: string, amountInput?: any) {
     const id = Number(billId);
     if (!id) throw new BadRequestException('billId 必填');
     const normalizedRemark = String(remark || '').trim();
@@ -503,10 +605,14 @@ export class EquipmentRentalFeeService {
       if (!bill) throw new NotFoundException('设备租赁账单不存在');
       if (bill.status !== 'PENDING') throw new BadRequestException('该账单无需重复确认');
 
-      const amount = this.toAmount(bill.remainingAmount);
+      const amount = amountInput === undefined || amountInput === null || amountInput === ''
+        ? this.toAmount(bill.remainingAmount)
+        : this.toAmount(amountInput);
+      if (amount <= 0) throw new BadRequestException('人工确认缴费金额必须大于 0');
       const updated = await (tx as any).equipmentRentalBill.update({
         where: { id },
         data: {
+          amount,
           paidAmount: amount,
           remainingAmount: 0,
           status: 'PAID',
@@ -524,6 +630,135 @@ export class EquipmentRentalFeeService {
         remark: normalizedRemark,
       });
       return updated;
+    });
+  }
+
+  async refundBill(billId: number, amountInput: any, remark?: string, operatorId?: number) {
+    const id = Number(billId);
+    if (!id) throw new BadRequestException('billId 必填');
+    if (!operatorId) throw new BadRequestException('无法识别操作人');
+    const amount = this.toAmount(amountInput);
+    if (amount <= 0) throw new BadRequestException('退费金额必须大于 0');
+    const normalizedRemark = String(remark || '').trim();
+    if (!normalizedRemark) throw new BadRequestException('退费原因必填');
+
+    return this.prisma.$transaction(async (tx) => {
+      await (tx as any).$queryRawUnsafe(
+        'SELECT id FROM `equipment_rental_bills` WHERE id = ? FOR UPDATE',
+        id,
+      );
+      const bill = await (tx as any).equipmentRentalBill.findUnique({
+        where: { id },
+        include: {
+          walletTx: {
+            include: {
+              reversals: { where: { direction: 'IN' }, select: { amount: true, status: true } },
+            },
+          },
+        },
+      });
+      if (!bill) throw new NotFoundException('设备租赁账单不存在');
+      if (!bill.walletTxId || !bill.walletTx) {
+        throw new BadRequestException('该账单没有钱包支付流水，不能办理退费');
+      }
+      const adminPayLog = await (tx as any).userLog.findFirst({
+        where: {
+          targetType: 'EQUIPMENT_RENTAL_BILL',
+          targetId: id,
+          action: 'EQUIPMENT_RENTAL_BILL_ADMIN_PAY',
+        },
+        select: { id: true },
+      });
+      if (bill.walletTx.sourceType === 'EQUIPMENT_RENTAL_BILL_ADMIN_PAY' || adminPayLog) {
+        throw new BadRequestException('仅服务者自行确认扣缴的设备费可以退费');
+      }
+      if (
+        bill.walletTx.direction !== 'OUT'
+        || bill.walletTx.bizType !== 'EQUIPMENT_RENTAL_FEE'
+        || bill.walletTx.status === 'REVERSED'
+      ) {
+        throw new BadRequestException('原支付流水状态异常，不能办理退费');
+      }
+      const refunded = round2(
+        (bill.walletTx.reversals || [])
+          .filter((item: any) => item.status !== 'REVERSED')
+          .reduce((sum: number, item: any) => sum + Number(item.amount || 0), 0),
+      );
+      const refundable = round2(Math.min(
+        Math.max(0, Number(bill.walletTx.amount || 0) - refunded),
+        Math.max(0, Number(bill.paidAmount || 0)),
+      ));
+      if (amount > refundable) {
+        throw new BadRequestException(`退费金额不能超过可退金额 ¥${refundable.toFixed(2)}`);
+      }
+
+      const oldData = {
+        id: bill.id,
+        amount: bill.amount,
+        paidAmount: bill.paidAmount,
+        remainingAmount: bill.remainingAmount,
+        status: bill.status,
+        walletTxId: bill.walletTxId,
+        refundedAmount: refunded,
+      };
+      const audit = await (tx as any).userLog.create({
+        data: {
+          userId: operatorId,
+          action: 'EQUIPMENT_RENTAL_BILL_REFUND',
+          targetType: 'EQUIPMENT_RENTAL_BILL',
+          targetId: id,
+          oldData,
+          remark: normalizedRemark,
+        },
+      });
+      const account = await (tx as any).walletAccount.update({
+        where: { userId: bill.userId },
+        data: { availableBalance: { increment: amount } },
+        select: { availableBalance: true, frozenBalance: true },
+      });
+      const refundTx = await (tx as any).walletTransaction.create({
+        data: {
+          userId: bill.userId,
+          direction: 'IN',
+          bizType: 'EQUIPMENT_RENTAL_FEE',
+          amount,
+          status: 'AVAILABLE',
+          sourceType: 'EQUIPMENT_RENTAL_BILL_REFUND',
+          sourceId: audit.id,
+          reversalOfTxId: bill.walletTxId,
+          availableAfter: round2(Number(account.availableBalance || 0)),
+          frozenAfter: round2(Number(account.frozenBalance || 0)),
+          remark: `设备租赁费退费：${normalizedRemark}`,
+        },
+      });
+      const nextPaidAmount = round2(Math.max(0, Number(bill.paidAmount || 0) - amount));
+      const nextAmount = round2(Math.max(0, Number(bill.amount || 0) - amount));
+      const updated = await (tx as any).equipmentRentalBill.update({
+        where: { id },
+        data: {
+          amount: nextAmount,
+          paidAmount: nextPaidAmount,
+          remainingAmount: 0,
+          status: 'PAID',
+          remark: `已退费 ¥${amount.toFixed(2)}，操作人：${operatorId}；${normalizedRemark}`,
+        },
+      });
+      await (tx as any).userLog.update({
+        where: { id: audit.id },
+        data: {
+          newData: {
+            ...updated,
+            refundAmount: amount,
+            refundWalletTxId: refundTx.id,
+            totalRefundedAmount: round2(refunded + amount),
+          },
+        },
+      });
+      return {
+        ...updated,
+        refundedAmount: round2(refunded + amount),
+        refundableAmount: round2(Math.max(0, refundable - amount)),
+      };
     });
   }
 
