@@ -99,6 +99,20 @@ export class MiniProjectsController {
     return map;
   }
 
+  private async getProjectSalesStats(projectIds: number[]) {
+    const ids = Array.from(new Set((projectIds || []).map(Number).filter((id) => Number.isFinite(id) && id > 0)));
+    const map = new Map<number, number>();
+    if (!ids.length) return map;
+    const rows = await this.prisma.order.groupBy({
+      by: ['projectId'],
+      where: { projectId: { in: ids }, status: { in: ['COMPLETED', 'ARCHIVED'] } },
+      _count: { _all: true },
+    });
+    rows.forEach((row) => map.set(Number(row.projectId), Number(row._count._all || 0)));
+    ids.forEach((id) => { if (!map.has(id)) map.set(id, 0); });
+    return map;
+  }
+
   private async getActiveDiscountProductMap() {
     const row = await this.prisma.systemConfig.findUnique({
       where: { key: 'miniapp_home_config_published' },
@@ -269,10 +283,14 @@ export class MiniProjectsController {
       };
     });
 
-    const ratingMap = await this.getProjectRatingStats(mappedList.map((x: any) => Number(x?.id || 0)));
+    const projectIds = mappedList.map((x: any) => Number(x?.id || 0));
+    const [ratingMap, salesMap] = await Promise.all([
+      this.getProjectRatingStats(projectIds),
+      this.getProjectSalesStats(projectIds),
+    ]);
     const finalList = mappedList.map((item: any) => {
       const st = ratingMap.get(Number(item?.id || 0)) || { ratingAvg: 0, ratingCount: 0 };
-      return { ...item, ratingAvg: st.ratingAvg };
+      return { ...item, ratingAvg: st.ratingAvg, ratingCount: st.ratingCount, salesCount: salesMap.get(Number(item?.id || 0)) || 0 };
     });
 
     return miniOk({ list: finalList, total, page, limit, totalPages: Math.ceil(total / limit) });
@@ -296,7 +314,11 @@ export class MiniProjectsController {
     }
     const discountMap = await this.getActiveDiscountProductMap();
     const discount = discountMap.get(id);
-    const st = (await this.getProjectRatingStats([id])).get(id) || { ratingAvg: 0, ratingCount: 0 };
+    const [ratingStats, salesStats] = await Promise.all([
+      this.getProjectRatingStats([id]),
+      this.getProjectSalesStats([id]),
+    ]);
+    const st = ratingStats.get(id) || { ratingAvg: 0, ratingCount: 0 };
     const categoryTree = await this.systemConfigService.getGoodsCategoryTree();
     const categoryNameMap = this.buildCategoryNameMap(categoryTree);
     const gameTypeId = String(row?.gameType || '').trim();
@@ -308,6 +330,8 @@ export class MiniProjectsController {
       categoryId: categoryId || null,
       categoryName: categoryId ? categoryNameMap.get(categoryId) || null : null,
       ratingAvg: st.ratingAvg,
+      ratingCount: st.ratingCount,
+      salesCount: salesStats.get(id) || 0,
       discountOriginPrice: discount?.discountOriginPrice ?? null,
       discountTag: discount?.badge || null,
     });
@@ -320,7 +344,7 @@ export class MiniProjectsController {
     const page = Math.max(1, Number(query?.page ?? 1));
     const limit = Math.min(50, Math.max(1, Number(query?.limit ?? 20)));
     const skip = (page - 1) * limit;
-    const [list, total] = await Promise.all([
+    const [list, total, scoreGroups, tagRows] = await Promise.all([
       this.prisma.productReview.findMany({
         where: { projectId: id, isHidden: false },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -337,6 +361,8 @@ export class MiniProjectsController {
         },
       }),
       this.prisma.productReview.count({ where: { projectId: id, isHidden: false } }),
+      this.prisma.productReview.groupBy({by:['score'],where:{projectId:id,isHidden:false},_count:{_all:true}}),
+      this.prisma.productReview.findMany({where:{projectId:id,isHidden:false},select:{tags:true}}),
     ]);
     const data = list.map((r) => ({
       id: r.id,
@@ -346,6 +372,11 @@ export class MiniProjectsController {
       createdAt: r.createdAt,
       userName: r.anonymous ? '匿名用户' : (r.user?.name || `用户${r.user?.id || ''}`),
     }));
-    return miniOk({ list: data, total, page, limit, totalPages: Math.ceil(total / limit) });
+    const distribution:Record<string,number>={1:0,2:0,3:0,4:0,5:0};
+    scoreGroups.forEach((row)=>{const score=String(Math.max(1,Math.min(5,Math.round(Number(row.score||0)))));distribution[score]=(distribution[score]||0)+Number(row._count._all||0);});
+    const tagCounts=new Map<string,number>();
+    tagRows.forEach((row)=>{const tags=Array.isArray(row.tags as any)?row.tags as any[]:[];tags.forEach((tag)=>{const text=String(tag||'').trim();if(text)tagCounts.set(text,(tagCounts.get(text)||0)+1);});});
+    const topTags=Array.from(tagCounts.entries()).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([name,count])=>({name,count}));
+    return miniOk({ list: data, total, page, limit, totalPages: Math.ceil(total / limit), distribution, topTags });
   }
 }

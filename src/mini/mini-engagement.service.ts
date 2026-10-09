@@ -184,9 +184,9 @@ export class MiniEngagementService {
     const data={displayName,avatarUrl:text(body?.avatarUrl,500),slogan:text(body?.slogan,30),bio:text(body?.bio,500),imageUrls:urls(body?.imageUrls,3),audioUrl:text(body?.audioUrl,500),videoUrl:text(body?.videoUrl,500),gameTags:Array.isArray(body?.gameTags)?body.gameTags:[],skillTags:Array.isArray(body?.skillTags)?body.skillTags:[],serviceYears:Math.max(0,Math.min(50,Number(body?.serviceYears||0))),assessmentAt:body?.assessmentAt?new Date(body.assessmentAt):null,antiCheatImages:urls(body?.antiCheatImages,1),resultImages:urls(body?.resultImages,3),status:submit?'PENDING':'DRAFT',submittedAt:submit?new Date():null,reviewRemark:null};
     return this.prisma.staffPublicCard.upsert({where:{userId},update:data,create:{userId,...data}});
   }
-  async approvedStaffCards(){return this.prisma.staffPublicCard.findMany({where:{status:'APPROVED'},orderBy:{reviewedAt:'desc'},take:50});}
+  async approvedStaffCards(){return this.prisma.staffPublicCard.findMany({where:{status:'APPROVED',publicVisible:true},orderBy:{reviewedAt:'desc'},take:50});}
   async approvedStaffCard(userId:number){
-    const card=await this.prisma.staffPublicCard.findFirst({where:{userId,status:'APPROVED'}});
+    const card=await this.prisma.staffPublicCard.findFirst({where:{userId,status:'APPROVED',publicVisible:true}});
     if(!card)throw new NotFoundException('服务者主页不存在或尚未通过审核');
     const aggregate=await this.prisma.orderPlayerEvaluation.aggregate({
       where:{playerUserId:userId},
@@ -195,7 +195,33 @@ export class MiniEngagementService {
     });
     return {...card,ratings:{overall:Number(aggregate._avg.score||0),technical:Number(aggregate._avg.technicalScore||0),service:Number(aggregate._avg.serviceScore||0),comprehensive:Number(aggregate._avg.comprehensiveScore||0),count:aggregate._count.id}};
   }
+  async storeBlacklist(){
+    const maskPhone=(value:any)=>{const text=String(value||'').trim();return text.length>=7?`${text.slice(0,3)}****${text.slice(-4)}`:'***';};
+    const maskName=(value:any)=>{const text=String(value||'').trim();if(!text)return '未填写';return text.length<=1?'*':`${text.slice(0,1)}${'*'.repeat(Math.min(2,text.length-1))}`;};
+    const maskIdCard=(value:any)=>{const text=String(value||'').trim();return text.length>=7?`${text.slice(0,3)}${'*'.repeat(Math.max(4,text.length-7))}${text.slice(-4)}`:'***';};
+    const rows=await this.prisma.user.findMany({
+      where:{userType:'STAFF',staffEmploymentStatus:'BLACKLISTED'},
+      orderBy:[{staffExitedAt:'desc'},{id:'desc'}],
+      select:{id:true,name:true,realName:true,phone:true,idCard:true,staffExitedAt:true,staffBlacklistReason:true},
+      take:200,
+    });
+    return rows.map((item)=>({
+      id:item.id,
+      nickname:String(item.name||item.realName||'未知昵称'),
+      phone:maskPhone(item.phone),
+      realName:maskName(item.realName),
+      idCard:maskIdCard(item.idCard),
+      exitedAt:item.staffExitedAt,
+      reason:String(item.staffBlacklistReason||'违反本店服务规范'),
+    }));
+  }
   async adminStaffCards(status?:string){return this.prisma.staffPublicCard.findMany({where:status?{status}:undefined,include:{user:{select:{id:true,name:true,phone:true,userType:true}}},orderBy:{updatedAt:'desc'}});}
+  async setStaffCardVisibility(id:number,publicVisible:boolean){
+    const card=await this.prisma.staffPublicCard.findUnique({where:{id},select:{id:true,status:true}});
+    if(!card)throw new NotFoundException('服务者名片不存在');
+    if(publicVisible&&card.status!=='APPROVED')throw new BadRequestException('仅审核通过的服务者名片可以公开展示');
+    return this.prisma.staffPublicCard.update({where:{id},data:{publicVisible}});
+  }
   async adminUpdateStaffCard(id:number,body:any){
     const text=(value:any,max:number)=>String(value||'').trim().slice(0,max)||null;
     const urls=(value:any,max:number)=>Array.isArray(value)?value.map((item:any)=>String(item||'').trim()).filter(Boolean).slice(0,max):[];
@@ -204,6 +230,7 @@ export class MiniEngagementService {
       displayName:String(body?.displayName||'').trim().slice(0,64),avatarUrl:text(body?.avatarUrl,500),slogan:text(body?.slogan,30),bio:text(body?.bio,500),
       imageUrls:urls(body?.imageUrls,3),audioUrl:text(body?.audioUrl,500),videoUrl:text(body?.videoUrl,500),gameTags:Array.isArray(body?.gameTags)?body.gameTags:[],skillTags:Array.isArray(body?.skillTags)?body.skillTags:[],
       assessmentAt:body?.assessmentAt?new Date(body.assessmentAt):null,antiCheatImages:urls(body?.antiCheatImages,1),resultImages:urls(body?.resultImages,3),
+      ...(typeof body?.publicVisible==='boolean'?{publicVisible:body.publicVisible}:{}),
       status:submit?'PENDING':'DRAFT',submittedAt:submit?new Date():null,reviewRemark:null,
     }});
   }

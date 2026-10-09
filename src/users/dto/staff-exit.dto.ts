@@ -1,4 +1,4 @@
-import { IsBoolean, IsEnum, IsOptional } from 'class-validator';
+import { IsBoolean, IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
 
 export enum StaffExitMode {
   RELEASE_TO_AVAILABLE = 'RELEASE_TO_AVAILABLE',
@@ -12,4 +12,9 @@ export class StaffExitDto {
   @IsOptional()
   @IsBoolean()
   addToBlacklist?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
+  remark?: string;
 }

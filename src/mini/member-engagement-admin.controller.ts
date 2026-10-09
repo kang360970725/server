@@ -13,5 +13,7 @@ export class MemberEngagementAdminController {
   @Permissions('users:staff:page')
   @Patch('staff-cards/:id') update(@Param('id',ParseIntPipe) id:number,@Body() body:any){return this.service.adminUpdateStaffCard(id,body);}
   @Permissions('users:staff:page')
+  @Patch('staff-cards/:id/visibility') visibility(@Param('id',ParseIntPipe) id:number,@Body() body:any){return this.service.setStaffCardVisibility(id,body?.publicVisible===true);}
+  @Permissions('users:staff:page')
   @Patch('staff-cards/:id/review') review(@Req() req:any,@Param('id',ParseIntPipe) id:number,@Body() body:any){return this.service.reviewStaffCard(id,body,Number(req?.user?.userId||0));}
 }

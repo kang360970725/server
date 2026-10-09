@@ -1344,7 +1344,7 @@ export class UsersService {
         id,
         {
           addToBlacklist: dto?.addToBlacklist,
-          remark: dto?.addToBlacklist ? '员工清退并加入黑名单' : '员工清退',
+          remark: String(dto?.remark || '').trim() || (dto?.addToBlacklist ? '员工清退并加入黑名单' : '员工清退'),
         },
         operatorId,
         actor as any,
@@ -1385,6 +1385,7 @@ export class UsersService {
 
     const mode = dto?.mode;
     const addToBlacklist = Boolean(dto?.addToBlacklist);
+    const exitRemark = String(dto?.remark || '').trim().slice(0, 255) || (addToBlacklist ? '退店并加入本店黑名单' : '员工退店');
     const [config, effectiveAcceptedOrderCount] = await Promise.all([
       this.staffRuleEngineService.getConfig(),
       this.countEffectiveAcceptedOrders(id),
@@ -1444,7 +1445,7 @@ export class UsersService {
             offlineFeeAmount: offlineFeeSettlement.totalAmount,
             equipmentRentalFeeAmount: equipmentFeeSettlement.totalAmount,
           },
-          remark: addToBlacklist ? '员工退店并加入黑名单' : '员工退店',
+          remark: exitRemark,
         },
       });
 
@@ -1455,6 +1456,7 @@ export class UsersService {
           ...(addToBlacklist ? { status: UserStatus.DISABLED } : {}),
           staffCooldownUntil: addToBlacklist ? null : this.buildStaffCooldownUntil(now, Number(preview.quitCoolingDays || this.staffExitCooldownDays)),
           staffExitedAt: now,
+          staffBlacklistReason: addToBlacklist ? exitRemark : null,
           staffExitLoginGraceUntil: null,
           workMode: 'ONLINE',
           offlineJoinedAt: null,
@@ -1643,6 +1645,7 @@ export class UsersService {
           ...(addToBlacklist ? { status: UserStatus.DISABLED } : {}),
           staffCooldownUntil: addToBlacklist ? null : this.buildStaffCooldownUntil(now),
           staffExitedAt: now,
+          staffBlacklistReason: addToBlacklist ? remark.slice(0, 255) : null,
           staffExitLoginGraceUntil: null,
           workMode: 'ONLINE',
           offlineJoinedAt: null,

@@ -113,6 +113,7 @@ model User {
   staffDormantFreezeBaseAt    DateTime?
   staffCooldownUntil          DateTime?
   staffExitedAt               DateTime?
+  staffBlacklistReason       String?                    @db.VarChar(255)
   staffExitLoginGraceUntil    DateTime?
   activityAssessmentEnabled   Boolean                    @default(true)
   activityAssessmentStartedAt DateTime                   @default(now())
@@ -853,6 +854,7 @@ model StaffPublicCard {
   resultImages Json?
   serviceYears Int       @default(0)
   status       String    @default("DRAFT") @db.VarChar(24)
+  publicVisible Boolean  @default(false)
   reviewRemark String?   @db.VarChar(255)
   submittedAt  DateTime?
   reviewedAt   DateTime?
@@ -861,7 +863,7 @@ model StaffPublicCard {
   updatedAt    DateTime  @updatedAt
   user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([status, submittedAt], map: "idx_staff_public_card_review")
+  @@index([status, publicVisible, submittedAt], map: "idx_staff_public_card_review")
   @@map("staff_public_cards")
 }
 

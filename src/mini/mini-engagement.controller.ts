@@ -17,4 +17,5 @@ export class MiniEngagementController {
   @Post('staff-card/me') saveStaffCard(@Req() req:any,@Body() body:any){return this.service.saveMyStaffCard(this.userId(req),body).then((x)=>miniOk(x,'名片已保存'));}
   @Get('staff-cards') staffCards(){return this.service.approvedStaffCards().then((x)=>miniOk(x));}
   @Get('staff-cards/:userId') staffCard(@Param('userId', ParseIntPipe) userId:number){return this.service.approvedStaffCard(userId).then((x)=>miniOk(x));}
+  @Get('store-blacklist') storeBlacklist(){return this.service.storeBlacklist().then((x)=>miniOk(x));}
 }
