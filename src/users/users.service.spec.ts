@@ -27,6 +27,14 @@ describe('UsersService.create staff rejoin', () => {
         normalizeUserTags: jest.fn((input: any) => (Array.isArray(input) ? input : [])),
         ...staffRuleEngineService,
       } as any,
+      {
+        prepareStaffExitSettlementTx: jest.fn().mockResolvedValue({ totalAmount: 0, bills: [], cutoffDate: new Date() }),
+        collectStaffExitSettlementTx: jest.fn().mockResolvedValue({ paidBillIds: [] }),
+      } as any,
+      {
+        prepareStaffExitSettlementTx: jest.fn().mockResolvedValue({ totalAmount: 0, bills: [], cutoffDate: new Date() }),
+        collectStaffExitSettlementTx: jest.fn().mockResolvedValue({ paidBillIds: [] }),
+      } as any,
     );
   };
 
@@ -246,6 +254,14 @@ describe('UsersService staff exit actions', () => {
         }),
         normalizeUserTags: jest.fn((input: any) => (Array.isArray(input) ? input : [])),
         ...staffRuleEngineService,
+      } as any,
+      {
+        prepareStaffExitSettlementTx: jest.fn().mockResolvedValue({ totalAmount: 0, bills: [], cutoffDate: new Date() }),
+        collectStaffExitSettlementTx: jest.fn().mockResolvedValue({ paidBillIds: [] }),
+      } as any,
+      {
+        prepareStaffExitSettlementTx: jest.fn().mockResolvedValue({ totalAmount: 0, bills: [], cutoffDate: new Date() }),
+        collectStaffExitSettlementTx: jest.fn().mockResolvedValue({ paidBillIds: [] }),
       } as any,
     );
   };

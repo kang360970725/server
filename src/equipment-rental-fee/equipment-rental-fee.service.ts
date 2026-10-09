@@ -35,6 +35,10 @@ export class EquipmentRentalFeeService {
     return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
   }
 
+  private toDateOnlyString(date: Date) {
+    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+  }
+
   private normalizeDate(value: any, fieldName: string) {
     if (value instanceof Date && !Number.isNaN(value.getTime())) {
       return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
@@ -69,13 +73,6 @@ export class EquipmentRentalFeeService {
     return new Date(Date.UTC(targetFirst.getUTCFullYear(), targetFirst.getUTCMonth(), day));
   }
 
-  private getDueDateForMonth(startDateInput: any, billMonth: string) {
-    const startDate = this.normalizeDate(startDateInput, '起租日');
-    const [year, mon] = this.normalizeMonth(billMonth).split('-').map(Number);
-    const day = Math.min(startDate.getUTCDate(), this.getLastDayOfMonth(year, mon - 1));
-    return new Date(Date.UTC(year, mon - 1, day));
-  }
-
   private getContractStartDate(contract: any) {
     if (contract?.startDate) return this.normalizeDate(contract.startDate, '起租日');
     return this.normalizeDate(`${this.normalizeMonth(contract?.startMonth)}-01`, '起租日');
@@ -90,12 +87,23 @@ export class EquipmentRentalFeeService {
     return null;
   }
 
-  private getBillingSchedule(contract: any, billMonth: string) {
+  private getBillingSchedule(contract: any, billMonth: string, cutoffDateInput?: Date) {
     const startDate = this.getContractStartDate(contract);
-    const dueAt = this.getDueDateForMonth(startDate, billMonth);
-    const periodStart = this.addMonthsClamped(dueAt, -1);
-    const periodEnd = new Date(dueAt.getTime() - 1);
-    return { startDate, dueAt, periodStart, periodEnd };
+    const endDate = this.getContractEndDate(contract);
+    const { start: monthStart, end: monthEnd } = this.getMonthRange(billMonth);
+    const cutoffDate = cutoffDateInput
+      ? this.normalizeDate(cutoffDateInput, '结算截止日')
+      : null;
+    const periodStart = startDate > monthStart ? startDate : monthStart;
+    let periodEnd = endDate && endDate < monthEnd ? endDate : monthEnd;
+    if (cutoffDate && cutoffDate < periodEnd) periodEnd = cutoffDate;
+    if (periodEnd < periodStart) return null;
+    const daysInMonth = monthEnd.getUTCDate();
+    const billableDays = Math.floor((periodEnd.getTime() - periodStart.getTime()) / (24 * 60 * 60 * 1000)) + 1;
+    const amount = round2(Number(contract.monthlyAmount || 0) * billableDays / daysInMonth);
+    const [year, mon] = this.normalizeMonth(billMonth).split('-').map(Number);
+    const dueAt = cutoffDate || new Date(Date.UTC(year, mon, 1));
+    return { startDate, dueAt, periodStart, periodEnd, daysInMonth, billableDays, amount };
   }
 
   private getCurrentMonth(ref = new Date()) {
@@ -138,12 +146,7 @@ export class EquipmentRentalFeeService {
 
   private isContractEffectiveForMonth(contract: any, month: string) {
     if (String(contract?.status || '') !== 'ACTIVE') return false;
-    const { startDate, periodStart } = this.getBillingSchedule(contract, month);
-    const firstDueAt = this.addMonthsClamped(startDate, 1);
-    if (this.formatMonth(firstDueAt) > month) return false;
-    const endDate = this.getContractEndDate(contract);
-    if (endDate && endDate.getTime() < periodStart.getTime()) return false;
-    return true;
+    return Boolean(this.getBillingSchedule(contract, month));
   }
 
   async createContract(dto: any, operatorId?: number) {
@@ -283,8 +286,9 @@ export class EquipmentRentalFeeService {
     const reconciliations: any[] = [];
     for (const contract of contracts) {
       if (!this.isContractEffectiveForMonth(contract, month)) continue;
-      const { periodStart, periodEnd, dueAt } = this.getBillingSchedule(contract, month);
-      const amount = this.toAmount(contract.monthlyAmount);
+      const terms = this.getBillingSchedule(contract, month);
+      if (!terms) continue;
+      const { periodStart, periodEnd, dueAt, amount } = terms;
       const existing = await (this.prisma as any).equipmentRentalBill.findUnique({
         where: { contractId_billMonth: { contractId: contract.id, billMonth: month } },
         include: {
@@ -394,7 +398,10 @@ export class EquipmentRentalFeeService {
 
   @Cron('0 10 1 * * *', { timeZone: 'Asia/Shanghai' })
   async cronGenerateCurrentMonthBills() {
-    await this.generateBillsForMonth(this.getCurrentMonth());
+    const now = new Date();
+    const shanghaiNow = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+    const previousMonth = new Date(Date.UTC(shanghaiNow.getUTCFullYear(), shanghaiNow.getUTCMonth() - 1, 1));
+    await this.generateBillsForMonth(this.formatMonth(previousMonth));
   }
 
   async listBills(query: any) {
@@ -590,6 +597,114 @@ export class EquipmentRentalFeeService {
       if (bill.status !== 'PENDING') throw new BadRequestException('该账单无需重复缴费');
       return this.payBillInTx(tx, bill, operatorId, String(remark || '').trim() || `管理员手动缴纳设备租赁费 ${bill.billMonth}`);
     });
+  }
+
+  async prepareStaffExitSettlementTx(
+    tx: PrismaTx,
+    userId: number,
+    operatorId: number | undefined,
+    exitAt = new Date(),
+  ) {
+    const shanghaiDate = new Date(exitAt.getTime() + 8 * 60 * 60 * 1000);
+    const cutoffDate = new Date(Date.UTC(
+      shanghaiDate.getUTCFullYear(),
+      shanghaiDate.getUTCMonth(),
+      shanghaiDate.getUTCDate(),
+    ));
+    const billMonth = this.formatMonth(cutoffDate);
+    const contracts = await (tx as any).equipmentRentalContract.findMany({
+      where: { userId, status: 'ACTIVE' },
+      orderBy: { id: 'asc' },
+    });
+
+    const generatedBillIds: number[] = [];
+    for (const contract of contracts) {
+      const terms = this.getBillingSchedule(contract, billMonth, cutoffDate);
+      if (!terms) continue;
+      const amount = this.toAmount(terms.amount);
+      const existing = await (tx as any).equipmentRentalBill.findUnique({
+        where: { contractId_billMonth: { contractId: contract.id, billMonth } },
+      });
+      const paidAmount = this.toAmount(existing?.paidAmount || 0);
+      if (paidAmount > amount) {
+        throw new BadRequestException(`设备费账单 #${existing.id} 已缴金额超过退店截止日应缴金额，请先处理退费`);
+      }
+      const remainingAmount = round2(Math.max(0, amount - paidAmount));
+      const status = remainingAmount > 0 ? 'PENDING' : 'PAID';
+      const bill = existing
+        ? await (tx as any).equipmentRentalBill.update({
+            where: { id: existing.id },
+            data: {
+              periodStart: terms.periodStart,
+              periodEnd: terms.periodEnd,
+              amount,
+              remainingAmount,
+              status,
+              dueAt: cutoffDate,
+              generatedAt: exitAt,
+            },
+          })
+        : await (tx as any).equipmentRentalBill.create({
+            data: {
+              contractId: contract.id,
+              userId,
+              billMonth,
+              periodStart: terms.periodStart,
+              periodEnd: terms.periodEnd,
+              amount,
+              paidAmount: 0,
+              remainingAmount: amount,
+              status: amount > 0 ? 'PENDING' : 'PAID',
+              dueAt: cutoffDate,
+              generatedAt: exitAt,
+              remark: '退店时按实际使用天数结算',
+            },
+          });
+      generatedBillIds.push(Number(bill.id));
+      await this.writeLogTx(tx, {
+        operatorId,
+        action: existing ? 'EQUIPMENT_RENTAL_EXIT_BILL_UPDATE' : 'EQUIPMENT_RENTAL_EXIT_BILL_CREATE',
+        targetId: bill.id,
+        oldData: existing || null,
+        newData: bill,
+        remark: `退店即时结算设备使用费，截止 ${this.toDateOnlyString(cutoffDate)}`,
+      });
+    }
+
+    const bills = await (tx as any).equipmentRentalBill.findMany({
+      where: { userId, status: 'PENDING', remainingAmount: { gt: 0 } },
+      orderBy: [{ billMonth: 'asc' }, { id: 'asc' }],
+    });
+    return {
+      cutoffDate,
+      billMonth,
+      generatedBillIds,
+      bills,
+      totalAmount: round2(bills.reduce((sum: number, bill: any) => sum + Number(bill.remainingAmount || 0), 0)),
+    };
+  }
+
+  async collectStaffExitSettlementTx(
+    tx: PrismaTx,
+    params: { userId: number; billIds: number[]; operatorId?: number; cutoffDate: Date },
+  ) {
+    const paidBillIds: number[] = [];
+    for (const billId of params.billIds) {
+      const bill = await (tx as any).equipmentRentalBill.findUnique({ where: { id: billId } });
+      if (!bill || Number(bill.userId) !== Number(params.userId)) continue;
+      if (bill.status !== 'PENDING' || Number(bill.remainingAmount || 0) <= 0) continue;
+      await this.payBillInTx(tx as any, bill, params.operatorId, '退店时自动结清设备使用费');
+      paidBillIds.push(Number(bill.id));
+    }
+    await (tx as any).equipmentRentalContract.updateMany({
+      where: { userId: params.userId, status: 'ACTIVE' },
+      data: {
+        status: 'INACTIVE',
+        endDate: params.cutoffDate,
+        endMonth: this.formatMonth(params.cutoffDate),
+      },
+    });
+    return { paidBillIds };
   }
 
   async confirmPaidByOtherChannel(billId: number, operatorId?: number, remark?: string, amountInput?: any) {

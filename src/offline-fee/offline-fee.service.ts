@@ -7,7 +7,7 @@ import { ManualCreateOfflineFeeBillDto } from './dto/manual-create-offline-fee-b
 import { UpdateOfflineFeeBillDto } from './dto/update-offline-fee-bill.dto';
 
 const WITHDRAWAL_GUARD_WINDOW_DAYS = 3;
-const MONTHLY_BILLING_DAY = 20;
+const MONTHLY_BILLING_DAY = 15;
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * 60 * 60 * 1000;
 const BILLABLE_STAFF_EMPLOYMENT_STATUSES = [
@@ -104,26 +104,24 @@ export class OfflineFeeService {
     );
   }
 
-  private getContractDueAtForMonth(contract: any, monthInput: string) {
+  private getContractDueAtForMonth(_contract: any, monthInput: string) {
     const [year, mon] = this.normalizeMonth(monthInput).split('-').map(Number);
-    const monthLastDay = new Date(Date.UTC(year, mon, 0)).getUTCDate();
-    const fixedDueAt = new Date(Date.UTC(year, mon - 1, Math.min(MONTHLY_BILLING_DAY, monthLastDay), 0, 0, 0));
-    const startDate = this.getContractStartDate(contract);
-    return startDate && startDate > fixedDueAt ? startDate : fixedDueAt;
+    return new Date(Date.UTC(year, mon, MONTHLY_BILLING_DAY, 0, 0, 0));
   }
 
-  private getContractBillTerms(contract: any, month: string) {
+  private getContractBillTerms(contract: any, month: string, cutoffDateInput?: Date) {
     const { start: monthStart, end: monthEnd } = this.getMonthRange(month);
     const contractStart = this.getContractStartDate(contract);
     const contractEnd = this.getContractEndDate(contract);
     const periodStart = contractStart && contractStart > monthStart ? contractStart : monthStart;
-    const periodEnd = contractEnd && contractEnd < monthEnd ? contractEnd : monthEnd;
+    let periodEnd = contractEnd && contractEnd < monthEnd ? contractEnd : monthEnd;
+    const cutoffDate = cutoffDateInput ? this.parseDateOnly(cutoffDateInput, '结算截止日') : null;
+    if (cutoffDate && cutoffDate < periodEnd) periodEnd = cutoffDate;
     if (periodEnd < periodStart) return null;
     const daysInMonth = monthEnd.getUTCDate();
     const billableDays = Math.floor((periodEnd.getTime() - periodStart.getTime()) / DAY) + 1;
     const amount = Math.max(0.01, this.toFixed2(Number(contract.monthlyAmount || 0) * billableDays / daysInMonth));
-    const configuredDueAt = this.getContractDueAtForMonth(contract, month);
-    const dueAt = configuredDueAt > periodEnd ? periodEnd : configuredDueAt;
+    const dueAt = cutoffDate || this.getContractDueAtForMonth(contract, month);
     return {
       periodStart,
       periodEnd,
@@ -372,12 +370,12 @@ export class OfflineFeeService {
     return { month, affected };
   }
 
-  @Cron('0 5 0 * * *', { timeZone: 'Asia/Shanghai' })
+  @Cron('0 5 0 15 * *', { timeZone: 'Asia/Shanghai' })
   async cronGenerateUpcomingBills() {
     const now = new Date();
     const chinaNow = new Date(now.getTime() + 8 * HOUR);
-    if (chinaNow.getUTCDate() < MONTHLY_BILLING_DAY) return;
-    const month = `${chinaNow.getUTCFullYear()}-${String(chinaNow.getUTCMonth() + 1).padStart(2, '0')}`;
+    const previousMonth = new Date(Date.UTC(chinaNow.getUTCFullYear(), chinaNow.getUTCMonth() - 1, 1));
+    const month = this.formatMonth(previousMonth);
     await this.prisma.$transaction(async (tx) => this.generateBillsForMonthTx(tx as any, month));
   }
 
@@ -1093,6 +1091,137 @@ export class OfflineFeeService {
       if (!bill) throw new NotFoundException('线下费用账单不存在');
       return this.collectByWalletBalanceTx(tx as any, { bill, amount, operatorId, remark });
     });
+  }
+
+  async prepareStaffExitSettlementTx(
+    tx: PrismaTx,
+    userId: number,
+    operatorId: number | undefined,
+    exitAt = new Date(),
+  ) {
+    const shanghaiDate = new Date(exitAt.getTime() + 8 * HOUR);
+    const cutoffDate = new Date(Date.UTC(
+      shanghaiDate.getUTCFullYear(),
+      shanghaiDate.getUTCMonth(),
+      shanghaiDate.getUTCDate(),
+    ));
+    const billMonth = this.formatMonth(cutoffDate);
+    const contracts = await (tx as any).offlineFeeContract.findMany({
+      where: { userId, status: 'ACTIVE' },
+      orderBy: { id: 'asc' },
+    });
+    const termsList = contracts
+      .map((contract: any) => this.getContractBillTerms(contract, billMonth, cutoffDate))
+      .filter(Boolean) as any[];
+
+    let generatedBillId: number | null = null;
+    if (termsList.length) {
+      const amount = this.toFixed2(termsList.reduce((sum, terms) => sum + Number(terms.amount || 0), 0));
+      const periodStart = termsList.reduce(
+        (earliest, terms) => terms.periodStart < earliest ? terms.periodStart : earliest,
+        termsList[0].periodStart,
+      );
+      const periodEnd = cutoffDate;
+      const existing = await (tx as any).offlineFeeBill.findUnique({
+        where: { userId_billMonth: { userId, billMonth } },
+      });
+      const paidAmount = this.toFixed2(Number(existing?.paidAmount || 0));
+      if (paidAmount > amount) {
+        throw new BadRequestException(`线下管理费账单 #${existing.id} 已缴金额超过退店截止日应缴金额，请先处理退费`);
+      }
+      const remainingAmount = this.toFixed2(Math.max(0, amount - paidAmount));
+      const status = remainingAmount <= 0 ? 'PAID' : paidAmount > 0 ? 'PARTIAL' : 'UNPAID';
+      const bill = existing
+        ? await (tx as any).offlineFeeBill.update({
+            where: { id: existing.id },
+            data: {
+              periodStart,
+              periodEnd,
+              performanceBaseAmount: amount,
+              rate: 1,
+              minAmount: 0,
+              capAmount: amount,
+              shouldPayAmount: amount,
+              remainingAmount,
+              status,
+              dueAt: cutoffDate,
+              generatedAt: exitAt,
+            },
+          })
+        : await (tx as any).offlineFeeBill.create({
+            data: {
+              userId,
+              billMonth,
+              periodStart,
+              periodEnd,
+              performanceBaseAmount: amount,
+              rate: 1,
+              minAmount: 0,
+              capAmount: amount,
+              shouldPayAmount: amount,
+              paidAmount: 0,
+              remainingAmount: amount,
+              status: 'UNPAID',
+              dueAt: cutoffDate,
+              remark: '退店时按实际天数结算线下管理费',
+              createdBy: operatorId ?? null,
+              generatedAt: exitAt,
+            },
+          });
+      generatedBillId = Number(bill.id);
+      await this.writeLogTx(tx, {
+        operatorId,
+        action: existing ? 'OFFLINE_FEE_EXIT_BILL_UPDATE' : 'OFFLINE_FEE_EXIT_BILL_CREATE',
+        targetId: bill.id,
+        oldData: existing || null,
+        newData: bill,
+        remark: `退店即时结算线下管理费，截止 ${this.toDateOnlyString(cutoffDate)}`,
+      });
+    }
+
+    const bills = await (tx as any).offlineFeeBill.findMany({
+      where: {
+        userId,
+        remainingAmount: { gt: 0 },
+        status: { in: ['UNPAID', 'PARTIAL'] },
+      },
+      orderBy: [{ billMonth: 'asc' }, { id: 'asc' }],
+    });
+    return {
+      cutoffDate,
+      billMonth,
+      generatedBillId,
+      bills,
+      totalAmount: this.toFixed2(bills.reduce((sum: number, bill: any) => sum + Number(bill.remainingAmount || 0), 0)),
+    };
+  }
+
+  async collectStaffExitSettlementTx(
+    tx: PrismaTx,
+    params: { userId: number; billIds: number[]; operatorId?: number; cutoffDate: Date },
+  ) {
+    const paidBillIds: number[] = [];
+    for (const billId of params.billIds) {
+      const bill = await (tx as any).offlineFeeBill.findUnique({ where: { id: billId } });
+      if (!bill || Number(bill.userId) !== Number(params.userId)) continue;
+      if (!['UNPAID', 'PARTIAL'].includes(String(bill.status || '')) || Number(bill.remainingAmount || 0) <= 0) continue;
+      await this.collectByWalletBalanceTx(tx, {
+        bill,
+        amount: Number(bill.remainingAmount || 0),
+        operatorId: params.operatorId,
+        remark: '退店时自动结清线下管理费',
+      });
+      paidBillIds.push(Number(bill.id));
+    }
+    await (tx as any).offlineFeeContract.updateMany({
+      where: { userId: params.userId, status: 'ACTIVE' },
+      data: {
+        status: 'INACTIVE',
+        endDate: params.cutoffDate,
+        endMonth: this.formatMonth(params.cutoffDate),
+      },
+    });
+    return { paidBillIds };
   }
 
   private async collectByWalletBalanceTx(

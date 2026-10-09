@@ -37,7 +37,7 @@ describe('OfflineFeeService', () => {
     );
   });
 
-  it('prorates the first month by inclusive active days and uses the 20th as billing date', async () => {
+  it('prorates the first month and makes it due on the next month 15th', async () => {
     const tx: any = {
       offlineFeeContract: { findMany: jest.fn().mockResolvedValue([{
         id: 1,
@@ -64,7 +64,7 @@ describe('OfflineFeeService', () => {
         remainingAmount: 120,
         periodStart: new Date('2026-07-20T00:00:00.000Z'),
         periodEnd: new Date('2026-07-31T00:00:00.000Z'),
-        dueAt: new Date('2026-07-20T00:00:00.000Z'),
+        dueAt: new Date('2026-08-15T00:00:00.000Z'),
       }),
     });
   });
@@ -91,6 +91,48 @@ describe('OfflineFeeService', () => {
 
     expect(tx.offlineFeeBill.create).not.toHaveBeenCalled();
     expect(tx.offlineFeeBill.update).not.toHaveBeenCalled();
+  });
+
+  it('creates a prorated offline management bill through the staff exit date', async () => {
+    let createdBill: any;
+    const tx: any = {
+      offlineFeeContract: {
+        findMany: jest.fn().mockResolvedValue([{
+          id: 1,
+          userId: 7,
+          monthlyAmount: 310,
+          startDate: new Date('2026-10-01T00:00:00.000Z'),
+          endDate: null,
+          status: 'ACTIVE',
+        }]),
+      },
+      offlineFeeBill: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockImplementation(({ data }) => {
+          createdBill = { id: 92, ...data };
+          return createdBill;
+        }),
+        findMany: jest.fn().mockImplementation(() => [createdBill]),
+      },
+    };
+    const service = new OfflineFeeService({} as any);
+
+    const result = await service.prepareStaffExitSettlementTx(
+      tx,
+      7,
+      undefined,
+      new Date('2026-10-10T08:00:00.000Z'),
+    );
+
+    expect(result.totalAmount).toBe(100);
+    expect(createdBill).toMatchObject({
+      billMonth: '2026-10',
+      shouldPayAmount: 100,
+      remainingAmount: 100,
+      periodStart: new Date('2026-10-01T00:00:00.000Z'),
+      periodEnd: new Date('2026-10-10T00:00:00.000Z'),
+      dueAt: new Date('2026-10-10T00:00:00.000Z'),
+    });
   });
 
   it('repairs a paid bill generated in August but incorrectly attributed to September', async () => {
@@ -153,7 +195,7 @@ describe('OfflineFeeService', () => {
         billMonth: '2026-08',
         periodStart: new Date('2026-08-01T00:00:00.000Z'),
         periodEnd: new Date('2026-08-31T00:00:00.000Z'),
-        dueAt: new Date('2026-08-20T00:00:00.000Z'),
+        dueAt: new Date('2026-09-15T00:00:00.000Z'),
         status: 'PAID',
         remainingAmount: 0,
       }),

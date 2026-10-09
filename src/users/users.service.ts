@@ -11,6 +11,8 @@ import * as bcrypt from 'bcrypt';
 import { WalletService } from '../wallet/wallet.service';
 import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
 import { isDispatchMonitoredStaff } from '../common/utils/staff-role-scope.util';
+import { OfflineFeeService } from '../offline-fee/offline-fee.service';
+import { EquipmentRentalFeeService } from '../equipment-rental-fee/equipment-rental-fee.service';
 
 @Injectable()
 export class UsersService {
@@ -28,6 +30,8 @@ export class UsersService {
     private prisma: PrismaService,
     private wallet: WalletService,
     private readonly staffRuleEngineService: StaffRuleEngineService,
+    private readonly offlineFeeService: OfflineFeeService,
+    private readonly equipmentRentalFeeService: EquipmentRentalFeeService,
   ) {}
 
   private buildPlayerOnlineLeaseExpiresAt(base: Date = new Date()) {
@@ -1395,15 +1399,28 @@ export class UsersService {
     const releaseAmount = Number((frozen + refundableDeposit).toFixed(2));
     const finalAvailable = Number((available + releaseAmount - depositTopUpForfeit).toFixed(2));
 
-    if (addToBlacklist && finalAvailable > 0) {
-      throw new BadRequestException('加入黑名单前需先清空可用余额，请使用一键清零');
-    }
-
     const now = new Date();
     const nextEmploymentStatus = addToBlacklist ? StaffEmploymentStatus.BLACKLISTED : StaffEmploymentStatus.EXITED;
 
     return this.prisma.$transaction(async (tx) => {
       await this.wallet.ensureWalletAccount(id, tx as any);
+
+      const offlineFeeSettlement = await this.offlineFeeService.prepareStaffExitSettlementTx(tx as any, id, operatorId, now);
+      const equipmentFeeSettlement = await this.equipmentRentalFeeService.prepareStaffExitSettlementTx(tx as any, id, operatorId, now);
+      const exitFeeAmount = Number((
+        Number(offlineFeeSettlement.totalAmount || 0) +
+        Number(equipmentFeeSettlement.totalAmount || 0)
+      ).toFixed(2));
+      const chargeableBalance = Number((available + frozen).toFixed(2));
+      const requiredBalance = Number((exitFeeAmount + depositTopUpForfeit).toFixed(2));
+      if (chargeableBalance < requiredBalance) {
+        throw new BadRequestException(
+          `退店失败：可用余额与未解冻收益合计 ¥${chargeableBalance.toFixed(2)}，不足以结清线下管理费、设备使用费及其他退店应扣款 ¥${requiredBalance.toFixed(2)}`,
+        );
+      }
+      if (addToBlacklist && Number((finalAvailable - exitFeeAmount).toFixed(2)) > 0) {
+        throw new BadRequestException('加入黑名单前需先清空可用余额，请使用一键清零');
+      }
 
       const log = await tx.userLog.create({
         data: {
@@ -1424,6 +1441,8 @@ export class UsersService {
             refundDepositAmount: refundableDeposit,
             forfeitDepositAmount: forfeitDeposit,
             depositTopUpForfeitAmount: depositTopUpForfeit,
+            offlineFeeAmount: offlineFeeSettlement.totalAmount,
+            equipmentRentalFeeAmount: equipmentFeeSettlement.totalAmount,
           },
           remark: addToBlacklist ? '员工退店并加入黑名单' : '员工退店',
         },
@@ -1534,6 +1553,19 @@ export class UsersService {
           } as any,
         });
       }
+
+      await this.offlineFeeService.collectStaffExitSettlementTx(tx as any, {
+        userId: id,
+        billIds: offlineFeeSettlement.bills.map((bill: any) => Number(bill.id)),
+        operatorId,
+        cutoffDate: offlineFeeSettlement.cutoffDate,
+      });
+      await this.equipmentRentalFeeService.collectStaffExitSettlementTx(tx as any, {
+        userId: id,
+        billIds: equipmentFeeSettlement.bills.map((bill: any) => Number(bill.id)),
+        operatorId,
+        cutoffDate: equipmentFeeSettlement.cutoffDate,
+      });
 
       return updatedUser;
     });

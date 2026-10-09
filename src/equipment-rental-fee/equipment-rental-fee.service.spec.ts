@@ -67,7 +67,7 @@ describe('EquipmentRentalFeeService', () => {
     expect(prisma.equipmentRentalContract.create).not.toHaveBeenCalled();
   });
 
-  it('generates bills by due month based on contract start date', async () => {
+  it('generates the previous natural-month bill on the next month first day', async () => {
     const createdBills: any[] = [];
     const prisma = {
       equipmentRentalContract: {
@@ -101,9 +101,9 @@ describe('EquipmentRentalFeeService', () => {
       remainingAmount: 100,
       status: 'PENDING',
     });
-    expect(createdBills[0].periodStart.toISOString()).toBe('2026-08-15T00:00:00.000Z');
-    expect(createdBills[0].periodEnd.toISOString()).toBe('2026-09-14T23:59:59.999Z');
-    expect(createdBills[0].dueAt.toISOString()).toBe('2026-09-15T00:00:00.000Z');
+    expect(createdBills[0].periodStart.toISOString()).toBe('2026-09-01T00:00:00.000Z');
+    expect(createdBills[0].periodEnd.toISOString()).toBe('2026-09-30T23:59:59.000Z');
+    expect(createdBills[0].dueAt.toISOString()).toBe('2026-10-01T00:00:00.000Z');
   });
 
   it('generates one bill per contract when a staff user has multiple active configurations', async () => {
@@ -136,6 +136,48 @@ describe('EquipmentRentalFeeService', () => {
     expect(prisma.equipmentRentalBill.findUnique).toHaveBeenCalledWith(expect.objectContaining({
       where: { contractId_billMonth: { contractId: 32, billMonth: '2026-09' } },
     }));
+  });
+
+  it('creates a prorated equipment bill through the staff exit date', async () => {
+    let createdBill: any;
+    const tx: any = {
+      equipmentRentalContract: {
+        findMany: jest.fn().mockResolvedValue([{
+          id: 31,
+          userId: 7,
+          status: 'ACTIVE',
+          monthlyAmount: 310,
+          startDate: new Date('2026-10-01T00:00:00.000Z'),
+          endDate: null,
+        }]),
+      },
+      equipmentRentalBill: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockImplementation(({ data }) => {
+          createdBill = { id: 91, ...data };
+          return createdBill;
+        }),
+        findMany: jest.fn().mockImplementation(() => [createdBill]),
+      },
+    };
+    const service = new EquipmentRentalFeeService({} as any);
+
+    const result = await service.prepareStaffExitSettlementTx(
+      tx,
+      7,
+      undefined,
+      new Date('2026-10-10T08:00:00.000Z'),
+    );
+
+    expect(result.totalAmount).toBe(100);
+    expect(createdBill).toMatchObject({
+      billMonth: '2026-10',
+      amount: 100,
+      remainingAmount: 100,
+      periodStart: new Date('2026-10-01T00:00:00.000Z'),
+      periodEnd: new Date('2026-10-10T00:00:00.000Z'),
+      dueAt: new Date('2026-10-10T00:00:00.000Z'),
+    });
   });
 
   it('reports the correct recalculated amount for a paid bill and offers only the overpaid difference', async () => {
@@ -476,7 +518,7 @@ describe('EquipmentRentalFeeService', () => {
     jest.useRealTimers();
   });
 
-  it('reserves an ungenerated next-month bill only after entering its due-soon window', async () => {
+  it('does not reserve an ungenerated future service-month bill before it is due', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-08-31T00:00:00.000Z'));
     const db = {
       equipmentRentalBill: {
@@ -499,8 +541,8 @@ describe('EquipmentRentalFeeService', () => {
 
     await expect(service.getWithdrawalObligationTx(db, 7)).resolves.toMatchObject({
       outstanding: 0,
-      upcoming: 120,
-      totalObligation: 120,
+      upcoming: 0,
+      totalObligation: 0,
       nextMonth: '2026-09',
     });
     jest.useRealTimers();
