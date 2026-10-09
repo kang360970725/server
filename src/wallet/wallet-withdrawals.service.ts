@@ -1375,6 +1375,27 @@ export class WalletWithdrawalsService {
                     };
                 }
 
+                const [equipmentRisk, offlineFeeRisk] = await Promise.all([
+                    this.equipmentRentalFeeService
+                        ? this.equipmentRentalFeeService.getWithdrawalRiskPreviewTx(this.prisma as any, r.userId)
+                        : Promise.resolve({ outstandingAmount: 0, estimatedAmount: 0, totalRiskAmount: 0, contractCount: 0 }),
+                    this.offlineFeeService.getWithdrawalRiskPreviewTx(this.prisma as any, r.userId),
+                ]);
+                const feeRiskTotal = round2(
+                    Number(equipmentRisk.totalRiskAmount || 0) +
+                    Number(offlineFeeRisk.totalRiskAmount || 0),
+                );
+                const fundingAfterWithdrawal = round2(Number(reviewEligibility.postWithdrawalTotalBalance || 0));
+                const riskGapAmount = round2(Math.max(0, feeRiskTotal - Math.max(0, fundingAfterWithdrawal)));
+                const feeRiskPreview = {
+                    riskLevel: riskGapAmount > 0 ? 'HIGH' : feeRiskTotal > 0 ? 'NOTICE' : 'NONE',
+                    totalRiskAmount: feeRiskTotal,
+                    riskGapAmount,
+                    fundingAfterWithdrawal,
+                    equipment: equipmentRisk,
+                    offlineManagement: offlineFeeRisk,
+                };
+
                 return {
                     ...r,
                     wallet: wallet || {
@@ -1385,6 +1406,7 @@ export class WalletWithdrawalsService {
                     },
                     withdrawQrCodeUrl: withdrawQrCodeUrl || null,
                     reviewEligibility,
+                    feeRiskPreview,
                     wechatAutoTransfer: await this.getWechatAutoEligibilitySnapshot(r.userId),
                 };
             }),

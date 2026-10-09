@@ -953,4 +953,43 @@ export class EquipmentRentalFeeService {
       nextMonth,
     };
   }
+
+  async getWithdrawalRiskPreviewTx(db: PrismaTx, userId: number, asOf = new Date()) {
+    const shanghaiDate = new Date(asOf.getTime() + 8 * 60 * 60 * 1000);
+    const cutoffDate = new Date(Date.UTC(
+      shanghaiDate.getUTCFullYear(),
+      shanghaiDate.getUTCMonth(),
+      shanghaiDate.getUTCDate(),
+    ));
+    const billMonth = this.formatMonth(cutoffDate);
+    const [billAgg, currentBills, contracts] = await Promise.all([
+      (db as any).equipmentRentalBill.aggregate({
+        where: { userId, status: 'PENDING', remainingAmount: { gt: 0 } },
+        _sum: { remainingAmount: true },
+      }),
+      (db as any).equipmentRentalBill.findMany({
+        where: { userId, billMonth },
+        select: { contractId: true },
+      }),
+      (db as any).equipmentRentalContract.findMany({
+        where: { userId, status: 'ACTIVE' },
+      }),
+    ]);
+    const billedContractIds = new Set((currentBills || []).map((bill: any) => Number(bill.contractId)));
+    const estimatedAmount = round2((contracts || [])
+      .filter((contract: any) => !billedContractIds.has(Number(contract.id)))
+      .reduce((sum: number, contract: any) => {
+        const terms = this.getBillingSchedule(contract, billMonth, cutoffDate);
+        return sum + Number(terms?.amount || 0);
+      }, 0));
+    const outstandingAmount = this.toAmount(billAgg?._sum?.remainingAmount || 0);
+    return {
+      outstandingAmount,
+      estimatedAmount,
+      totalRiskAmount: round2(outstandingAmount + estimatedAmount),
+      billMonth,
+      cutoffDate,
+      contractCount: contracts?.length || 0,
+    };
+  }
 }

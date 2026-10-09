@@ -1033,6 +1033,48 @@ export class OfflineFeeService {
     };
   }
 
+  async getWithdrawalRiskPreviewTx(db: PrismaTx, userId: number, asOf = new Date()) {
+    const shanghaiDate = new Date(asOf.getTime() + 8 * HOUR);
+    const cutoffDate = new Date(Date.UTC(
+      shanghaiDate.getUTCFullYear(),
+      shanghaiDate.getUTCMonth(),
+      shanghaiDate.getUTCDate(),
+    ));
+    const billMonth = this.formatMonth(cutoffDate);
+    const [billAgg, currentBill, contracts] = await Promise.all([
+      (db as any).offlineFeeBill.aggregate({
+        where: {
+          userId,
+          remainingAmount: { gt: 0 },
+          status: { in: ['UNPAID', 'PARTIAL'] },
+        },
+        _sum: { remainingAmount: true },
+      }),
+      (db as any).offlineFeeBill.findUnique({
+        where: { userId_billMonth: { userId, billMonth } },
+        select: { id: true },
+      }),
+      (db as any).offlineFeeContract.findMany({
+        where: { userId, status: 'ACTIVE' },
+      }),
+    ]);
+    const estimatedAmount = currentBill
+      ? 0
+      : this.toFixed2((contracts || []).reduce((sum: number, contract: any) => {
+          const terms = this.getContractBillTerms(contract, billMonth, cutoffDate);
+          return sum + Number(terms?.amount || 0);
+        }, 0));
+    const outstandingAmount = this.toFixed2(Number(billAgg?._sum?.remainingAmount || 0));
+    return {
+      outstandingAmount,
+      estimatedAmount,
+      totalRiskAmount: this.toFixed2(outstandingAmount + estimatedAmount),
+      billMonth,
+      cutoffDate,
+      contractCount: contracts?.length || 0,
+    };
+  }
+
   async listMyBills(userId: number) {
     if (!userId) throw new BadRequestException('用户身份无效');
     const rows = await (this.prisma as any).offlineFeeBill.findMany({
