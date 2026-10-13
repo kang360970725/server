@@ -10,6 +10,8 @@ export class MetaController {
             // Order / Dispatch
             // =========================
             OrderStatus: {
+                DRAFT: '订单草稿',
+                WAIT_PAYMENT: '待在线支付',
                 WAIT_ASSIGN: '待派单',
                 WAIT_ACCEPT: '待接单',
                 ACCEPTED: '已接单',

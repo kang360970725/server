@@ -450,6 +450,22 @@ export class OrdersController {
         return this.ordersService.markOrderPaid(dto, operatorId);
     }
 
+    /**
+     * 预创建收钱吧支付尝试。正式开通前会返回唯一 client_sn 和待配置状态；
+     * 同一订单的补收通过 purpose=SUPPLEMENT 创建新的支付尝试，绝不复用 client_sn。
+     */
+    @Post('shouqianba/payment-request')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:detail:mark-paid:button')
+    createShouqianbaPaymentRequest(@Body() body: any, @Req() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:detail:mark-paid:button', '当前角色无权发起订单收款');
+        return this.ordersService.createShouqianbaPaymentRequest(
+            Number(body?.id ?? body?.orderId),
+            body?.amount === undefined || body?.amount === null ? undefined : Number(body.amount),
+            body?.purpose,
+        );
+    }
+
     /** 新（存单）轮修复订单贡献(保底进度/小时单)；不重算结算、不动钱包 */
     @Post('update-archived-progress-total')
     @Permissions('orders:detail:archived-progress-fix:button')

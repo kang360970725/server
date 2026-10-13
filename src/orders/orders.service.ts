@@ -3,7 +3,7 @@ import {PrismaService} from '../prisma/prisma.service';
 import {CreateOrderDto} from './dto/create-order.dto';
 import {AcceptDispatchDto} from './dto/accept-dispatch.dto';
 import {MarkPaidDto} from './dto/mark-paid.dto';
-import { recordOrderSupplementTx } from '../finance/order-receipts.util';
+import {recordOrderSupplementTx} from '../finance/order-receipts.util';
 import {
     BillingMode,
     CouponScope,
@@ -21,26 +21,23 @@ import {
     WalletDirection,
     WalletTxStatus,
     MemberPointBizType,
-    MemberPointDirection
+    MemberPointDirection,
 } from '@prisma/client';
 import {WalletService} from '../wallet/wallet.service';
 import {randomInt, randomUUID} from 'crypto';
-import {groupByUserId, round2, roundMix1, toNum} from "../utils/money/format";
-import {
-    computeBillingGuaranteed,
-    computeBillingHours,
-    computeBillingMODEPLAY,
-    resolveGuaranteedSettlementPolicy,
-} from "../utils/orderDispatches/revenueInit";
-import {compareSettlementsToPlan} from "../utils/finance/generateRepairPlan";
-import {computeSettlementFreezeTime} from "../utils/orderDispatches/settlement-freeze.rule";
-import { NotificationsService } from '../notifications/notifications.service';
-import { MiniSubscribeMessageService } from '../notifications/mini-subscribe-message.service';
-import { PenaltiesService } from '../penalties/penalties.service';
-import { SystemConfigService } from '../system-config/system-config.service';
-import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
-import { WechatPayService } from '../mini/wechat-pay.service';
-import { shouldRefreshActivityAfterSettlement, StaffActivityService } from '../staff-activity/staff-activity.service';
+import {groupByUserId, round2, roundMix1, toNum} from '../utils/money/format';
+import {computeBillingGuaranteed, computeBillingHours, computeBillingMODEPLAY, resolveGuaranteedSettlementPolicy} from '../utils/orderDispatches/revenueInit';
+import {compareSettlementsToPlan} from '../utils/finance/generateRepairPlan';
+import {computeSettlementFreezeTime} from '../utils/orderDispatches/settlement-freeze.rule';
+import {NotificationsService} from '../notifications/notifications.service';
+import {MiniSubscribeMessageService} from '../notifications/mini-subscribe-message.service';
+import {PenaltiesService} from '../penalties/penalties.service';
+import {SystemConfigService} from '../system-config/system-config.service';
+import {StaffRuleEngineService} from '../system-config/staff-rule-engine.service';
+import {WechatPayService} from '../mini/wechat-pay.service';
+import {shouldRefreshActivityAfterSettlement, StaffActivityService} from '../staff-activity/staff-activity.service';
+import {Cron} from '@nestjs/schedule';
+import {ShouqianbaService} from '../shouqianba/shouqianba.service';
 
 type OrderCreateScene = 'ADMIN' | 'MINIAPP' | 'OFFICIAL_ACCOUNT';
 type CreateOrderContext = {
@@ -62,11 +59,11 @@ type ArchiveDispatchOptions = {
 type RenewalConfirmMode = 'SETTLE' | 'INVALIDATE';
 
 const ORDER_SOURCE_DEFAULTS = [
-    { value: 'TUTU_PLATFORM', label: '突突平台', enabled: true },
-    { value: 'THIRD_PARTY_TRANSFER', label: '第三方转单', enabled: true },
-    { value: 'MINIAPP_SELF_SERVICE', label: '小程序自助下单', enabled: true },
-    { value: 'CUSTOMER_SERVICE_MANUAL', label: '客服手动派单', enabled: true },
-    { value: 'OFFICIAL_ACCOUNT', label: '公众号下单', enabled: true },
+    {value: 'TUTU_PLATFORM', label: '突突平台', enabled: true},
+    {value: 'THIRD_PARTY_TRANSFER', label: '第三方转单', enabled: true},
+    {value: 'MINIAPP_SELF_SERVICE', label: '小程序自助下单', enabled: true},
+    {value: 'CUSTOMER_SERVICE_MANUAL', label: '客服手动派单', enabled: true},
+    {value: 'OFFICIAL_ACCOUNT', label: '公众号下单', enabled: true},
 ];
 
 export const isValidCustomerGameId = (value: any) => /^\d+$/.test(String(value || '').trim());
@@ -75,7 +72,7 @@ export const isValidCustomerGameId = (value: any) => /^\d+$/.test(String(value |
 export class OrdersService {
     private readonly logger = new Logger(OrdersService.name);
 
-  constructor(
+    constructor(
         private prisma: PrismaService,
         private wallet: WalletService,
         private notificationsService: NotificationsService,
@@ -85,8 +82,8 @@ export class OrdersService {
         private staffRuleEngineService: StaffRuleEngineService,
         private wechatPayService: WechatPayService,
         private staffActivityService: StaffActivityService,
-  ) {
-  }
+        private shouqianbaService: ShouqianbaService,
+    ) {}
 
     private normalizeRequiredRemark(input: any, message = '请填写处理原因') {
         const remark = String(input || '').trim();
@@ -108,8 +105,8 @@ export class OrdersService {
                     lte: '99999999',
                 },
             },
-            select: { memberCode: true },
-            orderBy: { memberCode: 'desc' },
+            select: {memberCode: true},
+            orderBy: {memberCode: 'desc'},
             take: 200,
         });
         const existing = new Set(rows.map((row: any) => String(row.memberCode || '')));
@@ -121,7 +118,9 @@ export class OrdersService {
         for (let next = Math.max(15000000, maxCode + 1); next <= 99999999; next += 1) {
             const code = String(next).padStart(8, '0');
             if (this.isPremiumMemberCode(code) || existing.has(code)) continue;
-            const conflict = await tx.memberProfile.findUnique({ where: { memberCode: code } });
+            const conflict = await tx.memberProfile.findUnique({
+                where: {memberCode: code},
+            });
             if (!conflict) return code;
         }
 
@@ -138,12 +137,8 @@ export class OrdersService {
     }
 
     private resolveMemberBenefitBaseAmount(order: any, paidAmountInput?: number) {
-        const actualPaidAmount = round2(Math.max(0, Number(
-            paidAmountInput ?? order?.paidAmount ?? 0,
-        )));
-        const finalPayableAmount = round2(Math.max(0, Number(
-            order?.finalPayableAmount ?? order?.receivableAmount ?? actualPaidAmount,
-        )));
+        const actualPaidAmount = round2(Math.max(0, Number(paidAmountInput ?? order?.paidAmount ?? 0)));
+        const finalPayableAmount = round2(Math.max(0, Number(order?.finalPayableAmount ?? order?.receivableAmount ?? actualPaidAmount)));
 
         // 仅明确标记为测试支付的订单，才按业务订单金额累计会员权益。
         if (Boolean(order?.isTestPayment) && finalPayableAmount > 0) {
@@ -160,7 +155,7 @@ export class OrdersService {
             where: {
                 customerUserId: userId,
                 isGifted: false,
-                OR: [{ isPaid: true }, { payStatus: OrderPayStatus.SUCCESS }],
+                OR: [{isPaid: true}, {payStatus: OrderPayStatus.SUCCESS}],
             },
             select: {
                 paidAmount: true,
@@ -168,22 +163,28 @@ export class OrdersService {
                 receivableAmount: true,
                 isTestPayment: true,
                 refunds: {
-                    where: { status: { in: ['SUCCESS', 'MANUAL_REQUIRED'] } },
-                    select: { amount: true },
+                    where: {status: {in: ['SUCCESS', 'MANUAL_REQUIRED']}},
+                    select: {amount: true},
                 },
             },
         });
-        const totalConsumeAmount = round2(orders.reduce((sum: number, item: any) => {
-            const paidBase = this.resolveMemberBenefitBaseAmount(item);
-            const refunded = round2((item.refunds || []).reduce(
-                (refundSum: number, refund: any) => refundSum + Math.max(0, Number(refund?.amount || 0)),
-                0,
-            ));
-            return sum + Math.max(0, round2(paidBase - refunded));
-        }, 0));
-        const currentProfile = await tx.memberProfile.findUnique({ where: { userId } });
+        const totalConsumeAmount = round2(
+            orders.reduce((sum: number, item: any) => {
+                const paidBase = this.resolveMemberBenefitBaseAmount(item);
+                const refunded = round2(
+                    (item.refunds || []).reduce((refundSum: number, refund: any) => refundSum + Math.max(0, Number(refund?.amount || 0)), 0),
+                );
+                return sum + Math.max(0, round2(paidBase - refunded));
+            }, 0),
+        );
+        const currentProfile = await tx.memberProfile.findUnique({
+            where: {userId},
+        });
         if (currentProfile) {
-            await tx.memberProfile.update({ where: { userId }, data: { totalConsumeAmount } });
+            await tx.memberProfile.update({
+                where: {userId},
+                data: {totalConsumeAmount},
+            });
         } else {
             await tx.memberProfile.create({
                 data: {
@@ -198,12 +199,7 @@ export class OrdersService {
         return totalConsumeAmount;
     }
 
-    private buildOrderBalanceReceiptMeta(params: {
-        deductedAmount: number;
-        balanceAfter: number;
-        rewardPoints: number;
-        growthValue: number;
-    }) {
+    private buildOrderBalanceReceiptMeta(params: {deductedAmount: number; balanceAfter: number; rewardPoints: number; growthValue: number}) {
         return {
             receiptMeta: {
                 memberBalanceDeducted: this.toAmount2(Number(params.deductedAmount || 0)),
@@ -214,15 +210,10 @@ export class OrdersService {
         };
     }
 
-    private async resolveMemberLevelCodeTx(
-        tx: any,
-        totalRechargeAmount: number,
-        _annualContribution: number,
-        fallbackLevelCode = 'NONE',
-    ) {
+    private async resolveMemberLevelCodeTx(tx: any, totalRechargeAmount: number, _annualContribution: number, fallbackLevelCode = 'NONE') {
         const configs = await tx.memberLevelConfig.findMany({
-            where: { enabled: true },
-            orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+            where: {enabled: true},
+            orderBy: [{sortOrder: 'asc'}, {id: 'asc'}],
         });
 
         if (!configs.length) return fallbackLevelCode;
@@ -257,15 +248,15 @@ export class OrdersService {
                 sourceType: 'ORDER',
                 sourceId: Number(order.id),
             },
-            select: { id: true },
+            select: {id: true},
         });
         if (existingPointTx) return;
 
         const pointAccount = await tx.memberPointAccount.upsert({
-            where: { userId },
+            where: {userId},
             update: {
-                availablePoints: { increment: earnedPoints },
-                totalEarnedPoints: { increment: earnedPoints },
+                availablePoints: {increment: earnedPoints},
+                totalEarnedPoints: {increment: earnedPoints},
             },
             create: {
                 userId,
@@ -294,12 +285,14 @@ export class OrdersService {
 
         const paidAmount = round2(Math.max(0, Number(order?.paidAmount || 0)));
         const benefitOrderBaseAmount = this.resolveMemberBenefitBaseAmount(order, paidAmount);
-        const benefitBaseAmount = round2(Math.min(
-            benefitOrderBaseAmount,
-            Math.max(0, Number((refundAmountInput ?? paidAmount) || 0)) >= paidAmount && paidAmount > 0
-                ? benefitOrderBaseAmount
-                : Math.max(0, Number((refundAmountInput ?? paidAmount) || 0)),
-        ));
+        const benefitBaseAmount = round2(
+            Math.min(
+                benefitOrderBaseAmount,
+                Math.max(0, Number((refundAmountInput ?? paidAmount) || 0)) >= paidAmount && paidAmount > 0
+                    ? benefitOrderBaseAmount
+                    : Math.max(0, Number((refundAmountInput ?? paidAmount) || 0)),
+            ),
+        );
         if (benefitBaseAmount <= 0) return;
 
         const growthValue = 0;
@@ -316,8 +309,8 @@ export class OrdersService {
                 sourceType: 'ORDER',
                 sourceId: Number(order.id),
             },
-            orderBy: { id: 'desc' },
-            select: { id: true },
+            orderBy: {id: 'desc'},
+            select: {id: true},
         });
         if (!rewardPointTx) return;
 
@@ -328,15 +321,15 @@ export class OrdersService {
                 sourceType: 'ORDER_REFUND',
                 sourceId: Number(order.id),
             },
-            select: { id: true },
+            select: {id: true},
         });
         if (existingRollbackTx) return;
 
         const pointAccount = await tx.memberPointAccount.upsert({
-            where: { userId },
+            where: {userId},
             update: {
-                availablePoints: { decrement: earnedPoints },
-                totalSpentPoints: { increment: earnedPoints },
+                availablePoints: {decrement: earnedPoints},
+                totalSpentPoints: {increment: earnedPoints},
             },
             create: {
                 userId,
@@ -377,15 +370,291 @@ export class OrdersService {
         };
     }
 
-    private isOrderEffectivelyPaidOrGifted(order: { isPaid?: boolean | null; isGifted?: boolean | null; payStatus?: OrderPayStatus | string | null }) {
+    private isOrderEffectivelyPaidOrGifted(order: {isPaid?: boolean | null; isGifted?: boolean | null; payStatus?: OrderPayStatus | string | null}) {
         return Boolean(order?.isGifted) || order?.isPaid === true || String(order?.payStatus || '') === OrderPayStatus.SUCCESS;
     }
 
-    private getAutoConfirmAnchorAt(order: { dispatches?: Array<{ completedAt?: Date | string | null }>; updatedAt?: Date | string | null }) {
+    private getUnpaidLiabilityAmount(order: any) {
+        return this.toAmount2(Math.max(0, Number(order?.finalPayableAmount ?? order?.paidAmount ?? order?.receivableAmount ?? 0)));
+    }
+
+    private buildShouqianbaClientSn(orderId: number, purpose: string, attemptNo: number) {
+        const purposeCode = String(purpose || 'ORDER').toUpperCase() === 'SUPPLEMENT' ? 'S' : 'O';
+        return `BC${Number(orderId).toString(36).toUpperCase()}${purposeCode}${attemptNo.toString(36).toUpperCase()}${Date.now().toString(36).toUpperCase()}`.slice(
+            0,
+            32,
+        );
+    }
+
+    /** 创建独立支付尝试并调用收钱吧生成二维码；整单与补收均使用新的 client_sn。 */
+    async createShouqianbaPaymentRequest(orderIdInput: number, amountInput?: number, purposeInput?: string) {
+        const orderId = Number(orderIdInput);
+        if (!orderId) throw new BadRequestException('orderId 必填');
+        const purpose =
+            String(purposeInput || 'ORDER')
+                .trim()
+                .toUpperCase() === 'SUPPLEMENT'
+                ? 'SUPPLEMENT'
+                : 'ORDER';
+
+        const previous = await this.prisma.orderPayment.findFirst({
+            where: {
+                orderId,
+                purpose,
+                channel: 'SHOUQIANBA_WAP',
+                status: {
+                    in: [OrderPayStatus.PENDING, OrderPayStatus.PROCESSING, OrderPayStatus.UNKNOWN],
+                },
+            },
+            orderBy: {attemptNo: 'desc'},
+        });
+        if (previous) {
+            if (previous.expiresAt && previous.expiresAt.getTime() <= Date.now()) {
+                await this.prisma.orderPayment.update({
+                    where: {id: previous.id},
+                    data: {status: OrderPayStatus.CLOSED},
+                });
+            } else {
+                await this.shouqianbaService.cancelPayment(previous.id, 'BlueCat regenerate');
+            }
+        }
+
+        const prepared = await this.prisma.$transaction(async (tx) => {
+            await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
+            const order = await tx.order.findUnique({where: {id: orderId}});
+            if (!order) throw new NotFoundException('订单不存在');
+            if (order.isGifted) throw new BadRequestException('赠送单不需要创建支付请求');
+            if (!new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.WAIT_PAYMENT, OrderStatus.WAIT_ASSIGN]).has(order.status)) {
+                throw new ConflictException('当前订单状态不允许创建在线付款请求');
+            }
+            if (purpose === 'ORDER' && order.isPaid) throw new ConflictException('订单已收款，无需重复创建整单收款请求');
+
+            const amount = this.toAmount2(
+                Number(
+                    amountInput ??
+                        (purpose === 'SUPPLEMENT'
+                            ? Math.max(0, Number(order.finalPayableAmount || 0) - Number(order.paidAmount || 0))
+                            : this.getUnpaidLiabilityAmount(order)),
+                ),
+            );
+            if (!Number.isFinite(amount) || amount <= 0) throw new BadRequestException('收款金额必须大于0');
+
+            const latest = await tx.orderPayment.findFirst({
+                where: {orderId, purpose},
+                orderBy: {attemptNo: 'desc'},
+                select: {attemptNo: true},
+            });
+            const attemptNo = Number(latest?.attemptNo || 0) + 1;
+            const clientSn = this.buildShouqianbaClientSn(orderId, purpose, attemptNo);
+            const expiresAt = new Date(Date.now() + 4 * 60 * 1000);
+            const payment = await tx.orderPayment.create({
+                data: {
+                    orderId,
+                    paymentNo: clientSn,
+                    clientSn,
+                    purpose,
+                    attemptNo,
+                    channel: 'SHOUQIANBA_WAP',
+                    status: OrderPayStatus.PENDING,
+                    amount,
+                    currency: 'CNY',
+                    expiresAt,
+                },
+            });
+            await tx.order.update({
+                where: {id: orderId},
+                data: {
+                    latestPaymentId: payment.id,
+                    payStatus: OrderPayStatus.PENDING,
+                },
+            });
+            return {
+                paymentId: payment.id,
+                orderId,
+                clientSn,
+                purpose,
+                attemptNo,
+                amount,
+                expiresAt,
+                paymentUrl: null,
+                qrCodeContent: null,
+                integrationStatus: 'WAITING_FOR_SHOUQIANBA_CREDENTIALS',
+            };
+        });
+        const result = await this.shouqianbaService.precreatePayment(prepared.paymentId);
+        if (String(result?.integrationStatus) === 'READY') {
+            await this.prisma.order.updateMany({
+                where: {
+                    id: orderId,
+                    isPaid: false,
+                    status: {in: [OrderStatus.DRAFT, OrderStatus.WAIT_PAYMENT]},
+                },
+                data: {
+                    status: OrderStatus.WAIT_PAYMENT,
+                    payStatus: OrderPayStatus.PENDING,
+                },
+            });
+        }
+        return result;
+    }
+
+    private async notifyUnpaidResponsible(order: any, overdue = false) {
+        const userId = Number(order?.unpaidResponsibleUserId || 0);
+        if (!userId) return;
+        const amount = this.getUnpaidLiabilityAmount(order);
+        const title = overdue ? '未收款订单已由客服余额承担' : '未收款订单催收提醒';
+        const content = overdue
+            ? `订单 ${order.autoSerial || order.id} 超过48小时未完成收款，已从你的余额扣除 ¥${amount.toFixed(2)}。`
+            : `订单 ${order.autoSerial || order.id} 仍未收款，请尽快完成 ¥${amount.toFixed(2)} 收款；超过48小时将由你的余额承担。`;
+        const type = overdue ? 'ORDER_UNPAID_AUTO_DEDUCTED' : 'ORDER_UNPAID_REMINDER';
+        await this.notificationsService.batchCreateNotifications({
+            userIds: [userId],
+            type: type as any,
+            title,
+            content,
+            payload: {
+                orderId: order.id,
+                autoSerial: order.autoSerial,
+                amount,
+                overdue,
+            },
+        });
+        await this.notificationsService.pushRealtimeToUsers({
+            userIds: [userId],
+            type,
+            title,
+            content,
+            route: `/orders/${order.id}`,
+            payload: {orderId: order.id, amount, overdue},
+        });
+    }
+
+    private async autoDeductOverdueUnpaidOrder(orderId: number) {
+        const deducted = await this.prisma.$transaction(async (tx) => {
+            await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
+            const order = await tx.order.findUnique({where: {id: orderId}});
+            if (!order || order.isPaid || order.isGifted || order.unpaidAutoDeductedAt) return null;
+            if (!order.unpaidSince || order.unpaidSince.getTime() > Date.now() - 48 * 60 * 60 * 1000) return null;
+            const userId = Number(order.unpaidResponsibleUserId || 0);
+            if (!userId) return null;
+            const amount = this.getUnpaidLiabilityAmount(order);
+            if (amount <= 0) return null;
+
+            await this.wallet.ensureWalletAccount(userId, tx as any);
+            await tx.$queryRawUnsafe('SELECT userId FROM wallet_accounts WHERE userId = ? FOR UPDATE', userId);
+            const accountAfter = await this.wallet.applyWalletAccountDelta(tx as any, userId, {
+                availableDelta: -amount,
+            });
+            const now = new Date();
+            await tx.walletTransaction.create({
+                data: {
+                    userId,
+                    direction: WalletDirection.OUT,
+                    bizType: WalletBizType.ORDER_UNPAID_CS_LIABILITY,
+                    amount,
+                    status: WalletTxStatus.AVAILABLE,
+                    sourceType: 'ORDER_UNPAID_CS_LIABILITY',
+                    sourceId: order.id,
+                    orderId: order.id,
+                    availableAfter: Number(accountAfter?.availableBalance ?? 0),
+                    frozenAfter: Number(accountAfter?.frozenBalance ?? 0),
+                    remark: `未收款订单 ${order.autoSerial || order.id} 超48小时，派单客服承担`,
+                },
+            });
+            const payment = await tx.orderPayment.create({
+                data: {
+                    orderId: order.id,
+                    paymentNo: `CSB-${order.id}-${Date.now()}`,
+                    purpose: 'CS_LIABILITY',
+                    channel: 'CUSTOMER_SERVICE_BALANCE',
+                    status: OrderPayStatus.SUCCESS,
+                    amount,
+                    currency: 'CNY',
+                    paidAt: now,
+                    verifiedAt: now,
+                    verificationSource: 'SYSTEM_48H_DEDUCT',
+                },
+            });
+            const responsible = await tx.user.findUnique({
+                where: {id: userId},
+                select: {name: true, userType: true},
+            });
+            await tx.orderReceipt.upsert({
+                where: {receiptKey: `CS_LIABILITY:${order.id}`},
+                update: {},
+                create: {
+                    receiptKey: `CS_LIABILITY:${order.id}`,
+                    orderId: order.id,
+                    autoSerial: order.autoSerial,
+                    kind: 'CS_LIABILITY',
+                    amount,
+                    paidAt: now,
+                    orderSource: order.orderSource || 'CUSTOMER_SERVICE_MANUAL',
+                    channel: 'CUSTOMER_SERVICE_BALANCE',
+                    dispatcherId: userId,
+                    dispatcherName: responsible?.name || null,
+                    dispatcherType: responsible?.userType || null,
+                    operatorId: userId,
+                },
+            });
+            await tx.order.update({
+                where: {id: order.id},
+                data: {
+                    isPaid: true,
+                    payStatus: OrderPayStatus.SUCCESS,
+                    paidAmount: amount,
+                    paymentTime: now,
+                    latestPaymentId: payment.id,
+                    unpaidAutoDeductedAt: now,
+                    unpaidAutoDeductedAmount: amount,
+                },
+            });
+            return {...order, unpaidAutoDeductedAt: now};
+        });
+        if (deducted) await this.notifyUnpaidResponsible(deducted, true);
+        return deducted;
+    }
+
+    @Cron('0 0 * * * *', {timeZone: 'Asia/Shanghai'})
+    async cronHandleUnpaidOrderLiability() {
+        const now = new Date();
+        const overdueAt = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+        const reminderCutoff = new Date(now.getTime() - 6 * 60 * 60 * 1000);
+        const rows = await this.prisma.order.findMany({
+            where: {
+                isPaid: false,
+                isGifted: false,
+                unpaidResponsibleUserId: {not: null},
+                unpaidSince: {not: null},
+                unpaidAutoDeductedAt: null,
+            },
+            orderBy: {unpaidSince: 'asc'},
+            take: 300,
+        });
+        for (const order of rows) {
+            try {
+                if (order.unpaidSince && order.unpaidSince <= overdueAt) {
+                    await this.autoDeductOverdueUnpaidOrder(order.id);
+                    continue;
+                }
+                if (!order.unpaidLastReminderAt || order.unpaidLastReminderAt <= reminderCutoff) {
+                    await this.notifyUnpaidResponsible(order, false);
+                    await this.prisma.order.updateMany({
+                        where: {id: order.id, isPaid: false},
+                        data: {unpaidLastReminderAt: now},
+                    });
+                }
+            } catch (error: any) {
+                this.logger.error(`[unpaid-order] process failed order=${order.id}: ${error?.message || error}`);
+            }
+        }
+    }
+
+    private getAutoConfirmAnchorAt(order: {dispatches?: Array<{completedAt?: Date | string | null}>; updatedAt?: Date | string | null}) {
         const completedAtList = Array.isArray(order?.dispatches)
             ? order.dispatches
-                .map((d) => (d?.completedAt ? new Date(d.completedAt) : null))
-                .filter((d): d is Date => d instanceof Date && !Number.isNaN(d.getTime()))
+                  .map((d) => (d?.completedAt ? new Date(d.completedAt) : null))
+                  .filter((d): d is Date => d instanceof Date && !Number.isNaN(d.getTime()))
             : [];
 
         if (completedAtList.length) {
@@ -415,15 +684,15 @@ export class OrdersService {
                     userId,
                     isActive: true,
                     rejectedAt: null,
-                    acceptedAt: { not: null },
+                    acceptedAt: {not: null},
                     dispatch: {
-                        status: { in: [DispatchStatus.ACCEPTED, DispatchStatus.SETTLING] },
+                        status: {in: [DispatchStatus.ACCEPTED, DispatchStatus.SETTLING]},
                     },
                 },
             });
 
             await tx.user.update({
-                where: { id: userId },
+                where: {id: userId},
                 data: {
                     workStatus: activeAcceptedCount > 0 ? PlayerWorkStatus.WORKING : PlayerWorkStatus.IDLE,
                 },
@@ -445,7 +714,7 @@ export class OrdersService {
     // 按 0.1 元精度均摊金额（对齐钱包余额精度），保证分摊和等于总额
     private splitSharedAmountByUsers(totalAmount: number, userIds: number[]) {
         const uniqueUserIds = Array.from(new Set((userIds || []).map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0)));
-        if (!uniqueUserIds.length) return [] as Array<{ userId: number; amount: number }>;
+        if (!uniqueUserIds.length) return [] as Array<{userId: number; amount: number}>;
 
         const totalTenths = Math.max(0, Math.round(Number(totalAmount || 0) * 10));
         const base = Math.floor(totalTenths / uniqueUserIds.length);
@@ -463,7 +732,7 @@ export class OrdersService {
 
     private splitAmountByUsers2(totalAmount: number, userIds: number[]) {
         const uniqueUserIds = this.normalizeIdArray(userIds);
-        if (!uniqueUserIds.length) return [] as Array<{ userId: number; amount: number }>;
+        if (!uniqueUserIds.length) return [] as Array<{userId: number; amount: number}>;
 
         const totalCents = Math.max(0, Math.round(Number(totalAmount || 0) * 100));
         const base = Math.floor(totalCents / uniqueUserIds.length);
@@ -484,9 +753,7 @@ export class OrdersService {
      */
     private splitAmountByWeights(totalAmount: number, weights: number[]) {
         const totalTenths = Math.max(0, Math.round(Number(totalAmount || 0) * 10));
-        const safeWeights = Array.isArray(weights)
-            ? weights.map((n) => Math.max(0, Number(n || 0)))
-            : [];
+        const safeWeights = Array.isArray(weights) ? weights.map((n) => Math.max(0, Number(n || 0))) : [];
         const weightSum = safeWeights.reduce((sum, n) => sum + n, 0);
 
         if (!safeWeights.length) {
@@ -506,9 +773,7 @@ export class OrdersService {
         const raw = safeWeights.map((w) => (totalTenths * w) / weightSum);
         const units = raw.map((v) => Math.floor(v));
         let remainder = totalTenths - units.reduce((sum, n) => sum + n, 0);
-        const order = raw
-            .map((v, idx) => ({ idx, frac: v - units[idx] }))
-            .sort((a, b) => b.frac - a.frac);
+        const order = raw.map((v, idx) => ({idx, frac: v - units[idx]})).sort((a, b) => b.frac - a.frac);
 
         for (let i = 0; i < order.length && remainder > 0; i += 1) {
             units[order[i].idx] += 1;
@@ -526,24 +791,20 @@ export class OrdersService {
 
         const roundScore = Math.round(n);
         if (roundScore >= 4) {
-            return { score: roundScore, ratingLabel: 'GOOD' as const };
+            return {score: roundScore, ratingLabel: 'GOOD' as const};
         }
         if (roundScore === 3) {
-            return { score: roundScore, ratingLabel: 'MEDIUM' as const };
+            return {score: roundScore, ratingLabel: 'MEDIUM' as const};
         }
-        return { score: roundScore, ratingLabel: 'BAD' as const };
+        return {score: roundScore, ratingLabel: 'BAD' as const};
     }
 
     private normalizeAfterSaleAction(action: any) {
-        const v = String(action || '').trim().toUpperCase();
+        const v = String(action || '')
+            .trim()
+            .toUpperCase();
         if (!v) return null;
-        const allow = new Set([
-            'RESPONSIBLE_50',
-            'RESPONSIBLE_100',
-            'MAINTENANCE_FEE',
-            'MAINTENANCE_REFUND',
-            'NO_ACTION',
-        ]);
+        const allow = new Set(['RESPONSIBLE_50', 'RESPONSIBLE_100', 'MAINTENANCE_FEE', 'MAINTENANCE_REFUND', 'NO_ACTION']);
         if (!allow.has(v)) {
             throw new BadRequestException('售后处理方式不合法');
         }
@@ -551,19 +812,13 @@ export class OrdersService {
     }
 
     private normalizeIdArray(input: any) {
-        return Array.isArray(input)
-            ? Array.from(
-                new Set(
-                    input
-                        .map((x) => Number(x))
-                        .filter((n) => Number.isFinite(n) && n > 0),
-                ),
-            )
-            : [];
+        return Array.isArray(input) ? Array.from(new Set(input.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0))) : [];
     }
 
     private resolveRenewalConfirmMode(dto: any): RenewalConfirmMode {
-        const action = String(dto?.renewalAction || '').trim().toUpperCase();
+        const action = String(dto?.renewalAction || '')
+            .trim()
+            .toUpperCase();
         if (action === 'INVALIDATE') return 'INVALIDATE';
         if (action === 'SETTLE') return 'SETTLE';
         return Boolean(dto?.invalidateRenewal) ? 'INVALIDATE' : 'SETTLE';
@@ -576,11 +831,7 @@ export class OrdersService {
     private resolveRenewalBonusBaseAmount(order: any, baseAmountField?: string) {
         const field = String(baseAmountField || 'paidAmount').trim();
         const raw =
-            field === 'settlementBaseAmount'
-                ? order?.settlementBaseAmount
-                : field === 'finalPayableAmount'
-                    ? order?.finalPayableAmount
-                    : order?.paidAmount;
+            field === 'settlementBaseAmount' ? order?.settlementBaseAmount : field === 'finalPayableAmount' ? order?.finalPayableAmount : order?.paidAmount;
         return this.toAmount2(Number(raw ?? 0));
     }
 
@@ -594,10 +845,7 @@ export class OrdersService {
             source: 'FALLBACK',
         };
 
-        const config = await this.systemConfigService.getJson<any>(
-            SystemConfigService.KEYS.ORDER_RENEWAL_BONUS_RULES,
-            null as any,
-        );
+        const config = await this.systemConfigService.getJson<any>(SystemConfigService.KEYS.ORDER_RENEWAL_BONUS_RULES, null as any);
         if (!config || config.enabled === false) return fallback;
 
         const baseAmount = this.resolveRenewalBonusBaseAmount(order, config.baseAmountField);
@@ -644,9 +892,9 @@ export class OrdersService {
         const config = await this.staffRuleEngineService.getConfig();
         const users = uniqueUserIds.length
             ? await tx.user.findMany({
-                where: { id: { in: uniqueUserIds } },
-                select: { id: true, staffTags: true },
-            })
+                  where: {id: {in: uniqueUserIds}},
+                  select: {id: true, staffTags: true},
+              })
             : [];
         const userById = new Map<number, any>(users.map((user: any) => [Number(user.id), user]));
         const defaultRule = this.staffRuleEngineService.resolveMatchedRule(config, []);
@@ -655,13 +903,16 @@ export class OrdersService {
         uniqueUserIds.forEach((userId) => {
             const user = userById.get(userId);
             const rule = this.staffRuleEngineService.resolveMatchedRule(config, user?.staffTags || []) || defaultRule;
-            map.set(userId, computeSettlementFreezeTime({
-                order,
-                freezeDaysConfig: {
-                    experienceDays: this.getExperienceFreezeDaysFromRule(rule),
-                    regularDays: this.getRegularFreezeDaysFromRule(rule),
-                },
-            }));
+            map.set(
+                userId,
+                computeSettlementFreezeTime({
+                    order,
+                    freezeDaysConfig: {
+                        experienceDays: this.getExperienceFreezeDaysFromRule(rule),
+                        regularDays: this.getRegularFreezeDaysFromRule(rule),
+                    },
+                }),
+            );
         });
 
         return map;
@@ -674,8 +925,16 @@ export class OrdersService {
     private resolveInitialDispatcher(order: {
         initialDispatcherId?: number | null;
         dispatcherId?: number | null;
-        initialDispatcher?: { id?: number | null; name?: string | null; userType?: string | null } | null;
-        dispatcher?: { id?: number | null; name?: string | null; userType?: string | null } | null;
+        initialDispatcher?: {
+            id?: number | null;
+            name?: string | null;
+            userType?: string | null;
+        } | null;
+        dispatcher?: {
+            id?: number | null;
+            name?: string | null;
+            userType?: string | null;
+        } | null;
     }) {
         const initialDispatcherId = Number(order?.initialDispatcherId ?? 0) || null;
         if (initialDispatcherId) {
@@ -694,10 +953,10 @@ export class OrdersService {
 
     private async buildRenewalBonusEligibilitySnapshotTx(tx: any, renewalPlayerIds: number[], userMap?: Map<number, any>) {
         const normalizedIds = this.normalizeIdArray(renewalPlayerIds).sort((a, b) => a - b);
-        if (!normalizedIds.length) return { eligibleUserIds: [], snapshot: [] };
+        if (!normalizedIds.length) return {eligibleUserIds: [], snapshot: []};
         const rows = await tx.excellentStaff.findMany({
-            where: { userId: { in: normalizedIds }, status: 'ACTIVE' },
-            select: { userId: true, assignedAt: true },
+            where: {userId: {in: normalizedIds}, status: 'ACTIVE'},
+            select: {userId: true, assignedAt: true},
         });
         const rowMap = new Map<number, any>(rows.map((row: any) => [Number(row.userId), row]));
         const eligibleUserIds = normalizedIds.filter((id) => rowMap.has(id));
@@ -712,7 +971,7 @@ export class OrdersService {
                 excellentAssignedAt: excellent?.assignedAt || null,
             };
         });
-        return { eligibleUserIds, snapshot };
+        return {eligibleUserIds, snapshot};
     }
 
     private async createRenewalGroupTx(params: {
@@ -724,7 +983,7 @@ export class OrdersService {
         operatorId: number;
         attributionType?: 'RENEWAL' | 'DESIGNATED';
     }) {
-        const { tx, orderId, dispatchId, playerIds, renewalPlayerIds, operatorId } = params;
+        const {tx, orderId, dispatchId, playerIds, renewalPlayerIds, operatorId} = params;
         const attributionType = params.attributionType === 'DESIGNATED' ? 'DESIGNATED' : 'RENEWAL';
         const attributionLabel = attributionType === 'DESIGNATED' ? '指定' : '续单';
         const normalizedPlayers = this.normalizeIdArray(playerIds);
@@ -739,8 +998,8 @@ export class OrdersService {
         }
 
         const users = await tx.user.findMany({
-            where: { id: { in: normalizedRenewalPlayers } },
-            select: { id: true, name: true, phone: true },
+            where: {id: {in: normalizedRenewalPlayers}},
+            select: {id: true, name: true, phone: true},
         });
         if (users.length !== normalizedRenewalPlayers.length) {
             throw new BadRequestException(`${attributionLabel}服务者不存在或已不可用`);
@@ -754,17 +1013,18 @@ export class OrdersService {
                 phone: u?.phone || null,
             };
         });
-        const eligibility = attributionType === 'DESIGNATED'
-            ? {
-                eligibleUserIds: normalizedRenewalPlayers,
-                snapshot: normalizedRenewalPlayers.map((id) => ({
-                    userId: id,
-                    name: userMap.get(id)?.name || `#${id}`,
-                    eligible: true,
-                    source: 'DESIGNATED_ALL_STAFF',
-                })),
-            }
-            : await this.buildRenewalBonusEligibilitySnapshotTx(tx, normalizedRenewalPlayers, userMap);
+        const eligibility =
+            attributionType === 'DESIGNATED'
+                ? {
+                      eligibleUserIds: normalizedRenewalPlayers,
+                      snapshot: normalizedRenewalPlayers.map((id) => ({
+                          userId: id,
+                          name: userMap.get(id)?.name || `#${id}`,
+                          eligible: true,
+                          source: 'DESIGNATED_ALL_STAFF',
+                      })),
+                  }
+                : await this.buildRenewalBonusEligibilitySnapshotTx(tx, normalizedRenewalPlayers, userMap);
 
         const group = await tx.orderRenewalGroup.create({
             data: {
@@ -782,7 +1042,7 @@ export class OrdersService {
         });
 
         await tx.order.update({
-            where: { id: orderId },
+            where: {id: orderId},
             data: {
                 isRenewal: true,
                 inviter: null,
@@ -801,19 +1061,23 @@ export class OrdersService {
         mode: RenewalConfirmMode;
         invalidateReason?: string;
     }) {
-        const { tx, order, settlementBatchId, operatorId, mode } = params;
+        const {tx, order, settlementBatchId, operatorId, mode} = params;
         const orderId = Number(order?.id);
         const group = await tx.orderRenewalGroup.findUnique({
-            where: { orderId },
-            include: { bonuses: true },
+            where: {orderId},
+            include: {bonuses: true},
         });
-        if (!group) return { skipped: 'NO_RENEWAL_GROUP' };
+        if (!group) return {skipped: 'NO_RENEWAL_GROUP'};
         const attributionType = String(group.attributionType || 'RENEWAL').toUpperCase();
         const attributionLabel = attributionType === 'DESIGNATED' ? '指定' : '续单';
 
-        if (String(group.status) === 'SETTLED') return { skipped: 'ALREADY_SETTLED', groupId: group.id };
+        if (String(group.status) === 'SETTLED') return {skipped: 'ALREADY_SETTLED', groupId: group.id};
         if (['INVALIDATED', 'REVERSED'].includes(String(group.status))) {
-            return { skipped: 'ALREADY_INACTIVE', groupId: group.id, status: group.status };
+            return {
+                skipped: 'ALREADY_INACTIVE',
+                groupId: group.id,
+                status: group.status,
+            };
         }
         if (String(group.status) !== 'PENDING') {
             throw new BadRequestException(`${attributionLabel}状态异常，无法确认结算：${group.status}`);
@@ -822,7 +1086,7 @@ export class OrdersService {
         if (mode === 'INVALIDATE') {
             const reason = this.getRenewalInvalidateReason(params.invalidateReason);
             await tx.orderRenewalGroup.update({
-                where: { id: group.id },
+                where: {id: group.id},
                 data: {
                     status: 'INVALIDATED',
                     invalidatedBy: operatorId,
@@ -831,27 +1095,25 @@ export class OrdersService {
                 },
             });
             await tx.order.update({
-                where: { id: orderId },
+                where: {id: orderId},
                 data: {
                     renewalAmount: 0,
                     renewalCount: 0,
                 },
             });
-            return { action: 'INVALIDATED', groupId: group.id, reason };
+            return {action: 'INVALIDATED', groupId: group.id, reason};
         }
 
         const hasEligibilitySnapshot = Array.isArray(group.bonusEligibleUserIds);
         const allRenewalMemberUserIds = this.normalizeIdArray(group.memberUserIds);
-        const eligibleUserIds = hasEligibilitySnapshot
-            ? this.normalizeIdArray(group.bonusEligibleUserIds)
-            : allRenewalMemberUserIds;
+        const eligibleUserIds = hasEligibilitySnapshot ? this.normalizeIdArray(group.bonusEligibleUserIds) : allRenewalMemberUserIds;
         if (!allRenewalMemberUserIds.length) {
             throw new BadRequestException(`${attributionLabel}组缺少${attributionLabel}服务者，无法结算`);
         }
         if (!eligibleUserIds.length) {
             const settledAt = new Date();
             await tx.orderRenewalGroup.update({
-                where: { id: group.id },
+                where: {id: group.id},
                 data: {
                     status: 'SETTLED',
                     renewalOrderCount: 1,
@@ -865,13 +1127,16 @@ export class OrdersService {
                 },
             });
             await tx.order.update({
-                where: { id: orderId },
+                where: {id: orderId},
                 data: {
                     renewalAmount: 0,
                     renewalCount: 1,
                 },
             });
-            return { action: 'SETTLED_NO_ELIGIBLE_EXCELLENT_STAFF', groupId: group.id };
+            return {
+                action: 'SETTLED_NO_ELIGIBLE_EXCELLENT_STAFF',
+                groupId: group.id,
+            };
         }
 
         const rule = await this.resolveRenewalBonusRule(order);
@@ -887,7 +1152,7 @@ export class OrdersService {
 
         if (bonusBaseAmount <= 0 || bonusRate <= 0 || theoreticalBonusTotalAmount <= 0 || bonusTotalAmount <= 0) {
             await tx.orderRenewalGroup.update({
-                where: { id: group.id },
+                where: {id: group.id},
                 data: {
                     status: 'SETTLED',
                     renewalOrderCount: 1,
@@ -901,13 +1166,18 @@ export class OrdersService {
                 },
             });
             await tx.order.update({
-                where: { id: orderId },
+                where: {id: orderId},
                 data: {
                     renewalAmount: bonusBaseAmount,
                     renewalCount: 1,
                 },
             });
-            return { action: 'SETTLED_NO_BONUS', groupId: group.id, bonusBaseAmount, bonusRate };
+            return {
+                action: 'SETTLED_NO_BONUS',
+                groupId: group.id,
+                bonusBaseAmount,
+                bonusRate,
+            };
         }
 
         await this.assertPersistedOrderSettlementPayoutWithinBaseTx({
@@ -933,19 +1203,22 @@ export class OrdersService {
                     settlementBatchId,
                 },
             });
-            const walletTx = await this.wallet.creditAvailableBalance({
-                userId: share.userId,
-                amount: share.amount,
-                bizType: WalletBizType.ORDER_RENEWAL_BONUS,
-                sourceType: 'ORDER_RENEWAL_BONUS',
-                sourceId: bonus.id,
-                orderId,
-                dispatchId: Number(group.dispatchId || 0) || null,
-                remark: `${attributionLabel}分红：订单 ${order?.autoSerial || `#${orderId}`}`,
-            }, tx);
+            const walletTx = await this.wallet.creditAvailableBalance(
+                {
+                    userId: share.userId,
+                    amount: share.amount,
+                    bizType: WalletBizType.ORDER_RENEWAL_BONUS,
+                    sourceType: 'ORDER_RENEWAL_BONUS',
+                    sourceId: bonus.id,
+                    orderId,
+                    dispatchId: Number(group.dispatchId || 0) || null,
+                    remark: `${attributionLabel}分红：订单 ${order?.autoSerial || `#${orderId}`}`,
+                },
+                tx,
+            );
             await tx.orderRenewalBonus.update({
-                where: { id: bonus.id },
-                data: { walletTransactionId: Number(walletTx.id) || null },
+                where: {id: bonus.id},
+                data: {walletTransactionId: Number(walletTx.id) || null},
             });
             bonusRows.push({
                 id: bonus.id,
@@ -956,7 +1229,7 @@ export class OrdersService {
         }
 
         await tx.orderRenewalGroup.update({
-            where: { id: group.id },
+            where: {id: group.id},
             data: {
                 status: 'SETTLED',
                 renewalOrderCount: 1,
@@ -970,7 +1243,7 @@ export class OrdersService {
             },
         });
         await tx.order.update({
-            where: { id: orderId },
+            where: {id: orderId},
             data: {
                 renewalAmount: bonusBaseAmount,
                 renewalCount: 1,
@@ -998,18 +1271,18 @@ export class OrdersService {
         reason: string;
         groupStatusAfter?: 'INVALIDATED' | 'REVERSED';
     }) {
-        const { tx, orderId, operatorId } = params;
+        const {tx, orderId, operatorId} = params;
         const reason = this.getRenewalInvalidateReason(params.reason, '续单分红冲正需填写原因');
         const group = await tx.orderRenewalGroup.findUnique({
-            where: { orderId: Number(orderId) },
-            include: { bonuses: true },
+            where: {orderId: Number(orderId)},
+            include: {bonuses: true},
         });
-        if (!group) return { skipped: 'NO_RENEWAL_GROUP' };
+        if (!group) return {skipped: 'NO_RENEWAL_GROUP'};
 
         const now = new Date();
         if (String(group.status) === 'PENDING') {
             await tx.orderRenewalGroup.update({
-                where: { id: group.id },
+                where: {id: group.id},
                 data: {
                     status: 'INVALIDATED',
                     invalidatedBy: operatorId,
@@ -1018,14 +1291,18 @@ export class OrdersService {
                 },
             });
             await tx.order.update({
-                where: { id: Number(orderId) },
-                data: { renewalAmount: 0, renewalCount: 0 },
+                where: {id: Number(orderId)},
+                data: {renewalAmount: 0, renewalCount: 0},
             });
-            return { action: 'INVALIDATED_PENDING', groupId: group.id, reason };
+            return {action: 'INVALIDATED_PENDING', groupId: group.id, reason};
         }
 
         if (!['SETTLED', 'REVERSED'].includes(String(group.status))) {
-            return { skipped: 'ALREADY_INACTIVE', groupId: group.id, status: group.status };
+            return {
+                skipped: 'ALREADY_INACTIVE',
+                groupId: group.id,
+                status: group.status,
+            };
         }
 
         const reversedRows: any[] = [];
@@ -1034,7 +1311,7 @@ export class OrdersService {
             const amount = this.toAmount2(Number(bonus.bonusShareAmount ?? 0));
             if (amount <= 0) {
                 await tx.orderRenewalBonus.update({
-                    where: { id: bonus.id },
+                    where: {id: bonus.id},
                     data: {
                         status: 'REVERSED',
                         reversalReason: reason,
@@ -1052,16 +1329,16 @@ export class OrdersService {
                         sourceId,
                     },
                 },
-                select: { id: true },
+                select: {id: true},
             });
 
             let reversalTxId = Number(existing?.id || 0);
             if (!existing) {
                 await this.wallet.ensureWalletAccount(Number(bonus.userId), tx);
                 const accountAfter = await tx.walletAccount.update({
-                    where: { userId: Number(bonus.userId) },
+                    where: {userId: Number(bonus.userId)},
                     data: {
-                        availableBalance: { decrement: amount },
+                        availableBalance: {decrement: amount},
                     },
                     select: {
                         availableBalance: true,
@@ -1084,19 +1361,22 @@ export class OrdersService {
                         frozenAfter: this.toAmount2(Number(accountAfter?.frozenBalance ?? 0)),
                         remark: reason,
                     },
-                    select: { id: true },
+                    select: {id: true},
                 });
                 reversalTxId = Number(reversalTx.id);
             }
 
             if (bonus.walletTransactionId) {
                 await tx.walletTransaction.updateMany({
-                    where: { id: Number(bonus.walletTransactionId), status: { not: WalletTxStatus.REVERSED } },
-                    data: { status: WalletTxStatus.REVERSED },
+                    where: {
+                        id: Number(bonus.walletTransactionId),
+                        status: {not: WalletTxStatus.REVERSED},
+                    },
+                    data: {status: WalletTxStatus.REVERSED},
                 });
             }
             await tx.orderRenewalBonus.update({
-                where: { id: bonus.id },
+                where: {id: bonus.id},
                 data: {
                     status: 'REVERSED',
                     reversalWalletTransactionId: reversalTxId || null,
@@ -1113,7 +1393,7 @@ export class OrdersService {
         }
 
         await tx.orderRenewalGroup.update({
-            where: { id: group.id },
+            where: {id: group.id},
             data: {
                 status: params.groupStatusAfter || 'REVERSED',
                 invalidatedBy: operatorId,
@@ -1122,8 +1402,8 @@ export class OrdersService {
             },
         });
         await tx.order.update({
-            where: { id: Number(orderId) },
-            data: { renewalAmount: 0, renewalCount: 0 },
+            where: {id: Number(orderId)},
+            data: {renewalAmount: 0, renewalCount: 0},
         });
 
         return {
@@ -1145,7 +1425,7 @@ export class OrdersService {
         skipValidation?: boolean;
         defaultToGood?: boolean;
     }) {
-        const { order, settlementsToCreate } = params;
+        const {order, settlementsToCreate} = params;
         const playerEvaluations = Array.isArray(params.playerEvaluations) ? params.playerEvaluations : [];
         const autoConfirm = Boolean(params.autoConfirm);
         const skipValidation = Boolean(params.skipValidation);
@@ -1156,12 +1436,12 @@ export class OrdersService {
         const orderPaidAmount = this.getSettlementBaseAmountFromOrder(order);
         const tipPoolTotal = roundMix1(orderPaidAmount * 0.03);
         const csPoolTotal = roundMix1(orderPaidAmount * 0.01);
-        const orderCutRaw = Number.isFinite(Number(order?.customClubRate))
-            ? order.customClubRate
-            : null;
+        const orderCutRaw = Number.isFinite(Number(order?.customClubRate)) ? order.customClubRate : null;
         const projectCutRaw = Number.isFinite(Number(order?.projectSnapshot?.clubRate))
             ? order.projectSnapshot.clubRate
-            : (Number.isFinite(Number(order?.project?.clubRate)) ? order.project?.clubRate : null);
+            : Number.isFinite(Number(order?.project?.clubRate))
+              ? order.project?.clubRate
+              : null;
         const hasFixedClubRate = orderCutRaw !== null || projectCutRaw !== null;
 
         const playerRows = settlementsToCreate.filter((s: any) => String(s?.settlementType || '') !== 'CUSTOMER_SERVICE');
@@ -1171,7 +1451,7 @@ export class OrdersService {
         const csRows = settlementsToCreate.filter((s: any) => String(s?.settlementType || '') === 'CUSTOMER_SERVICE');
 
         if (!adjustablePlayerRows.length) {
-            return { settlementsToCreate, evaluationRows: [] as any[] };
+            return {settlementsToCreate, evaluationRows: [] as any[]};
         }
 
         const evalMap = new Map<string, any>();
@@ -1202,7 +1482,7 @@ export class OrdersService {
             if (!Number.isFinite(dispatchId) || dispatchId <= 0 || !Number.isFinite(playerUserId) || playerUserId <= 0) {
                 continue;
             }
-            const { score, ratingLabel } = this.normalizePlayerEvaluationLabel(item?.score);
+            const {score, ratingLabel} = this.normalizePlayerEvaluationLabel(item?.score);
             const responsibleUserIds = this.normalizeIdArray(item?.responsibleUserIds);
             const tippedUserIds = this.normalizeIdArray(item?.tippedUserIds);
             const afterSaleHandled = Boolean(item?.afterSaleHandled);
@@ -1231,11 +1511,11 @@ export class OrdersService {
             throw new BadRequestException(`请先完成全部打手评价：${Array.from(new Set(missingKeys)).join(',')}`);
         }
 
-        const finalTakesAll = this.getBillingModeFromOrder(order) === BillingMode.GUARANTEED
-            && resolveGuaranteedSettlementPolicy(order).mode === 'FINAL_ROUND_TAKES_ALL';
-        const completedDispatchIds = new Set((order?.dispatches || [])
-            .filter((d: any) => String(d?.status) === String(DispatchStatus.COMPLETED))
-            .map((d: any) => Number(d.id)));
+        const finalTakesAll =
+            this.getBillingModeFromOrder(order) === BillingMode.GUARANTEED && resolveGuaranteedSettlementPolicy(order).mode === 'FINAL_ROUND_TAKES_ALL';
+        const completedDispatchIds = new Set(
+            (order?.dispatches || []).filter((d: any) => String(d?.status) === String(DispatchStatus.COMPLETED)).map((d: any) => Number(d.id)),
+        );
 
         const rowStates = adjustablePlayerRows.map((row: any) => {
             const key = this.buildPlayerEvaluationKey(Number(row.dispatchId), Number(row.userId));
@@ -1248,9 +1528,7 @@ export class OrdersService {
             // 全额模式的最后完成轮已经是“平台抽成后的全部收益”，不再被中/差评基础比例降到 65%；
             // 售后责任扣款、维护费及订单打赏仍沿用统一后处理规则。
             const keepFinalRoundFull = finalTakesAll && completedDispatchIds.has(Number(row.dispatchId));
-            const baseFinalBeforeExtras = isBombLoss || keepFinalRoundFull
-                ? currentFinal
-                : (evalItem.ratingLabel === 'GOOD' ? currentFinal : base65);
+            const baseFinalBeforeExtras = isBombLoss || keepFinalRoundFull ? currentFinal : evalItem.ratingLabel === 'GOOD' ? currentFinal : base65;
             return {
                 key,
                 row,
@@ -1319,8 +1597,8 @@ export class OrdersService {
         const allowedTipUserIds = Array.from(goodParticipantIds).filter((userId) => {
             if (badParticipantIds.has(Number(userId))) return false;
             if (!finalTakesAll) return true;
-            return (userStates.get(Number(userId)) || []).some((st: any) =>
-                completedDispatchIds.has(Number(st.dispatchId)) && Number(st.baseFinalBeforeExtras ?? 0) > 0,
+            return (userStates.get(Number(userId)) || []).some(
+                (st: any) => completedDispatchIds.has(Number(st.dispatchId)) && Number(st.baseFinalBeforeExtras ?? 0) > 0,
             );
         });
         const requestedTipUserIdsFiltered = requestedTipUserIds.filter((userId) => allowedTipUserIds.includes(Number(userId)));
@@ -1337,20 +1615,23 @@ export class OrdersService {
                 throw new BadRequestException(`打赏开关已关闭，但仍提交了打赏打手，无法结单：orderId=${order.id}`);
             }
         }
-        const legacyTipUserIds = Array.from(new Set(
-            rowStates
-                .filter((st) => st.evalItem.ratingLabel === 'GOOD')
-                .flatMap((st) => st.evalItem.tippedUserIds || [])
-                .map((x) => Number(x))
-                .filter((n) => Number.isFinite(n) && n > 0 && allowedTipUserIds.includes(Number(n))),
-        ));
-        const tippedUserIds = hasOrderTipPayload
-            ? (orderTipEnabled ? requestedTipUserIdsFiltered : [])
-            : legacyTipUserIds;
+        const legacyTipUserIds = Array.from(
+            new Set(
+                rowStates
+                    .filter((st) => st.evalItem.ratingLabel === 'GOOD')
+                    .flatMap((st) => st.evalItem.tippedUserIds || [])
+                    .map((x) => Number(x))
+                    .filter((n) => Number.isFinite(n) && n > 0 && allowedTipUserIds.includes(Number(n))),
+            ),
+        );
+        const tippedUserIds = hasOrderTipPayload ? (orderTipEnabled ? requestedTipUserIdsFiltered : []) : legacyTipUserIds;
 
         const tipByUser = new Map<number, number>();
         if (tippedUserIds.length > 0 && tipPoolTotal > 0) {
-            const shares = this.splitAmountByWeights(tipPoolTotal, tippedUserIds.map(() => 1));
+            const shares = this.splitAmountByWeights(
+                tipPoolTotal,
+                tippedUserIds.map(() => 1),
+            );
             tippedUserIds.forEach((userId, idx) => {
                 const share = Number(shares[idx] ?? 0);
                 if (share > 0) tipByUser.set(Number(userId), share);
@@ -1358,11 +1639,14 @@ export class OrdersService {
         }
 
         // 3) 按用户层面分配 tip / penalty 到每条结算行
-        const rowAdjustments = new Map<string, {
-            tipAmount: number;
-            penaltyAmount: number;
-            maintenanceFeeAmount: number;
-        }>();
+        const rowAdjustments = new Map<
+            string,
+            {
+                tipAmount: number;
+                penaltyAmount: number;
+                maintenanceFeeAmount: number;
+            }
+        >();
 
         for (const [userId, rows] of userStates.entries()) {
             const penaltyTotal = roundMix1(Number(penaltyByUser.get(userId) || 0));
@@ -1391,10 +1675,7 @@ export class OrdersService {
         const allWeights = rowStates.map((r) => {
             const adj = rowAdjustments.get(r.key);
             const preCs = roundMix1(
-                (Number(r.baseFinalBeforeExtras ?? 0)
-                    - Number(adj?.penaltyAmount ?? 0)
-                    - Number(adj?.maintenanceFeeAmount ?? 0))
-                + Number(adj?.tipAmount ?? 0),
+                Number(r.baseFinalBeforeExtras ?? 0) - Number(adj?.penaltyAmount ?? 0) - Number(adj?.maintenanceFeeAmount ?? 0) + Number(adj?.tipAmount ?? 0),
             );
             return Math.max(0, preCs);
         });
@@ -1437,28 +1718,23 @@ export class OrdersService {
                 return;
             }
 
-            const adjust = rowAdjustments.get(st.key) || { tipAmount: 0, penaltyAmount: 0, maintenanceFeeAmount: 0 };
+            const adjust = rowAdjustments.get(st.key) || {
+                tipAmount: 0,
+                penaltyAmount: 0,
+                maintenanceFeeAmount: 0,
+            };
             const csAmount = roundMix1(Number(csShares[idx] ?? 0));
             const preCsFinal = roundMix1(
-                (Number(st.baseFinalBeforeExtras ?? 0)
-                    - Number(adjust.penaltyAmount ?? 0)
-                    - Number(adjust.maintenanceFeeAmount ?? 0))
-                + Number(adjust.tipAmount ?? 0),
+                Number(st.baseFinalBeforeExtras ?? 0) -
+                    Number(adjust.penaltyAmount ?? 0) -
+                    Number(adjust.maintenanceFeeAmount ?? 0) +
+                    Number(adjust.tipAmount ?? 0),
             );
             // 炸单轮必须保留负数结算值，不能在这里钳成 0。
             // 负数意味着该轮需要作为补单/炸单损耗进入后续结算与钱包冲正链路。
             const playerGrossBeforeCs = roundMix1(preCsFinal);
-            const finalEarnings = hasFixedClubRate
-                ? roundMix1(playerGrossBeforeCs - csAmount)
-                : roundMix1(playerGrossBeforeCs);
-            const clubEarnings = roundMix1(
-                Math.max(
-                    0,
-                    Number(st.baseAmount ?? 0)
-                    - Number(finalEarnings ?? 0)
-                    - Number(csAmount ?? 0),
-                ),
-            );
+            const finalEarnings = hasFixedClubRate ? roundMix1(playerGrossBeforeCs - csAmount) : roundMix1(playerGrossBeforeCs);
+            const clubEarnings = roundMix1(Math.max(0, Number(st.baseAmount ?? 0) - Number(finalEarnings ?? 0) - Number(csAmount ?? 0)));
 
             row.calculatedEarnings = finalEarnings;
             row.manualAdjustment = 0;
@@ -1492,13 +1768,11 @@ export class OrdersService {
         });
 
         // 5) CS settlement 行保持其自身收益，不参与评级扣款
-        const playerBaseTotal = roundMix1(
-            regularPlayerRows.reduce((sum, st: any) => sum + Number(st.contributionBaseAmount ?? 0), 0),
-        );
+        const playerBaseTotal = roundMix1(regularPlayerRows.reduce((sum, st: any) => sum + Number(st.contributionBaseAmount ?? 0), 0));
         // 结算总额只看实际要入钱包/发放的 finalEarnings，clubEarnings 只是内部拆账，不参与总额校验。
         const playerTotalBeforeCs = roundMix1(
-            regularPlayerRows.reduce((sum, st: any) => sum + Number(st.finalEarnings ?? 0), 0)
-            + carryCompRows.reduce((sum, st: any) => sum + Number(st.finalEarnings ?? 0), 0),
+            regularPlayerRows.reduce((sum, st: any) => sum + Number(st.finalEarnings ?? 0), 0) +
+                carryCompRows.reduce((sum, st: any) => sum + Number(st.finalEarnings ?? 0), 0),
         );
         // 炸单补单额度：
         // - 直接按“评级调整前的原始结算值”中出现的负数轮次绝对值求和
@@ -1507,12 +1781,10 @@ export class OrdersService {
         const bombLossAllowance = roundMix1(
             rowStates.reduce((sum, st: any) => {
                 const v = Number(st.currentFinal ?? 0);
-                return v < 0 ? sum + (-v) : sum;
+                return v < 0 ? sum + -v : sum;
             }, 0),
         );
-        const csRowTotal = roundMix1(
-            csRows.reduce((sum, r: any) => sum + Number(r.finalEarnings ?? r.calculatedEarnings ?? 0), 0),
-        );
+        const csRowTotal = roundMix1(csRows.reduce((sum, r: any) => sum + Number(r.finalEarnings ?? r.calculatedEarnings ?? 0), 0));
 
         // 实际已支出总额：
         // - 普通打手的实际发放金额
@@ -1630,42 +1902,85 @@ export class OrdersService {
         return 'MIXED';
     }
 
-    private async resolveMemberOrderDiscount(input: { customerUserId?: number | null; project: any; originalAmount: number }) {
+    private async resolveMemberOrderDiscount(input: {customerUserId?: number | null; project: any; originalAmount: number}) {
         const userId = Number(input.customerUserId || 0);
-        if (!userId || input.originalAmount <= 0) return { amount: 0, rate: 1, levelCode: null, benefitId: null };
-        const profile = await this.prisma.memberProfile.findUnique({ where: { userId } });
-        if (!profile?.levelCode) return { amount: 0, rate: 1, levelCode: null, benefitId: null };
-        const level = await this.prisma.memberLevelConfig.findUnique({ where: { code: profile.levelCode } });
-        if (!level) return { amount: 0, rate: 1, levelCode: profile.levelCode, benefitId: null };
+        if (!userId || input.originalAmount <= 0) return {amount: 0, rate: 1, levelCode: null, benefitId: null};
+        const profile = await this.prisma.memberProfile.findUnique({
+            where: {userId},
+        });
+        if (!profile?.levelCode) return {amount: 0, rate: 1, levelCode: null, benefitId: null};
+        const level = await this.prisma.memberLevelConfig.findUnique({
+            where: {code: profile.levelCode},
+        });
+        if (!level)
+            return {
+                amount: 0,
+                rate: 1,
+                levelCode: profile.levelCode,
+                benefitId: null,
+            };
         const rule = await (this.prisma as any).memberLevelBenefit.findFirst({
             where: {
                 levelId: level.id,
                 enabled: true,
                 grantMode: 'AUTOMATIC_DISCOUNT',
-                benefit: { enabled: true, category: 'ORDER_DISCOUNT' },
+                benefit: {enabled: true, category: 'ORDER_DISCOUNT'},
             },
-            include: { benefit: true },
-            orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+            include: {benefit: true},
+            orderBy: [{sortOrder: 'asc'}, {id: 'asc'}],
         });
-        if (!rule) return { amount: 0, rate: 1, levelCode: profile.levelCode, benefitId: null };
+        if (!rule)
+            return {
+                amount: 0,
+                rate: 1,
+                levelCode: profile.levelCode,
+                benefitId: null,
+            };
         const config = rule.config && typeof rule.config === 'object' ? rule.config : {};
-        const excludedCategoryIds = Array.isArray(config.excludedCategoryIds)
-            ? config.excludedCategoryIds.map((item: any) => String(item || '').trim()) : [];
+        const excludedCategoryIds = Array.isArray(config.excludedCategoryIds) ? config.excludedCategoryIds.map((item: any) => String(item || '').trim()) : [];
         // 会员折扣排除范围统一按商品分类判断。订单类型属于结算/业务属性，
         // 同一类型下可能包含多个不同分类，不能作为会员折扣适用范围依据。
         if (excludedCategoryIds.includes(String(input.project?.category || '').trim())) {
-            return { amount: 0, rate: 1, levelCode: profile.levelCode, benefitId: Number(rule.benefitId) };
+            return {
+                amount: 0,
+                rate: 1,
+                levelCode: profile.levelCode,
+                benefitId: Number(rule.benefitId),
+            };
         }
         // 兼容尚未在新页面保存过的历史配置：仅当分类排除列表为空时，临时读取
         // 旧 excludedProjectTypes。配置任意分类并保存后即完全切换到分类口径。
-        const legacyExcludedProjectTypes = excludedCategoryIds.length === 0 && Array.isArray(config.excludedProjectTypes)
-            ? config.excludedProjectTypes.map((item: any) => String(item || '').trim().toUpperCase()) : [];
-        if (legacyExcludedProjectTypes.includes(String(input.project?.type || '').trim().toUpperCase())) {
-            return { amount: 0, rate: 1, levelCode: profile.levelCode, benefitId: Number(rule.benefitId) };
+        const legacyExcludedProjectTypes =
+            excludedCategoryIds.length === 0 && Array.isArray(config.excludedProjectTypes)
+                ? config.excludedProjectTypes.map((item: any) =>
+                      String(item || '')
+                          .trim()
+                          .toUpperCase(),
+                  )
+                : [];
+        if (
+            legacyExcludedProjectTypes.includes(
+                String(input.project?.type || '')
+                    .trim()
+                    .toUpperCase(),
+            )
+        ) {
+            return {
+                amount: 0,
+                rate: 1,
+                levelCode: profile.levelCode,
+                benefitId: Number(rule.benefitId),
+            };
         }
         let rate = Number(config.rate ?? config.discountRate ?? 1);
         if (rate > 1) rate /= 100;
-        if (!(rate > 0 && rate <= 1)) return { amount: 0, rate: 1, levelCode: profile.levelCode, benefitId: Number(rule.benefitId) };
+        if (!(rate > 0 && rate <= 1))
+            return {
+                amount: 0,
+                rate: 1,
+                levelCode: profile.levelCode,
+                benefitId: Number(rule.benefitId),
+            };
         return {
             amount: this.toAmount2(input.originalAmount * (1 - rate)),
             rate,
@@ -1674,29 +1989,36 @@ export class OrdersService {
         };
     }
 
-    async getMemberOrderContext(input: { userId: number; projectId: number; originalAmount: number }) {
+    async getMemberOrderContext(input: {userId: number; projectId: number; originalAmount: number}) {
         const userId = Number(input.userId || 0);
         const projectId = Number(input.projectId || 0);
         const originalAmount = this.toAmount2(Math.max(0, Number(input.originalAmount || 0)));
         if (!Number.isSafeInteger(userId) || userId <= 0) throw new BadRequestException('会员ID无效');
         if (!Number.isSafeInteger(projectId) || projectId <= 0) throw new BadRequestException('项目ID无效');
         const [user, project] = await Promise.all([
-            this.prisma.user.findUnique({ where: { id: userId }, select: { id: true } }),
+            this.prisma.user.findUnique({
+                where: {id: userId},
+                select: {id: true},
+            }),
             this.prisma.gameProject.findUnique({
-                where: { id: projectId },
-                select: { id: true, type: true, category: true, gameType: true },
+                where: {id: projectId},
+                select: {id: true, type: true, category: true, gameType: true},
             }),
         ]);
         if (!user) throw new NotFoundException('会员不存在');
         if (!project) throw new NotFoundException('项目不存在');
         const [discount, cards] = await Promise.all([
-            this.resolveMemberOrderDiscount({ customerUserId: userId, project, originalAmount }),
+            this.resolveMemberOrderDiscount({
+                customerUserId: userId,
+                project,
+                originalAmount,
+            }),
             this.prisma.memberGameCard.findMany({
                 where: {
                     userId,
-                    ...(project.gameType ? { gameCategoryId: String(project.gameType) } : {}),
+                    ...(project.gameType ? {gameCategoryId: String(project.gameType)} : {}),
                 },
-                orderBy: [{ isPrimary: 'desc' }, { id: 'asc' }],
+                orderBy: [{isPrimary: 'desc'}, {id: 'asc'}],
                 select: {
                     id: true,
                     gameCategoryId: true,
@@ -1722,40 +2044,52 @@ export class OrdersService {
         };
     }
 
-    private async allocateMemberBalanceLotsTx(tx: any, input: { userId: number; amount: number; sourceType: string; sourceId: number }) {
+    private async allocateMemberBalanceLotsTx(
+        tx: any,
+        input: {
+            userId: number;
+            amount: number;
+            sourceType: string;
+            sourceId: number;
+        },
+    ) {
         let remaining = this.toAmount2(input.amount);
-        if (remaining <= 0) return { allocated: 0, untracked: 0 };
+        if (remaining <= 0) return {allocated: 0, untracked: 0};
         const lots = await tx.memberBalanceLot.findMany({
             where: {
                 userId: input.userId,
                 status: 'ACTIVE',
-                OR: [{ principalRemaining: { gt: 0 } }, { bonusRemaining: { gt: 0 } }],
+                OR: [{principalRemaining: {gt: 0}}, {bonusRemaining: {gt: 0}}],
             },
-            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+            orderBy: [{createdAt: 'asc'}, {id: 'asc'}],
         });
-        const allocations = new Map<number, { lot: any; principal: number; bonus: number }>();
+        const allocations = new Map<number, {lot: any; principal: number; bonus: number}>();
         for (const lot of lots) {
             if (remaining <= 0) break;
             const used = Math.min(remaining, this.toAmount2(lot.principalRemaining));
             if (used <= 0) continue;
-            allocations.set(lot.id, { lot, principal: used, bonus: 0 });
+            allocations.set(lot.id, {lot, principal: used, bonus: 0});
             remaining = this.toAmount2(remaining - used);
         }
         for (const lot of lots) {
             if (remaining <= 0) break;
             const used = Math.min(remaining, this.toAmount2(lot.bonusRemaining));
             if (used <= 0) continue;
-            const current = allocations.get(lot.id) || { lot, principal: 0, bonus: 0 };
+            const current = allocations.get(lot.id) || {
+                lot,
+                principal: 0,
+                bonus: 0,
+            };
             current.bonus = used;
             allocations.set(lot.id, current);
             remaining = this.toAmount2(remaining - used);
         }
         for (const row of allocations.values()) {
             await tx.memberBalanceLot.update({
-                where: { id: row.lot.id },
+                where: {id: row.lot.id},
                 data: {
-                    principalRemaining: { decrement: row.principal },
-                    bonusRemaining: { decrement: row.bonus },
+                    principalRemaining: {decrement: row.principal},
+                    bonusRemaining: {decrement: row.bonus},
                 },
             });
             await tx.memberBalanceLotUsage.create({
@@ -1769,21 +2103,31 @@ export class OrdersService {
                 },
             });
         }
-        return { allocated: this.toAmount2(input.amount - remaining), untracked: remaining };
+        return {
+            allocated: this.toAmount2(input.amount - remaining),
+            untracked: remaining,
+        };
     }
 
-    private async reserveMemberBalanceForOrderTx(tx: any, input: {
-        orderId: number;
-        userId: number;
-        amount: number;
-    }) {
+    private async reserveMemberBalanceForOrderTx(
+        tx: any,
+        input: {
+            orderId: number;
+            userId: number;
+            amount: number;
+        },
+    ) {
         const amount = this.toAmount2(input.amount);
         if (amount <= 0) throw new BadRequestException('储值预占金额必须大于0');
 
         await tx.$queryRawUnsafe('SELECT id FROM `wallet_accounts` WHERE `userId` = ? FOR UPDATE', input.userId);
-        const existing = await tx.memberOrderBalanceReservation.findUnique({ where: { orderId: input.orderId } });
+        const existing = await tx.memberOrderBalanceReservation.findUnique({
+            where: {orderId: input.orderId},
+        });
         if (existing) return existing;
-        const account = await tx.walletAccount.findUnique({ where: { userId: input.userId } });
+        const account = await tx.walletAccount.findUnique({
+            where: {userId: input.userId},
+        });
         if (!account || this.toAmount2(account.availableBalance) < amount) {
             throw new BadRequestException('会员储值余额不足');
         }
@@ -1792,17 +2136,17 @@ export class OrdersService {
             where: {
                 userId: input.userId,
                 status: 'ACTIVE',
-                OR: [{ principalRemaining: { gt: 0 } }, { bonusRemaining: { gt: 0 } }],
+                OR: [{principalRemaining: {gt: 0}}, {bonusRemaining: {gt: 0}}],
             },
-            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+            orderBy: [{createdAt: 'asc'}, {id: 'asc'}],
         });
         let remaining = amount;
-        const allocations = new Map<number, { principal: number; bonus: number }>();
+        const allocations = new Map<number, {principal: number; bonus: number}>();
         for (const lot of lots) {
             if (remaining <= 0) break;
             const used = Math.min(remaining, this.toAmount2(lot.principalRemaining));
             if (used > 0) {
-                allocations.set(lot.id, { principal: used, bonus: 0 });
+                allocations.set(lot.id, {principal: used, bonus: 0});
                 remaining = this.toAmount2(remaining - used);
             }
         }
@@ -1810,7 +2154,7 @@ export class OrdersService {
             if (remaining <= 0) break;
             const used = Math.min(remaining, this.toAmount2(lot.bonusRemaining));
             if (used > 0) {
-                const row = allocations.get(lot.id) || { principal: 0, bonus: 0 };
+                const row = allocations.get(lot.id) || {principal: 0, bonus: 0};
                 row.bonus = used;
                 allocations.set(lot.id, row);
                 remaining = this.toAmount2(remaining - used);
@@ -1831,10 +2175,10 @@ export class OrdersService {
         });
         for (const [lotId, row] of allocations) {
             await tx.memberBalanceLot.update({
-                where: { id: lotId },
+                where: {id: lotId},
                 data: {
-                    principalRemaining: { decrement: row.principal },
-                    bonusRemaining: { decrement: row.bonus },
+                    principalRemaining: {decrement: row.principal},
+                    bonusRemaining: {decrement: row.bonus},
                 },
             });
             await tx.memberOrderBalanceReservationLot.create({
@@ -1847,14 +2191,14 @@ export class OrdersService {
             });
         }
         await tx.walletAccount.update({
-            where: { userId: input.userId },
+            where: {userId: input.userId},
             data: {
-                availableBalance: { decrement: amount },
-                memberOrderReservedBalance: { increment: amount },
+                availableBalance: {decrement: amount},
+                memberOrderReservedBalance: {increment: amount},
             },
         });
         await tx.order.update({
-            where: { id: input.orderId },
+            where: {id: input.orderId},
             data: {
                 balanceSettlementMode: 'RESERVE_CAPTURE',
                 balanceReservationStatus: 'HELD',
@@ -1871,13 +2215,16 @@ export class OrdersService {
         const actualAmount = this.toAmount2(actualAmountInput);
         if (actualAmount < 0) throw new BadRequestException('实际结算金额非法');
         const reservation = await tx.memberOrderBalanceReservation.findUnique({
-            where: { orderId: Number(order.id) },
-            include: { lots: { orderBy: { id: 'asc' } } },
+            where: {orderId: Number(order.id)},
+            include: {lots: {orderBy: {id: 'asc'}}},
         });
         if (!reservation) throw new ConflictException('储值预占记录缺失，请先完成资金对账');
         if (reservation.status !== 'HELD') {
             const pending = this.toAmount2(reservation.supplementAmount);
-            return { pendingSupplementAmount: pending, capturedAmount: this.toAmount2(reservation.capturedAmount) };
+            return {
+                pendingSupplementAmount: pending,
+                capturedAmount: this.toAmount2(reservation.capturedAmount),
+            };
         }
 
         const reserved = this.toAmount2(reservation.reservedAmount);
@@ -1885,8 +2232,12 @@ export class OrdersService {
         const releaseAmount = this.toAmount2(reserved - captureAmount);
         const supplementAmount = this.toAmount2(Math.max(0, actualAmount - reserved));
         const payment = await tx.orderPayment.findFirst({
-            where: { orderId: Number(order.id), channel: 'BALANCE', status: OrderPayStatus.PENDING },
-            orderBy: { id: 'asc' },
+            where: {
+                orderId: Number(order.id),
+                channel: 'BALANCE',
+                status: OrderPayStatus.PENDING,
+            },
+            orderBy: {id: 'asc'},
         });
         if (!payment) throw new ConflictException('储值预占支付流水缺失，请先完成资金对账');
 
@@ -1902,10 +2253,10 @@ export class OrdersService {
             const bonusReleased = this.toAmount2(bonusReserved - bonusCaptured);
             if (principalReleased > 0 || bonusReleased > 0) {
                 await tx.memberBalanceLot.update({
-                    where: { id: row.lotId },
+                    where: {id: row.lotId},
                     data: {
-                        principalRemaining: { increment: principalReleased },
-                        bonusRemaining: { increment: bonusReleased },
+                        principalRemaining: {increment: principalReleased},
+                        bonusRemaining: {increment: bonusReleased},
                         status: 'ACTIVE',
                     },
                 });
@@ -1923,23 +2274,23 @@ export class OrdersService {
                 });
             }
             await tx.memberOrderBalanceReservationLot.update({
-                where: { id: row.id },
-                data: { principalCaptured, bonusCaptured },
+                where: {id: row.id},
+                data: {principalCaptured, bonusCaptured},
             });
         }
         if (captureRemaining > 0) throw new ConflictException('储值预占批次金额不足，请先完成资金对账');
 
         await tx.$queryRawUnsafe('SELECT id FROM `wallet_accounts` WHERE `userId` = ? FOR UPDATE', Number(order.customerUserId));
         const accountAfter = await tx.walletAccount.update({
-            where: { userId: Number(order.customerUserId) },
+            where: {userId: Number(order.customerUserId)},
             data: {
-                memberOrderReservedBalance: { decrement: reserved },
-                availableBalance: { increment: releaseAmount },
+                memberOrderReservedBalance: {decrement: reserved},
+                availableBalance: {increment: releaseAmount},
             },
         });
         const now = new Date();
         await tx.orderPayment.update({
-            where: { id: payment.id },
+            where: {id: payment.id},
             data: {
                 amount: captureAmount,
                 status: OrderPayStatus.SUCCESS,
@@ -1971,7 +2322,7 @@ export class OrdersService {
         }
         const reservationStatus = supplementAmount > 0 ? 'SUPPLEMENT_PENDING' : 'SETTLED';
         await tx.memberOrderBalanceReservation.update({
-            where: { id: reservation.id },
+            where: {id: reservation.id},
             data: {
                 capturedAmount: captureAmount,
                 releasedAmount: releaseAmount,
@@ -1982,7 +2333,7 @@ export class OrdersService {
             },
         });
         await tx.order.update({
-            where: { id: Number(order.id) },
+            where: {id: Number(order.id)},
             data: {
                 paidAmount: captureAmount,
                 paymentTime: now,
@@ -1993,13 +2344,16 @@ export class OrdersService {
                 balancePendingSupplementAmount: supplementAmount,
             },
         });
-        return { pendingSupplementAmount: supplementAmount, capturedAmount: captureAmount };
+        return {
+            pendingSupplementAmount: supplementAmount,
+            capturedAmount: captureAmount,
+        };
     }
 
     private async releaseMemberBalanceReservationTx(tx: any, orderId: number, reason: string) {
         const reservation = await tx.memberOrderBalanceReservation.findUnique({
-            where: { orderId },
-            include: { lots: true },
+            where: {orderId},
+            include: {lots: true},
         });
         if (!reservation || reservation.status === 'RELEASED') return null;
         if (reservation.status !== 'HELD') {
@@ -2009,24 +2363,24 @@ export class OrdersService {
         const reservedAmount = this.toAmount2(Number(reservation.reservedAmount));
         for (const row of reservation.lots) {
             await tx.memberBalanceLot.update({
-                where: { id: row.lotId },
+                where: {id: row.lotId},
                 data: {
-                    principalRemaining: { increment: Number(row.principalReserved) },
-                    bonusRemaining: { increment: Number(row.bonusReserved) },
+                    principalRemaining: {increment: Number(row.principalReserved)},
+                    bonusRemaining: {increment: Number(row.bonusReserved)},
                     status: 'ACTIVE',
                 },
             });
         }
         await tx.walletAccount.update({
-            where: { userId: reservation.userId },
+            where: {userId: reservation.userId},
             data: {
-                memberOrderReservedBalance: { decrement: reservedAmount },
-                availableBalance: { increment: reservedAmount },
+                memberOrderReservedBalance: {decrement: reservedAmount},
+                availableBalance: {increment: reservedAmount},
             },
         });
         const now = new Date();
         await tx.memberOrderBalanceReservation.update({
-            where: { id: reservation.id },
+            where: {id: reservation.id},
             data: {
                 releasedAmount: reservedAmount,
                 status: 'RELEASED',
@@ -2034,11 +2388,14 @@ export class OrdersService {
             },
         });
         await tx.orderPayment.updateMany({
-            where: { orderId, channel: 'BALANCE', status: OrderPayStatus.PENDING },
-            data: { status: OrderPayStatus.CLOSED, notifyRaw: { closeReason: reason } as any },
+            where: {orderId, channel: 'BALANCE', status: OrderPayStatus.PENDING},
+            data: {
+                status: OrderPayStatus.CLOSED,
+                notifyRaw: {closeReason: reason} as any,
+            },
         });
         await tx.order.update({
-            where: { id: orderId },
+            where: {id: orderId},
             data: {
                 isPaid: false,
                 payStatus: OrderPayStatus.CLOSED,
@@ -2046,7 +2403,7 @@ export class OrdersService {
                 balancePendingSupplementAmount: 0,
             },
         });
-        return { releasedAmount: reservedAmount };
+        return {releasedAmount: reservedAmount};
     }
 
     private async reverseMemberBalanceLotsTx(tx: any, paymentId?: number | null, refundAmountInput?: number) {
@@ -2055,8 +2412,8 @@ export class OrdersService {
         let remaining = this.toAmount2(Math.max(0, Number(refundAmountInput || 0)));
         if (remaining <= 0) return;
         const usages = await tx.memberBalanceLotUsage.findMany({
-            where: { sourceType: 'ORDER_PAYMENT', sourceId, status: 'CONSUMED' },
-            orderBy: { id: 'asc' },
+            where: {sourceType: 'ORDER_PAYMENT', sourceId, status: 'CONSUMED'},
+            orderBy: {id: 'asc'},
         });
         for (const usage of usages) {
             if (remaining <= 0) break;
@@ -2068,15 +2425,15 @@ export class OrdersService {
             const principalLeft = this.toAmount2(usage.principalAmount - principalRestore);
             const bonusLeft = this.toAmount2(usage.bonusAmount - bonusRestore);
             await tx.memberBalanceLot.update({
-                where: { id: usage.lotId },
+                where: {id: usage.lotId},
                 data: {
-                    principalRemaining: { increment: principalRestore },
-                    bonusRemaining: { increment: bonusRestore },
+                    principalRemaining: {increment: principalRestore},
+                    bonusRemaining: {increment: bonusRestore},
                     status: 'ACTIVE',
                 },
             });
             await tx.memberBalanceLotUsage.update({
-                where: { id: usage.id },
+                where: {id: usage.id},
                 data: {
                     principalAmount: principalLeft,
                     bonusAmount: bonusLeft,
@@ -2088,17 +2445,22 @@ export class OrdersService {
     }
 
     private isAutoRefundSupportedChannel(channel?: string | null) {
-        const c = String(channel || '').trim().toUpperCase();
+        const c = String(channel || '')
+            .trim()
+            .toUpperCase();
         return c === 'MINIAPP_WECHAT' || c === 'WECHAT' || c === 'BALANCE';
     }
 
     private resolvePaymentChannelByOrderSource(orderSource?: string | null) {
-        const source = String(orderSource || '').trim().toUpperCase() || 'CUSTOMER_SERVICE_MANUAL';
+        const source =
+            String(orderSource || '')
+                .trim()
+                .toUpperCase() || 'CUSTOMER_SERVICE_MANUAL';
         if (source === 'MINIAPP_SELF_SERVICE') return 'MINIAPP_WECHAT';
-        if (source === 'CUSTOMER_SERVICE_MANUAL') return 'MANUAL_SHOUQIANBA';
+        if (source === 'CUSTOMER_SERVICE_MANUAL') return 'MANUAL_CONFIRMED';
         if (source === 'TUTU_PLATFORM') return 'TUTU_PLATFORM';
         if (source === 'THIRD_PARTY_TRANSFER' || source === 'OFFICIAL_ACCOUNT') return 'THIRD_PARTY_CHANNEL';
-        return 'MANUAL_SHOUQIANBA';
+        return 'MANUAL_CONFIRMED';
     }
 
     private buildOrderPaymentNo(channel: string, orderId: number) {
@@ -2106,10 +2468,17 @@ export class OrdersService {
             MINIAPP_WECHAT: 'WXM',
             BALANCE: 'BAL',
             MANUAL_SHOUQIANBA: 'SQB',
+            MANUAL_CONFIRMED: 'MAN',
+            SHOUQIANBA_WAP: 'SQB',
             TUTU_PLATFORM: 'TUT',
             THIRD_PARTY_CHANNEL: 'THD',
         };
-        const prefix = prefixMap[String(channel || '').trim().toUpperCase()] || 'PAY';
+        const prefix =
+            prefixMap[
+                String(channel || '')
+                    .trim()
+                    .toUpperCase()
+            ] || 'PAY';
         return `${prefix}-${orderId}-${Date.now()}`;
     }
 
@@ -2119,11 +2488,19 @@ export class OrdersService {
             WECHAT: 'RWX',
             BALANCE: 'RBL',
             MANUAL_SHOUQIANBA: 'RSQ',
+            MANUAL_CONFIRMED: 'RMN',
+            SHOUQIANBA_WAP: 'RSQ',
             TUTU_PLATFORM: 'RTU',
             THIRD_PARTY_CHANNEL: 'RTP',
         };
-        const prefix = prefixMap[String(channel || '').trim().toUpperCase()] || 'RFD';
-        return `${prefix}-${orderId}-${Date.now()}`;
+        const prefix =
+            prefixMap[
+                String(channel || '')
+                    .trim()
+                    .toUpperCase()
+            ] || 'RFD';
+        // 收钱吧 refund_request_no 最长 20 位，所有渠道统一生成紧凑且唯一的编号。
+        return `${prefix}${Number(orderId).toString(36).toUpperCase()}${Date.now().toString(36).toUpperCase()}`.slice(0, 20);
     }
 
     private async ensureLegacySuccessfulPaymentForRefund(order: any) {
@@ -2132,7 +2509,9 @@ export class OrdersService {
         if (String(order?.balanceSettlementMode || '') === 'RESERVE_CAPTURE') {
             return order;
         }
-        const latestPaymentStatus = String(order?.latestPayment?.status || '').trim().toUpperCase();
+        const latestPaymentStatus = String(order?.latestPayment?.status || '')
+            .trim()
+            .toUpperCase();
         if (latestPaymentStatus === OrderPayStatus.SUCCESS) {
             return order;
         }
@@ -2140,22 +2519,13 @@ export class OrdersService {
             return order;
         }
 
-        const paymentAmount = this.toAmount2(
-            Number(
-                order?.paidAmount ??
-                order?.finalPayableAmount ??
-                order?.receivableAmount ??
-                0,
-            ),
-        );
+        const paymentAmount = this.toAmount2(Number(order?.paidAmount ?? order?.finalPayableAmount ?? order?.receivableAmount ?? 0));
         if (paymentAmount <= 0) {
             return order;
         }
 
         const paymentChannel = this.resolvePaymentChannelByOrderSource(order?.orderSource);
-        const paidAt = order?.paymentTime
-            ? new Date(order.paymentTime)
-            : (order?.updatedAt ? new Date(order.updatedAt) : new Date());
+        const paidAt = order?.paymentTime ? new Date(order.paymentTime) : order?.updatedAt ? new Date(order.updatedAt) : new Date();
 
         const payment = await this.prisma.orderPayment.create({
             data: {
@@ -2178,7 +2548,7 @@ export class OrdersService {
         });
 
         await this.prisma.order.update({
-            where: { id: Number(order.id) },
+            where: {id: Number(order.id)},
             data: {
                 latestPaymentId: payment.id,
                 paymentTime: order?.paymentTime ? new Date(order.paymentTime) : paidAt,
@@ -2207,10 +2577,16 @@ export class OrdersService {
             amount?: any;
         } | null;
     }) {
-        const orderSource = String(order?.orderSource || '').trim().toUpperCase();
+        const orderSource = String(order?.orderSource || '')
+            .trim()
+            .toUpperCase();
         if (orderSource !== 'MINIAPP_SELF_SERVICE') return false;
-        const channel = String(order?.latestPayment?.channel || '').trim().toUpperCase();
-        const status = String(order?.latestPayment?.status || '').trim().toUpperCase();
+        const channel = String(order?.latestPayment?.channel || '')
+            .trim()
+            .toUpperCase();
+        const status = String(order?.latestPayment?.status || '')
+            .trim()
+            .toUpperCase();
         return (channel === 'MINIAPP_WECHAT' || channel === 'WECHAT') && status === OrderPayStatus.SUCCESS;
     }
 
@@ -2243,7 +2619,7 @@ export class OrdersService {
         return list.find((item) => item.value === code)?.label || code;
     }
 
-    private canDispatchBeforePaid(order: { isGifted?: boolean | null; orderSource?: string | null }) {
+    private canDispatchBeforePaid(order: {isGifted?: boolean | null; orderSource?: string | null}) {
         const source = String(order?.orderSource || '').trim() || 'CUSTOMER_SERVICE_MANUAL';
         return Boolean(order?.isGifted) || source === 'CUSTOMER_SERVICE_MANUAL';
     }
@@ -2265,7 +2641,7 @@ export class OrdersService {
             endAt: Date | null;
         };
     }) {
-        const { originalAmount, projectId, template } = params;
+        const {originalAmount, projectId, template} = params;
         const now = new Date();
         if (template.status !== CouponTemplateStatus.ACTIVE) {
             throw new BadRequestException('优惠券不可用（状态非生效）');
@@ -2285,7 +2661,10 @@ export class OrdersService {
             }
         }
         if (template.applicableScope === CouponScope.CATEGORY) {
-            const project = await this.prisma.gameProject.findUnique({ where: { id: Number(projectId) }, select: { id: true, category: true } });
+            const project = await this.prisma.gameProject.findUnique({
+                where: {id: Number(projectId)},
+                select: {id: true, category: true},
+            });
             const categoryId = String(project?.category || '').trim();
             const ids = Array.isArray(template.applicableProjectIds)
                 ? template.applicableProjectIds.map((x: any) => String(x || '').trim()).filter((x: string) => !!x)
@@ -2342,7 +2721,7 @@ export class OrdersService {
                 orderTipUserIds?: number[];
             };
         }
-    >();;
+    >();
 
     /*** -----------------------------
      * 创建订单方法
@@ -2353,22 +2732,22 @@ export class OrdersService {
         const customerUserId =
             context?.customerUserId != null
                 ? Number(context.customerUserId)
-                : ((dto as any)?.customerUserId != null ? Number((dto as any).customerUserId) : null);
+                : (dto as any)?.customerUserId != null
+                  ? Number((dto as any).customerUserId)
+                  : null;
         const orderSource = await this.normalizeOrderSource(dto?.orderSource, scene);
-        const rawCustomerIdentifierType = String((dto as any)?.customerIdentifierType || '').trim().toUpperCase();
+        const rawCustomerIdentifierType = String((dto as any)?.customerIdentifierType || '')
+            .trim()
+            .toUpperCase();
         const customerIdentifierType = rawCustomerIdentifierType === 'ALIAS' ? 'ALIAS' : 'GAME_ID';
-        const customerOriginalIdentifier = String(
-            (dto as any)?.customerOriginalIdentifier ?? dto.customerGameId ?? '',
-        ).trim();
-        const customerGameId = customerIdentifierType === 'GAME_ID'
-            ? String(dto.customerGameId ?? customerOriginalIdentifier ?? '').trim() || null
-            : null;
-        const project = await this.prisma.gameProject.findUnique({where: {id: dto.projectId}});
+        const customerOriginalIdentifier = String((dto as any)?.customerOriginalIdentifier ?? dto.customerGameId ?? '').trim();
+        const customerGameId = customerIdentifierType === 'GAME_ID' ? String(dto.customerGameId ?? customerOriginalIdentifier ?? '').trim() || null : null;
+        const project = await this.prisma.gameProject.findUnique({
+            where: {id: dto.projectId},
+        });
         if (!project) throw new NotFoundException('项目不存在');
 
-        const playerIds = Array.isArray((dto as any)?.playerIds)
-            ? this.normalizeIdArray((dto as any).playerIds)
-            : [];
+        const playerIds = Array.isArray((dto as any)?.playerIds) ? this.normalizeIdArray((dto as any).playerIds) : [];
         const isRenewal = Boolean((dto as any).isRenewal);
         const isDesignated = Boolean((dto as any).isDesignated);
         const renewalPlayerIds = this.normalizeIdArray((dto as any).renewalPlayerIds);
@@ -2392,7 +2771,7 @@ export class OrdersService {
         }
         if (playerIds.length) {
             const playerCount = await this.prisma.user.count({
-                where: { id: { in: playerIds } },
+                where: {id: {in: playerIds}},
             });
             if (playerCount !== playerIds.length) {
                 throw new BadRequestException('派单打手不存在或已不可用');
@@ -2403,7 +2782,7 @@ export class OrdersService {
         const defaultCsRate = project.type === 'EXPERIENCE' ? 0 : 0.01;
 
         // 默认推广分佣：有 inviter 才默认 0.05
-        const defaultInviteRate = isRenewal ? 0 : (dto.inviter ? 0.05 : 0);
+        const defaultInviteRate = isRenewal ? 0 : dto.inviter ? 0.05 : 0;
 
         // 默认俱乐部抽成：订单级优先，其次项目默认；允许为空（表示未来按评级等扩展）
         const clubRate = dto.customClubRate ?? project.clubRate ?? null;
@@ -2427,8 +2806,8 @@ export class OrdersService {
         let selectedUserCoupon: any = null;
         if (userCouponId > 0) {
             selectedUserCoupon = await this.prisma.userCoupon.findUnique({
-                where: { id: userCouponId },
-                include: { template: true },
+                where: {id: userCouponId},
+                include: {template: true},
             });
             if (!selectedUserCoupon) {
                 throw new BadRequestException('用户券不存在');
@@ -2438,6 +2817,9 @@ export class OrdersService {
             }
             if (selectedUserCoupon.status !== UserCouponStatus.UNUSED) {
                 throw new BadRequestException('优惠券已使用或不可用');
+            }
+            if (selectedUserCoupon.orderId) {
+                throw new ConflictException('该优惠券已被其他待支付订单占用');
             }
             if (selectedUserCoupon.expiresAt && new Date(selectedUserCoupon.expiresAt) < new Date()) {
                 throw new BadRequestException('优惠券已过期');
@@ -2450,54 +2832,52 @@ export class OrdersService {
 
         // 赠送金额口径（本期统一为“按应收承担成本”）
         const originalAmount = this.toAmount2(Number(dto.receivableAmount ?? 0));
-        const settlementAmountInput = dto.settlementAmount != null
-            ? Number(dto.settlementAmount)
-            : (dto.settlementBaseAmount != null
-                ? Number(dto.settlementBaseAmount)
-                : (dto.paidAmount != null ? Number(dto.paidAmount) : Number(dto.receivableAmount ?? 0)));
+        const settlementAmountInput =
+            dto.settlementAmount != null
+                ? Number(dto.settlementAmount)
+                : dto.settlementBaseAmount != null
+                  ? Number(dto.settlementBaseAmount)
+                  : dto.paidAmount != null
+                    ? Number(dto.paidAmount)
+                    : Number(dto.receivableAmount ?? 0);
         const settlementAmount = this.toAmount2(settlementAmountInput);
         const effectiveSettlementAmount = settlementAmount > 0 ? settlementAmount : originalAmount;
         const giftedAmount = isGifted ? originalAmount : 0;
-        const requestedPaymentChannel = String((dto as any)?.paymentChannel || '').trim().toUpperCase();
-        const useMemberBalancePayment =
-            scene === 'ADMIN' &&
-            !isGifted &&
-            requestedPaymentChannel === 'BALANCE';
+        const requestedPaymentChannel = String((dto as any)?.paymentChannel || '')
+            .trim()
+            .toUpperCase();
+        const useMemberBalancePayment = scene === 'ADMIN' && !isGifted && requestedPaymentChannel === 'BALANCE';
+        const useShouqianbaPendingPayment = scene === 'ADMIN' && !isGifted && requestedPaymentChannel === 'SHOUQIANBA';
         if (useMemberBalancePayment && !customerUserId) {
             throw new BadRequestException('使用会员储值支付时必须选择会员用户');
         }
-        const isPaid = dto.isGifted ? false : (useMemberBalancePayment ? true : Boolean(dto.isPaid));
+        const isPaid = dto.isGifted ? false : useMemberBalancePayment ? true : Boolean(dto.isPaid);
 
         // 统一优惠汇总（先接基础口径，便于后续无缝接优惠券/活动）
-        const memberDiscount = isGifted ? { amount: 0, rate: 1, levelCode: null, benefitId: null } : await this.resolveMemberOrderDiscount({
-            customerUserId,
-            project,
-            originalAmount,
-        });
+        const memberDiscount = isGifted
+            ? {amount: 0, rate: 1, levelCode: null, benefitId: null}
+            : await this.resolveMemberOrderDiscount({
+                  customerUserId,
+                  project,
+                  originalAmount,
+              });
         const memberDiscountAmount = this.toAmount2(memberDiscount.amount);
         const couponBaseAmount = this.toAmount2(Math.max(0, originalAmount - memberDiscountAmount));
         const couponDiscountAmount = selectedUserCoupon
             ? await this.calcCouponDiscount({
-                originalAmount: couponBaseAmount,
-                projectId: project.id,
-                template: selectedUserCoupon.template,
-            })
+                  originalAmount: couponBaseAmount,
+                  projectId: project.id,
+                  template: selectedUserCoupon.template,
+              })
             : this.toAmount2(Number(dto.couponDiscountAmount ?? 0));
         const activityDiscountAmount = this.toAmount2(Number(dto.activityDiscountAmount ?? 0));
-        const manualAdjustAmount = memberDiscountAmount > 0 || selectedUserCoupon
-            ? 0
-            : this.toAmount2(Number(dto.manualAdjustAmount ?? 0));
+        const manualAdjustAmount = memberDiscountAmount > 0 || selectedUserCoupon ? 0 : this.toAmount2(Number(dto.manualAdjustAmount ?? 0));
         const giftDiscountAmount = this.toAmount2(giftedAmount);
-        const discountAmount = this.toAmount2(
-            memberDiscountAmount + couponDiscountAmount + activityDiscountAmount + giftDiscountAmount + manualAdjustAmount,
-        );
+        const discountAmount = this.toAmount2(memberDiscountAmount + couponDiscountAmount + activityDiscountAmount + giftDiscountAmount + manualAdjustAmount);
         const finalPayableAmount = this.toAmount2(Math.max(0, originalAmount - discountAmount));
-        const effectivePaidAmount = selectedUserCoupon || memberDiscountAmount > 0
-            ? finalPayableAmount
-            : this.toAmount2(Number(dto.paidAmount ?? finalPayableAmount));
-        const effectiveSettlementAmountForCreate = selectedUserCoupon || memberDiscountAmount > 0
-            ? finalPayableAmount
-            : effectiveSettlementAmount;
+        const effectivePaidAmount =
+            selectedUserCoupon || memberDiscountAmount > 0 ? finalPayableAmount : this.toAmount2(Number(dto.paidAmount ?? finalPayableAmount));
+        const effectiveSettlementAmountForCreate = selectedUserCoupon || memberDiscountAmount > 0 ? finalPayableAmount : effectiveSettlementAmount;
         const discountType = this.resolveDiscountType({
             memberDiscountAmount,
             couponDiscountAmount,
@@ -2507,12 +2887,14 @@ export class OrdersService {
         });
         const paidAt = isGifted
             ? null
-            : (isPaid
-                ? (dto.paymentTime ? new Date(dto.paymentTime) : new Date())
-                : (dto.paymentTime ? new Date(dto.paymentTime) : null));
-        const paymentChannel = isPaid
-            ? (useMemberBalancePayment ? 'BALANCE' : this.resolvePaymentChannelByOrderSource(orderSource))
-            : null;
+            : isPaid
+              ? dto.paymentTime
+                  ? new Date(dto.paymentTime)
+                  : new Date()
+              : dto.paymentTime
+                ? new Date(dto.paymentTime)
+                : null;
+        const paymentChannel = isPaid ? (useMemberBalancePayment ? 'BALANCE' : this.resolvePaymentChannelByOrderSource(orderSource)) : null;
         const discountDetails: Array<{
             sourceType: string;
             sourceId?: number;
@@ -2535,9 +2917,7 @@ export class OrdersService {
                 sourceId: selectedUserCoupon?.templateId ? Number(selectedUserCoupon.templateId) : undefined,
                 ruleType: selectedUserCoupon?.template?.type || 'CASH',
                 amount: couponDiscountAmount,
-                description: selectedUserCoupon?.template?.name
-                    ? `使用优惠券：${selectedUserCoupon.template.name}`
-                    : '下单优惠券减免',
+                description: selectedUserCoupon?.template?.name ? `使用优惠券：${selectedUserCoupon.template.name}` : '下单优惠券减免',
             });
         }
         if (activityDiscountAmount > 0) {
@@ -2608,16 +2988,20 @@ export class OrdersService {
                     finalPayableAmount,
                     marketingCostAmount: discountAmount,
                     discountType,
-                    status: OrderStatus.WAIT_ASSIGN,
+                    preselectedPlayerIds: useShouqianbaPendingPayment && playerIds.length ? (playerIds as any) : undefined,
+                    preselectedAttributionIds: useShouqianbaPendingPayment && attributionPlayerIds.length ? (attributionPlayerIds as any) : undefined,
+                    preselectedAttributionType: useShouqianbaPendingPayment ? (isDesignated ? 'DESIGNATED' : isRenewal ? 'RENEWAL' : null) : null,
+                    // 在线支付先落为草稿，只有成功拿到付款码后才进入 WAIT_PAYMENT。
+                    status: useShouqianbaPendingPayment ? OrderStatus.DRAFT : OrderStatus.WAIT_ASSIGN,
                     isRenewal: isRenewal || isDesignated,
                     renewalAmount: 0,
                     renewalCount: 0,
                     ...(discountDetails.length
                         ? {
-                            discountDetails: {
-                                create: discountDetails,
-                            },
-                        }
+                              discountDetails: {
+                                  create: discountDetails,
+                              },
+                          }
                         : {}),
                 },
                 include: {
@@ -2628,7 +3012,7 @@ export class OrdersService {
             } as any);
 
             if (isPaid && !isGifted) {
-                let payment: { id: number };
+                let payment: {id: number};
                 if (useMemberBalancePayment) {
                     await this.wallet.ensureWalletAccount(Number(customerUserId), tx as any);
                     const consumeAmount = this.toAmount2(Number(effectivePaidAmount ?? 0));
@@ -2646,7 +3030,7 @@ export class OrdersService {
                                 reservedAmount: consumeAmount,
                             } as any,
                         },
-                        select: { id: true },
+                        select: {id: true},
                     });
                     await this.reserveMemberBalanceForOrderTx(tx, {
                         orderId: Number(createdOrder.id),
@@ -2664,25 +3048,38 @@ export class OrdersService {
                             currency: 'CNY',
                             paidAt: paidAt || new Date(),
                         },
-                        select: { id: true },
+                        select: {id: true},
                     });
                 }
 
                 await tx.order.update({
-                    where: { id: Number(createdOrder.id) },
+                    where: {id: Number(createdOrder.id)},
                     data: {
                         latestPaymentId: payment.id,
-                        paymentTime: useMemberBalancePayment ? null : (paidAt || new Date()),
+                        paymentTime: useMemberBalancePayment ? null : paidAt || new Date(),
                         isPaid: true,
                         payStatus: useMemberBalancePayment ? OrderPayStatus.PENDING : OrderPayStatus.SUCCESS,
                     },
                 });
 
                 (createdOrder as any).latestPaymentId = payment.id;
-                (createdOrder as any).paymentTime = useMemberBalancePayment ? null : (paidAt || new Date());
+                (createdOrder as any).paymentTime = useMemberBalancePayment ? null : paidAt || new Date();
             }
 
-            if (selectedUserCoupon) {
+            if (selectedUserCoupon && useShouqianbaPendingPayment) {
+                // 在线支付阶段只预留优惠券，支付成功回调再正式核销。
+                const reserveResult = await tx.userCoupon.updateMany({
+                    where: {
+                        id: Number(selectedUserCoupon.id),
+                        status: UserCouponStatus.UNUSED,
+                        OR: [{orderId: null}, {orderId: Number(createdOrder.id)}],
+                    },
+                    data: {orderId: Number(createdOrder.id)},
+                });
+                if (reserveResult.count !== 1) {
+                    throw new ConflictException('优惠券已被其他订单占用，请刷新后重试');
+                }
+            } else if (selectedUserCoupon) {
                 const consumeResult = await tx.userCoupon.updateMany({
                     where: {
                         id: Number(selectedUserCoupon.id),
@@ -2698,8 +3095,8 @@ export class OrdersService {
                     throw new ConflictException('优惠券已被使用，请刷新后重试');
                 }
                 await tx.couponTemplate.update({
-                    where: { id: Number(selectedUserCoupon.templateId) },
-                    data: { usedCount: { increment: 1 } },
+                    where: {id: Number(selectedUserCoupon.templateId)},
+                    data: {usedCount: {increment: 1}},
                 });
             }
             return createdOrder;
@@ -2714,12 +3111,12 @@ export class OrdersService {
         });
 
         // ✅ 新建即派单：若传了 playerIds，则直接创建首轮派单并指派
-        if (playerIds.length > 0) {
+        if (playerIds.length > 0 && !useShouqianbaPendingPayment) {
             // 复用现有派单逻辑（包含防重复、参与者写入、日志等）
             await this.assignDispatch(order.id, playerIds, operatorId, 'AUTO_CREATE', {
                 updateOrderDispatcherId: scene !== 'MINIAPP',
                 writeOperatorLog: scene !== 'MINIAPP',
-                renewalPlayerIds: isRenewal ? renewalPlayerIds : (isDesignated ? designatedPlayerIds : undefined),
+                renewalPlayerIds: isRenewal ? renewalPlayerIds : isDesignated ? designatedPlayerIds : undefined,
                 renewalAttributionType: isDesignated ? 'DESIGNATED' : 'RENEWAL',
                 renewalCreatedBy: operatorId,
             });
@@ -2742,7 +3139,7 @@ export class OrdersService {
         const where: any = {};
 
         // 你原来的精确/单字段筛选保留
-        if (query.serial) where.autoSerial = { contains: query.serial };
+        if (query.serial) where.autoSerial = {contains: query.serial};
         if (query.projectId) where.projectId = query.projectId;
         if (query.status) where.status = query.status as any;
         if (query.dispatcherId) where.dispatcherId = query.dispatcherId;
@@ -2753,10 +3150,7 @@ export class OrdersService {
                 where.AND = [
                     ...(where.AND || []),
                     {
-                        OR: [
-                            { customerGameId: { contains: customerIdentifier } },
-                            { customerOriginalIdentifier: { contains: customerIdentifier } },
-                        ],
+                        OR: [{customerGameId: {contains: customerIdentifier}}, {customerOriginalIdentifier: {contains: customerIdentifier}}],
                     },
                 ];
             }
@@ -2769,13 +3163,13 @@ export class OrdersService {
                 const month = Number(match[2]);
                 const start = new Date(Date.UTC(year, month - 1, 1) - 8 * 60 * 60 * 1000);
                 const end = new Date(Date.UTC(year, month, 1) - 8 * 60 * 60 * 1000);
-                where.createdAt = { gte: start, lt: end };
+                where.createdAt = {gte: start, lt: end};
             }
         }
         if (query.orderSource) where.orderSource = String(query.orderSource).trim();
         if (query.playerId) {
             where.dispatches = {
-                some: { participants: { some: { userId: query.playerId } } },
+                some: {participants: {some: {userId: query.playerId}}},
             };
         }
         if (query.isPaid !== undefined) where.isPaid = query.isPaid === true;
@@ -2785,14 +3179,14 @@ export class OrdersService {
         if (keyword) {
             where.OR = [
                 // 1) 订单号
-                { autoSerial: { contains: keyword } },
+                {autoSerial: {contains: keyword}},
 
                 // 客户最初提供的昵称/房间号，以及后续补录的准确游戏 ID
-                { customerOriginalIdentifier: { contains: keyword } },
-                { customerGameId: { contains: keyword } },
+                {customerOriginalIdentifier: {contains: keyword}},
+                {customerGameId: {contains: keyword}},
 
                 // 2) 客服（dispatcher）
-                { dispatcher: { name: { contains: keyword } } },
+                {dispatcher: {name: {contains: keyword}}},
 
                 // 3) 陪玩昵称（任意历史/当前派单参与者）
                 {
@@ -2800,7 +3194,7 @@ export class OrdersService {
                         some: {
                             participants: {
                                 some: {
-                                    user: { name: { contains: keyword } },
+                                    user: {name: {contains: keyword}},
                                 },
                             },
                         },
@@ -2814,7 +3208,7 @@ export class OrdersService {
                 where,
                 skip,
                 take: limit,
-                orderBy: { createdAt: 'desc' },
+                orderBy: {createdAt: 'desc'},
                 select: {
                     id: true,
                     autoSerial: true,
@@ -2822,6 +3216,12 @@ export class OrdersService {
                     orderSource: true,
                     isPaid: true,
                     isGifted: true,
+                    payStatus: true,
+                    unpaidResponsibleUserId: true,
+                    unpaidSince: true,
+                    unpaidLastReminderAt: true,
+                    unpaidAutoDeductedAt: true,
+                    unpaidAutoDeductedAmount: true,
                     receivableAmount: true,
                     paidAmount: true,
                     customerGameId: true,
@@ -2829,10 +3229,13 @@ export class OrdersService {
                     customerOriginalIdentifier: true,
                     createdAt: true,
                     project: {
-                        select: { id: true, name: true },
+                        select: {id: true, name: true},
                     },
-                    dispatcher: { select: { id: true, name: true, phone: true, userType: true } },
-                    customerUser: { select: { id: true, name: true, phone: true } },
+                    dispatcher: {
+                        select: {id: true, name: true, phone: true, userType: true},
+                    },
+                    customerUser: {select: {id: true, name: true, phone: true}},
+                    latestPayment: {select: {channel: true, status: true}},
                     currentDispatch: {
                         select: {
                             id: true,
@@ -2840,16 +3243,20 @@ export class OrdersService {
                             participants: {
                                 select: {
                                     id: true,
-                                    user: { select: { id: true, name: true, phone: true } },
+                                    user: {select: {id: true, name: true, phone: true}},
                                 },
                             },
                         },
                     },
                 },
             } as any),
-            this.prisma.order.count({ where }),
+            this.prisma.order.count({where}),
             this.prisma.order.aggregate({
-                where,
+                // 草稿尚未形成有效交易，不进入经营金额汇总。
+                where: {
+                    ...where,
+                    status: query.status ? where.status : {not: OrderStatus.DRAFT},
+                },
                 _sum: {
                     receivableAmount: true,
                     paidAmount: true,
@@ -2862,8 +3269,7 @@ export class OrdersService {
         const data = rows.map((row: any) => ({
             ...row,
             orderSource: String(row?.orderSource || '').trim() || 'CUSTOMER_SERVICE_MANUAL',
-            orderSourceLabel:
-                sourceLabelMap.get(String(row?.orderSource || '').trim() || 'CUSTOMER_SERVICE_MANUAL') || '客服手动派单',
+            orderSourceLabel: sourceLabelMap.get(String(row?.orderSource || '').trim() || 'CUSTOMER_SERVICE_MANUAL') || '客服手动派单',
         }));
 
         return {
@@ -2879,7 +3285,6 @@ export class OrdersService {
         };
     }
 
-
     /*** -----------------------------
      * 订单详情方法
      * -----------------------------*/
@@ -2892,40 +3297,46 @@ export class OrdersService {
         // 1️⃣ 查询订单 + 结算（参考）
         // ===========================
         const order: any = await this.prisma.order.findUnique({
-            where: { id },
+            where: {id},
             include: {
                 project: true,
                 customerUser: {
-                    select: { id: true, name: true, phone: true, avatar: true },
+                    select: {id: true, name: true, phone: true, avatar: true},
                 },
                 dispatcher: {
-                    select: { id: true, name: true, phone: true, avatar: true, userType: true },
+                    select: {
+                        id: true,
+                        name: true,
+                        phone: true,
+                        avatar: true,
+                        userType: true,
+                    },
                 },
 
                 // ✅ 当前派单批次
                 currentDispatch: {
                     include: {
                         participants: {
-                            where: { isActive: true },
+                            where: {isActive: true},
                             include: {
                                 user: {
                                     select: this.getDispatchParticipantUserSelect(),
                                 },
                             },
-                            orderBy: { id: 'asc' },
+                            orderBy: {id: 'asc'},
                         },
                     },
                 },
 
                 // ✅ 历史派单批次
                 dispatches: {
-                    orderBy: { round: 'desc' },
+                    orderBy: {round: 'desc'},
                     include: {
                         participants: {
                             include: {
-                                user: { select: this.getDispatchParticipantUserSelect() },
+                                user: {select: this.getDispatchParticipantUserSelect()},
                             },
-                            orderBy: { id: 'asc' },
+                            orderBy: {id: 'asc'},
                         },
                     },
                 },
@@ -2933,28 +3344,46 @@ export class OrdersService {
                 // ✅ 结算明细（参考口径）
                 settlements: {
                     include: {
-                        user: { select: { id: true, name: true, phone: true } },
+                        user: {select: {id: true, name: true, phone: true}},
                     },
-                    orderBy: { id: 'desc' },
+                    orderBy: {id: 'desc'},
                 },
                 latestPayment: {
                     select: {
+                        id: true,
+                        clientSn: true,
+                        purpose: true,
+                        attemptNo: true,
                         channel: true,
                         amount: true,
                         status: true,
+                        providerSn: true,
+                        transactionId: true,
+                        providerOrderStatus: true,
+                        expiresAt: true,
+                        verifiedAt: true,
+                        verificationSource: true,
+                        qrCode: true,
+                        qrCodeImageUrl: true,
                         notifyRaw: true,
                     },
+                },
+                payments: {
+                    orderBy: {id: 'desc'},
+                    take: 20,
                 },
                 renewalGroups: {
                     include: {
                         bonuses: {
                             include: {
-                                user: { select: { id: true, name: true, phone: true, avatar: true } },
+                                user: {
+                                    select: {id: true, name: true, phone: true, avatar: true},
+                                },
                             },
-                            orderBy: { id: 'asc' },
+                            orderBy: {id: 'asc'},
                         },
                     },
-                    orderBy: { id: 'desc' },
+                    orderBy: {id: 'desc'},
                 },
             },
         } as any);
@@ -2969,9 +3398,8 @@ export class OrdersService {
             if (participant?.acceptedAt) return true;
             if (participant?.rejectedAt) return true;
             if (Number(participant?.progressBaseWan || 0) > 0) return true;
-            if (String(dispatch?.status || '') === DispatchStatus.COMPLETED && (
-                participant?.billableHours != null || participant?.billableMinutes != null
-            )) return true;
+            if (String(dispatch?.status || '') === DispatchStatus.COMPLETED && (participant?.billableHours != null || participant?.billableMinutes != null))
+                return true;
             return false;
         };
 
@@ -2984,7 +3412,9 @@ export class OrdersService {
             }));
         }
 
-        const orderStatus = String(order?.status || '').trim().toUpperCase();
+        const orderStatus = String(order?.status || '')
+            .trim()
+            .toUpperCase();
         const currentParticipants = Array.isArray(order?.currentDispatch?.participants) ? order.currentDispatch.participants : [];
         if (order?.currentDispatch && (orderStatus === 'COMPLETED_PENDING_CONFIRM' || currentParticipants.length === 0)) {
             const latestDispatch = Array.isArray(order?.dispatches) ? order.dispatches[0] : null;
@@ -3003,7 +3433,7 @@ export class OrdersService {
 
         const activeRenewalBonuses = (Array.isArray(order?.renewalGroups) ? order.renewalGroups : [])
             .filter((group: any) => String(group?.status || '') === 'SETTLED')
-            .flatMap((group: any) => Array.isArray(group?.bonuses) ? group.bonuses : [])
+            .flatMap((group: any) => (Array.isArray(group?.bonuses) ? group.bonuses : []))
             .filter((bonus: any) => String(bonus?.status || '') === 'PAID');
         const activeRenewalWalletTxIds = activeRenewalBonuses
             .map((bonus: any) => Number(bonus?.walletTransactionId || 0))
@@ -3014,11 +3444,8 @@ export class OrdersService {
         // ===========================
         const walletTxs = await this.prisma.walletTransaction.findMany({
             where: {
-                OR: [
-                    { orderId: id },
-                    ...(activeRenewalWalletTxIds.length ? [{ id: { in: activeRenewalWalletTxIds } }] : []),
-                ],
-                status: { not: 'REVERSED' }, // ❗ 已冲正流水不参与当前统计
+                OR: [{orderId: id}, ...(activeRenewalWalletTxIds.length ? [{id: {in: activeRenewalWalletTxIds}}] : [])],
+                status: {not: 'REVERSED'}, // ❗ 已冲正流水不参与当前统计
             },
             select: {
                 userId: true,
@@ -3055,19 +3482,17 @@ export class OrdersService {
             'SETTLEMENT_RECALC',
         ]);
 
-        const walletTxsForReconcile = walletTxs.filter((tx) =>
-            RECONCILE_BIZ_TYPES.has(String(tx.bizType || '')),
-        );
+        const walletTxsForReconcile = walletTxs.filter((tx) => RECONCILE_BIZ_TYPES.has(String(tx.bizType || '')));
 
         // ===========================
         // 3️⃣ 钱包收益汇总（真实）- ✅区分 IN / OUT
         // ❗ 改为仅统计对账口径流水，避免 RELEASE_FROZEN 双算
         // ===========================
-        let inTotal = 0;      // IN 合计（正数展示）
-        let outTotal = 0;     // OUT 合计（正数展示）
-        let netTotal = 0;     // 净额（IN - OUT）
+        let inTotal = 0; // IN 合计（正数展示）
+        let outTotal = 0; // OUT 合计（正数展示）
+        let netTotal = 0; // 净额（IN - OUT）
 
-        let frozenNet = 0;    // 冻结净额
+        let frozenNet = 0; // 冻结净额
         let availableNet = 0; // 可用净额
 
         for (const tx of walletTxsForReconcile) {
@@ -3092,14 +3517,8 @@ export class OrdersService {
         // ===========================
         // 4️⃣ 结算参考汇总
         // ===========================
-        const settlementFinalEarningsTotal = order.settlements.reduce(
-            (sum, s) => sum + Number(s.finalEarnings || 0),
-            0,
-        );
-        const renewalBonusTotal = activeRenewalBonuses.reduce(
-            (sum: number, bonus: any) => sum + Number(bonus?.bonusShareAmount || 0),
-            0,
-        );
+        const settlementFinalEarningsTotal = order.settlements.reduce((sum, s) => sum + Number(s.finalEarnings || 0), 0);
+        const renewalBonusTotal = activeRenewalBonuses.reduce((sum: number, bonus: any) => sum + Number(bonus?.bonusShareAmount || 0), 0);
         const settlementTotal = Number((settlementFinalEarningsTotal + renewalBonusTotal).toFixed(2));
 
         // ===========================
@@ -3121,7 +3540,7 @@ export class OrdersService {
         // ✅ 4.1 结算按人汇总（参考）
         // ===========================
         const settlementByUser = new Map<number, number>();
-        const userMap = new Map<number, { id: number; name: string; phone?: string }>();
+        const userMap = new Map<number, {id: number; name: string; phone?: string}>();
         for (const s of order.settlements || []) {
             const uid = Number(s?.userId || 0);
             if (!uid) continue;
@@ -3173,10 +3592,7 @@ export class OrdersService {
         // ✅ 4.3 合并成“按人对账结果”
         // - 规则：diff = walletNet - settlement
         // ===========================
-        const userIds = new Set<number>([
-            ...Array.from(settlementByUser.keys()),
-            ...Array.from(walletNetByUser.keys()),
-        ]);
+        const userIds = new Set<number>([...Array.from(settlementByUser.keys()), ...Array.from(walletNetByUser.keys())]);
 
         const reconcileHintByUser = Array.from(userIds)
             .map((userId) => {
@@ -3213,10 +3629,14 @@ export class OrdersService {
         // 6️⃣ 返回
         // ===========================
         const orderSourceLabel = await this.resolveOrderSourceLabel((order as any)?.orderSource);
-        const paymentChannel = String((order as any)?.latestPayment?.channel || '').trim().toUpperCase() || null;
+        const paymentChannel =
+            String((order as any)?.latestPayment?.channel || '')
+                .trim()
+                .toUpperCase() || null;
         const paymentChannelLabelMap: Record<string, string> = {
             BALANCE: '会员储值',
             MANUAL_SHOUQIANBA: '线下收款',
+            SHOUQIANBA_WAP: '收钱吧在线收款',
             MINIAPP_WECHAT: '微信支付',
             WECHAT: '微信支付',
             TUTU_PLATFORM: '兔兔平台',
@@ -3227,7 +3647,7 @@ export class OrdersService {
             ...order,
             orderSourceLabel,
             paymentChannel,
-            paymentChannelLabel: paymentChannel ? (paymentChannelLabelMap[paymentChannel] || paymentChannel) : null,
+            paymentChannelLabel: paymentChannel ? paymentChannelLabelMap[paymentChannel] || paymentChannel : null,
 
             // ✅ 钱包真实收益概览（增强：IN/OUT/净额）
             walletEarningsSummary: {
@@ -3249,7 +3669,7 @@ export class OrdersService {
                 settlementFinalEarningsTotal: Number(settlementFinalEarningsTotal.toFixed(2)),
                 renewalBonusTotal: Number(renewalBonusTotal.toFixed(2)),
                 walletTotal, // ✅ 净额
-                diff,        // ✅ 净额 - 结算
+                diff, // ✅ 净额 - 结算
             },
 
             reconcileHintByUser,
@@ -3261,9 +3681,29 @@ export class OrdersService {
      * -----------------------------*/
     async cancelOrder(orderId: number, operatorId: number, remark?: string) {
         if (!orderId) throw new BadRequestException('orderId 必填');
+        const paymentToCancel = await this.prisma.orderPayment.findFirst({
+            where: {
+                orderId,
+                channel: 'SHOUQIANBA_WAP',
+                status: {
+                    in: [OrderPayStatus.PENDING, OrderPayStatus.PROCESSING, OrderPayStatus.UNKNOWN],
+                },
+            },
+            orderBy: {attemptNo: 'desc'},
+        });
+        if (paymentToCancel) {
+            if (paymentToCancel.expiresAt && paymentToCancel.expiresAt.getTime() <= Date.now()) {
+                await this.prisma.orderPayment.update({
+                    where: {id: paymentToCancel.id},
+                    data: {status: OrderPayStatus.CLOSED},
+                });
+            } else {
+                await this.shouqianbaService.cancelPayment(paymentToCancel.id, `BlueCat cancel ${operatorId}`);
+            }
+        }
         return this.prisma.$transaction(async (tx) => {
             await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
-            const order = await tx.order.findUnique({ where: { id: orderId } });
+            const order = await tx.order.findUnique({where: {id: orderId}});
             if (!order) throw new NotFoundException('订单不存在');
             const forbidden = new Set(['COMPLETED', 'REFUNDED']);
             if (forbidden.has(String(order.status))) throw new BadRequestException('当前订单状态不可取消');
@@ -3271,9 +3711,22 @@ export class OrdersService {
             if ((order as any).balanceSettlementMode === 'RESERVE_CAPTURE') {
                 await this.releaseMemberBalanceReservationTx(tx, orderId, remark || '取消订单');
             }
+            await tx.userCoupon.updateMany({
+                where: {orderId, status: UserCouponStatus.UNUSED},
+                data: {orderId: null},
+            });
+            await tx.orderPayment.updateMany({
+                where: {
+                    orderId,
+                    status: {
+                        in: [OrderPayStatus.PENDING, OrderPayStatus.PROCESSING, OrderPayStatus.UNKNOWN],
+                    },
+                },
+                data: {status: OrderPayStatus.CLOSED},
+            });
             const updated = await tx.order.update({
-                where: { id: orderId },
-                data: { status: OrderStatus.CANCELLED },
+                where: {id: orderId},
+                data: {status: OrderStatus.CANCELLED},
             });
             if (operatorId) {
                 await tx.userLog.create({
@@ -3282,8 +3735,8 @@ export class OrdersService {
                         action: 'CANCEL_ORDER',
                         targetType: 'ORDER',
                         targetId: orderId,
-                        oldData: { status: order.status } as any,
-                        newData: { status: OrderStatus.CANCELLED } as any,
+                        oldData: {status: order.status} as any,
+                        newData: {status: OrderStatus.CANCELLED} as any,
                         remark: remark || '取消订单',
                     },
                 });
@@ -3296,7 +3749,7 @@ export class OrdersService {
         if (!orderId) throw new BadRequestException('orderId 必填');
 
         const order = await this.prisma.order.findUnique({
-            where: { id: orderId },
+            where: {id: orderId},
             select: {
                 id: true,
                 autoSerial: true,
@@ -3313,7 +3766,7 @@ export class OrdersService {
         }
 
         await this.prisma.order.delete({
-            where: { id: orderId },
+            where: {id: orderId},
         });
 
         if (operatorId) {
@@ -3349,7 +3802,9 @@ export class OrdersService {
 
         const order = await this.prisma.order.findUnique({
             where: {id: orderId},
-            include: {dispatches: {select: {id: true, round: true, status: true}}},
+            include: {
+                dispatches: {select: {id: true, round: true, status: true}},
+            },
         });
 
         if (!order) throw new NotFoundException('订单不存在');
@@ -3418,7 +3873,14 @@ export class OrdersService {
                 data: {
                     status: 'WAIT_ACCEPT' as any,
                     currentDispatchId: createdDispatch.id,
-                    ...(updateOrderDispatcherId ? { dispatcherId: operatorId || order.dispatcherId } : {}),
+                    ...(updateOrderDispatcherId ? {dispatcherId: operatorId || order.dispatcherId} : {}),
+                    ...(!order.isPaid && !order.isGifted
+                        ? {
+                              unpaidResponsibleUserId: Number(operatorId || order.dispatcherId || 0) || null,
+                              unpaidSince: (order as any).unpaidSince || new Date(),
+                              unpaidLastReminderAt: null,
+                          }
+                        : {}),
                 },
             });
 
@@ -3481,214 +3943,202 @@ export class OrdersService {
         return this.archiveDispatchWithOptions(dispatchStatus, dispatchId, user, dto, {});
     }
 
-    private async archiveDispatchWithOptions(
-        dispatchStatus: DispatchStatus,
-        dispatchId: number,
-        user: any,
-        dto: any,
-        options: ArchiveDispatchOptions,
-    ) {
-        const operatorId: number = user.userId
+    private async archiveDispatchWithOptions(dispatchStatus: DispatchStatus, dispatchId: number, user: any, dto: any, options: ArchiveDispatchOptions) {
+        const operatorId: number = user.userId;
         const requiredRemark = options.forceByAdmin
             ? this.normalizeRequiredRemark(dto?.remark, `客服${dispatchStatus === DispatchStatus.ARCHIVED ? '存单' : '结单'}请填写处理原因`)
             : String(dto?.remark || '').trim() || undefined;
-        const orderId = await this.prisma.$transaction(async (tx) => {
-            await this.lockDispatchForSettlementOrThrow(dispatchId, tx, options.forceByAdmin === true);
-            try {
-                const dispatch = await tx.orderDispatch.findUnique({
-                    where: {id: dispatchId},
-                    include: {
-                        order: {include: {project: true}},
-                        participants: true,
-                    },
-                });
-                if (!dispatch) throw new BadRequestException('派单批次不存在');
-
-                // ✅ 1) 权限校验：必须是参与者（最小实现：只允许参与者存单）
-                // 严格要求“当前轮 + 仍有效参与者”，防止被替换打手继续操作
-                if (Number(dispatch.order.currentDispatchId || 0) !== Number(dispatch.id)) {
-                    throw new BadRequestException('当前派单已更新，请刷新后再操作');
-                }
-                const isParticipant = dispatch.participants?.some((p) => (
-                    Number(p.userId) === Number(operatorId)
-                    && p.isActive !== false
-                    && !p.rejectedAt
-                ));
-                if (!isParticipant && !options.forceByAdmin) throw new BadRequestException('你不是本轮派单参与者，无权操作');
-
-                // ✅ 2) 防重复（可选但建议）
-                if (dispatch.status === dispatchStatus) {
-                    throw new BadRequestException(`该派单已${dispatchStatus === 'ARCHIVED' ? '存' : '结'}单，无需重复操作`);
-                }
-
-                const snap = dispatch?.order?.projectSnapshot as any;
-                const orderClass: string | null =
-                    dispatch.order?.project?.billingMode ??
-                    (snap && typeof snap === 'object' && !Array.isArray(snap) ? (snap.billingMode ?? null) : null);
-                if (!orderClass) throw new BadRequestException('订单类型有误，无法操作，请联系管理员！');
-
-                const pendingCustomerGameId = String(dto?.customerGameId || '').trim();
-                const requiresCustomerGameId = String((dispatch.order as any)?.customerIdentifierType || 'GAME_ID') === 'ALIAS';
-                const existingCustomerGameId = String((dispatch.order as any)?.customerGameId || '').trim();
-                const existingCustomerGameIdValid = isValidCustomerGameId(existingCustomerGameId);
-                if (pendingCustomerGameId && !isValidCustomerGameId(pendingCustomerGameId)) {
-                    throw new BadRequestException('客户准确游戏ID只能填写纯数字，请核对后重试');
-                }
-                if (requiresCustomerGameId && !existingCustomerGameIdValid && !pendingCustomerGameId) {
-                    throw new BadRequestException('该订单由昵称/房间号派单，请先补齐客户准确游戏ID后再存单或结单');
-                }
-
-                // HOURLY: 小时单
-                // GUARANTEED: 保底单
-                // MODE_PLAY: 玩法单
-
-                // ✅ 3) 按单型写入“本次存单口径数据”
-                // if (orderClass === 'HOURLY') {}
-                if (orderClass === 'GUARANTEED') {
-                    const progresses = dto.progresses ?? [];
-                    for (const p of progresses) {
-                        const userId = Number(p?.userId);
-                        if (!Number.isFinite(userId) || userId <= 0) continue;
-
-                        await tx.orderParticipant.updateMany({
-                            where: {
-                                dispatchId,
-                                userId,
-                                isActive: true, // ✅ 修正：更新当前活跃参与者
-                            },
-                            data: {
-                                progressBaseWan: roundMix1(p?.progressBaseWan),
-                                isActive: false, // ✅ 同时置失效
-                            },
-                        });
-                    }
-                } else { //小时单 玩法单，直接置为存/结单。更新状态
-                    const progresses = dto.progresses ?? [];
-                    for (const p of progresses) {
-                        const userId = Number(p?.userId);
-                        if (!Number.isFinite(userId) || userId <= 0) continue;
-
-                        await tx.orderParticipant.updateMany({
-                            where: {
-                                dispatchId,
-                                userId,
-                                isActive: true, // ✅ 修正：更新当前活跃参与者
-                            },
-                            data: {
-                                isActive: false, // ✅ 同时置失效
-                            },
-                        });
-                    }
-                }
-
-                const now = new Date();
-                if (options.forceByAdmin) {
-                    await tx.orderParticipant.updateMany({
-                        where: {
-                            dispatchId,
-                            isActive: true,
-                            rejectedAt: null,
-                            acceptedAt: null,
-                        },
-                        data: {
-                            acceptedAt: now,
+        const orderId = await this.prisma.$transaction(
+            async (tx) => {
+                await this.lockDispatchForSettlementOrThrow(dispatchId, tx, options.forceByAdmin === true);
+                try {
+                    const dispatch = await tx.orderDispatch.findUnique({
+                        where: {id: dispatchId},
+                        include: {
+                            order: {include: {project: true}},
+                            participants: true,
                         },
                     });
+                    if (!dispatch) throw new BadRequestException('派单批次不存在');
+
+                    // ✅ 1) 权限校验：必须是参与者（最小实现：只允许参与者存单）
+                    // 严格要求“当前轮 + 仍有效参与者”，防止被替换打手继续操作
+                    if (Number(dispatch.order.currentDispatchId || 0) !== Number(dispatch.id)) {
+                        throw new BadRequestException('当前派单已更新，请刷新后再操作');
+                    }
+                    const isParticipant = dispatch.participants?.some((p) => Number(p.userId) === Number(operatorId) && p.isActive !== false && !p.rejectedAt);
+                    if (!isParticipant && !options.forceByAdmin) throw new BadRequestException('你不是本轮派单参与者，无权操作');
+
+                    // ✅ 2) 防重复（可选但建议）
+                    if (dispatch.status === dispatchStatus) {
+                        throw new BadRequestException(`该派单已${dispatchStatus === 'ARCHIVED' ? '存' : '结'}单，无需重复操作`);
+                    }
+
+                    const snap = dispatch?.order?.projectSnapshot as any;
+                    const orderClass: string | null =
+                        dispatch.order?.project?.billingMode ?? (snap && typeof snap === 'object' && !Array.isArray(snap) ? (snap.billingMode ?? null) : null);
+                    if (!orderClass) throw new BadRequestException('订单类型有误，无法操作，请联系管理员！');
+
+                    const pendingCustomerGameId = String(dto?.customerGameId || '').trim();
+                    const requiresCustomerGameId = String((dispatch.order as any)?.customerIdentifierType || 'GAME_ID') === 'ALIAS';
+                    const existingCustomerGameId = String((dispatch.order as any)?.customerGameId || '').trim();
+                    const existingCustomerGameIdValid = isValidCustomerGameId(existingCustomerGameId);
+                    if (pendingCustomerGameId && !isValidCustomerGameId(pendingCustomerGameId)) {
+                        throw new BadRequestException('客户准确游戏ID只能填写纯数字，请核对后重试');
+                    }
+                    if (requiresCustomerGameId && !existingCustomerGameIdValid && !pendingCustomerGameId) {
+                        throw new BadRequestException('该订单由昵称/房间号派单，请先补齐客户准确游戏ID后再存单或结单');
+                    }
+
+                    // HOURLY: 小时单
+                    // GUARANTEED: 保底单
+                    // MODE_PLAY: 玩法单
+
+                    // ✅ 3) 按单型写入“本次存单口径数据”
+                    // if (orderClass === 'HOURLY') {}
+                    if (orderClass === 'GUARANTEED') {
+                        const progresses = dto.progresses ?? [];
+                        for (const p of progresses) {
+                            const userId = Number(p?.userId);
+                            if (!Number.isFinite(userId) || userId <= 0) continue;
+
+                            await tx.orderParticipant.updateMany({
+                                where: {
+                                    dispatchId,
+                                    userId,
+                                    isActive: true, // ✅ 修正：更新当前活跃参与者
+                                },
+                                data: {
+                                    progressBaseWan: roundMix1(p?.progressBaseWan),
+                                    isActive: false, // ✅ 同时置失效
+                                },
+                            });
+                        }
+                    } else {
+                        //小时单 玩法单，直接置为存/结单。更新状态
+                        const progresses = dto.progresses ?? [];
+                        for (const p of progresses) {
+                            const userId = Number(p?.userId);
+                            if (!Number.isFinite(userId) || userId <= 0) continue;
+
+                            await tx.orderParticipant.updateMany({
+                                where: {
+                                    dispatchId,
+                                    userId,
+                                    isActive: true, // ✅ 修正：更新当前活跃参与者
+                                },
+                                data: {
+                                    isActive: false, // ✅ 同时置失效
+                                },
+                            });
+                        }
+                    }
+
+                    const now = new Date();
+                    if (options.forceByAdmin) {
+                        await tx.orderParticipant.updateMany({
+                            where: {
+                                dispatchId,
+                                isActive: true,
+                                rejectedAt: null,
+                                acceptedAt: null,
+                            },
+                            data: {
+                                acceptedAt: now,
+                            },
+                        });
+                    }
+
+                    const currentParticipants = (dispatch.participants || []).filter((p: any) => {
+                        const userId = Number(p?.userId ?? 0);
+                        return Number.isFinite(userId) && userId > 0 && p?.isActive !== false && !p?.rejectedAt;
+                    });
+                    if (!currentParticipants.length) {
+                        throw new BadRequestException('当前派单没有有效打手，无法存/结单，请先重新派单或调整打手');
+                    }
+
+                    // ✅ 4) 派单置存/结单
+                    await tx.orderDispatch.update({
+                        where: {id: dispatchId},
+                        data: {
+                            status: dispatchStatus,
+                            archivedAt: now,
+                            completedAt: dispatchStatus === 'COMPLETED' ? now : null,
+                            remark: requiredRemark ?? dispatch.remark ?? null,
+                            ...(orderClass === 'HOURLY'
+                                ? {
+                                      deductMinutesValue:
+                                          dto.deductMinutesValue === undefined || dto.deductMinutesValue === null
+                                              ? null
+                                              : Math.max(0, Math.floor(Number(dto.deductMinutesValue))),
+
+                                      billableMinutes:
+                                          dto.billableMinutes === undefined || dto.billableMinutes === null
+                                              ? null
+                                              : Math.max(0, Math.floor(Number(dto.billableMinutes))),
+
+                                      billableHours: dto.billableHours === undefined || dto.billableHours === null ? null : Number(dto.billableHours),
+                                  }
+                                : {}),
+                        },
+                    });
+                    // ✅ 5) 订单置存单
+                    await tx.order.update({
+                        where: {id: dispatch.orderId},
+                        data: {
+                            status: dispatchStatus === 'COMPLETED' ? OrderStatus.COMPLETED_PENDING_CONFIRM : OrderStatus.ARCHIVED,
+                            ...(pendingCustomerGameId && pendingCustomerGameId !== existingCustomerGameId ? {customerGameId: pendingCustomerGameId} : {}),
+                        },
+                    });
+
+                    // ⚠️ 6) 释放参与者状态：这是运营副作用，你现在保留也行
+                    // 但更严谨是仅释放本轮参与者（你现在就是 participants）
+                    const userIds = dispatch.participants.map((p) => p.userId);
+                    await tx.user.updateMany({
+                        where: {id: {in: userIds}},
+                        data: {workStatus: 'IDLE' as any},
+                    });
+                    if (shouldRefreshActivityAfterSettlement(Boolean(options.forceByAdmin))) {
+                        await this.staffActivityService.markCompletedForUsersTx(tx, userIds, now);
+                    }
+                    // ✅ 7) 写日志：记录“谁、什么时候、存的什么”
+                    await this.logOrderAction(
+                        operatorId,
+                        dispatch.orderId,
+                        options.forceByAdmin ? 'ADMIN_ARCHIVE_DISPATCH' : 'ARCHIVE_DISPATCH',
+                        {
+                            dispatchId,
+                            archivedAt: now.toISOString(),
+                            orderClass,
+                            forceByAdmin: Boolean(options.forceByAdmin),
+                            remark: requiredRemark ?? null,
+                            // 保底单关键数据：把前端传入的 progresses 原样记录（或记录 normalize 后也行）
+                            progresses: orderClass === 'GUARANTEED' ? (dto.progresses ?? []) : undefined,
+                            // 小时单关键数据：你算出来的 minutes/hours 也建议塞这里（你现在还没接上）
+                        },
+                        tx,
+                        `用户(${user.name})进行${dispatchStatus === 'ARCHIVED' ? '存' : '结'}单操作`,
+                    );
+                    return dispatch.orderId;
+                } catch (e) {
+                    // ✅ 失败释放锁：仅当还处于 SETTLING 才回滚
+                    await tx.orderDispatch.updateMany({
+                        where: {id: dispatchId, status: DispatchStatus.SETTLING},
+                        data: {status: DispatchStatus.ACCEPTED},
+                    });
+
+                    // ✅ 关键：必须 rethrow，保证事务整体回滚
+                    throw e;
                 }
-
-                const currentParticipants = (dispatch.participants || []).filter((p: any) => {
-                    const userId = Number(p?.userId ?? 0);
-                    return Number.isFinite(userId) && userId > 0 && p?.isActive !== false && !p?.rejectedAt;
-                });
-                if (!currentParticipants.length) {
-                    throw new BadRequestException('当前派单没有有效打手，无法存/结单，请先重新派单或调整打手');
-                }
-
-                // ✅ 4) 派单置存/结单
-                await tx.orderDispatch.update({
-                    where: {id: dispatchId},
-                    data: {
-                        status: dispatchStatus,
-                        archivedAt: now,
-                        completedAt: dispatchStatus === 'COMPLETED' ? now : null,
-                        remark: requiredRemark ?? dispatch.remark ?? null,
-                        ...(orderClass === 'HOURLY'
-                            ? {
-                                deductMinutesValue:
-                                    dto.deductMinutesValue === undefined || dto.deductMinutesValue === null
-                                        ? null
-                                        : Math.max(0, Math.floor(Number(dto.deductMinutesValue))),
-
-                                billableMinutes:
-                                    dto.billableMinutes === undefined || dto.billableMinutes === null
-                                        ? null
-                                        : Math.max(0, Math.floor(Number(dto.billableMinutes))),
-
-                                billableHours:
-                                    dto.billableHours === undefined || dto.billableHours === null
-                                        ? null
-                                        : Number(dto.billableHours),
-                            }
-                            : {}),
-                    },
-                });
-                // ✅ 5) 订单置存单
-                await tx.order.update({
-                    where: {id: dispatch.orderId},
-                    data: {
-                        status: dispatchStatus === 'COMPLETED' ? OrderStatus.COMPLETED_PENDING_CONFIRM : OrderStatus.ARCHIVED,
-                        ...(pendingCustomerGameId && pendingCustomerGameId !== existingCustomerGameId
-                            ? { customerGameId: pendingCustomerGameId }
-                            : {}),
-                    },
-                });
-
-                // ⚠️ 6) 释放参与者状态：这是运营副作用，你现在保留也行
-                // 但更严谨是仅释放本轮参与者（你现在就是 participants）
-                const userIds = dispatch.participants.map((p) => p.userId);
-                await tx.user.updateMany({
-                    where: {id: {in: userIds}},
-                    data: {workStatus: 'IDLE' as any},
-                });
-                if (shouldRefreshActivityAfterSettlement(Boolean(options.forceByAdmin))) {
-                    await this.staffActivityService.markCompletedForUsersTx(tx, userIds, now);
-                }
-                // ✅ 7) 写日志：记录“谁、什么时候、存的什么”
-                await this.logOrderAction(
-                    operatorId,
-                    dispatch.orderId,
-                    options.forceByAdmin ? 'ADMIN_ARCHIVE_DISPATCH' : 'ARCHIVE_DISPATCH',
-                    {
-                        dispatchId,
-                        archivedAt: now.toISOString(),
-                        orderClass,
-                        forceByAdmin: Boolean(options.forceByAdmin),
-                        remark: requiredRemark ?? null,
-                        // 保底单关键数据：把前端传入的 progresses 原样记录（或记录 normalize 后也行）
-                        progresses: orderClass === 'GUARANTEED' ? (dto.progresses ?? []) : undefined,
-                        // 小时单关键数据：你算出来的 minutes/hours 也建议塞这里（你现在还没接上）
-                    },
-                    tx,
-                    `用户(${user.name})进行${dispatchStatus === 'ARCHIVED' ? '存' : '结'}单操作`,
-                );
-                return dispatch.orderId;
-            } catch (e) {
-                // ✅ 失败释放锁：仅当还处于 SETTLING 才回滚
-                await tx.orderDispatch.updateMany({
-                    where: {id: dispatchId, status: DispatchStatus.SETTLING},
-                    data: {status: DispatchStatus.ACCEPTED},
-                });
-
-                // ✅ 关键：必须 rethrow，保证事务整体回滚
-                throw e;
-            }
-        }, {maxWait: 5000, timeout: 20000});
+            },
+            {maxWait: 5000, timeout: 20000},
+        );
 
         // 打手存单/结单后给当班客服推送（通知失败不影响主流程）
         try {
             const order = await this.prisma.order.findUnique({
-                where: { id: Number(orderId) },
-                select: { autoSerial: true },
+                where: {id: Number(orderId)},
+                select: {autoSerial: true},
             });
 
             await this.notificationsService.pushDispatchArchiveOrCompleteToDutyCs({
@@ -3704,7 +4154,7 @@ export class OrdersService {
         return {
             code: 200,
             msg: `${dispatchStatus === 'ARCHIVED' ? '存' : '结'}单成功`,
-            orderId
+            orderId,
         };
     }
 
@@ -3720,7 +4170,7 @@ export class OrdersService {
      * - 已付款订单不覆盖 paymentTime，避免历史付款时间被误改
      * - 允许 body 传 string/boolean，内部统一转 boolean
      **/
-    async updatePaidAmount(orderId: number, paidAmount: number, operatorId: number, remark?: string, confirmPaid?: any,) {
+    async updatePaidAmount(orderId: number, paidAmount: number, operatorId: number, remark?: string, confirmPaid?: any) {
         if (!orderId) throw new BadRequestException('id 必填');
         if (!Number.isFinite(paidAmount) || paidAmount < 0) throw new BadRequestException('paidAmount 非法');
 
@@ -3732,7 +4182,6 @@ export class OrdersService {
                 include: {project: true},
             });
             if (!order) throw new NotFoundException('订单不存在');
-
 
             await this.assertOrderNotSettlingOrThrow(tx, orderId, '订单正在结算处理中，请稍后再试');
 
@@ -3757,13 +4206,15 @@ export class OrdersService {
 
         return this.prisma.$transaction(async (tx) => {
             await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
-            const order = await tx.order.findUnique({ where: { id: orderId } });
+            const order = await tx.order.findUnique({where: {id: orderId}});
             if (!order) throw new NotFoundException('订单不存在');
             if ((order as any).balanceSettlementMode !== 'RESERVE_CAPTURE') {
                 throw new BadRequestException('该订单不是储值预占订单');
             }
             const paymentNo = `MBS-${orderId}-${idempotencyKey}`;
-            const existingPayment = await tx.orderPayment.findUnique({ where: { paymentNo } });
+            const existingPayment = await tx.orderPayment.findUnique({
+                where: {paymentNo},
+            });
             if (existingPayment) {
                 return {
                     orderId,
@@ -3774,11 +4225,13 @@ export class OrdersService {
                 };
             }
 
-            const reservation = await tx.memberOrderBalanceReservation.findUnique({ where: { orderId } });
+            const reservation = await tx.memberOrderBalanceReservation.findUnique({
+                where: {orderId},
+            });
             if (!reservation) throw new ConflictException('储值预占记录缺失，请先完成资金对账');
             const supplementAmount = this.toAmount2(Number(reservation.supplementAmount));
             if (reservation.status === 'SETTLED' || supplementAmount <= 0) {
-                return { orderId, amount: 0, status: 'SUCCESS', idempotent: true };
+                return {orderId, amount: 0, status: 'SUCCESS', idempotent: true};
             }
             if (reservation.status !== 'SUPPLEMENT_PENDING') {
                 throw new ConflictException('订单当前不在待补款状态');
@@ -3787,7 +4240,7 @@ export class OrdersService {
             const userId = Number(order.customerUserId || 0);
             if (!userId) throw new ConflictException('储值订单缺少会员用户');
             await tx.$queryRawUnsafe('SELECT id FROM `wallet_accounts` WHERE `userId` = ? FOR UPDATE', userId);
-            const account = await tx.walletAccount.findUnique({ where: { userId } });
+            const account = await tx.walletAccount.findUnique({where: {userId}});
             if (!account || this.toAmount2(Number(account.availableBalance)) < supplementAmount) {
                 throw new BadRequestException(`会员储值余额不足，待补 ¥${supplementAmount.toFixed(2)}`);
             }
@@ -3801,12 +4254,15 @@ export class OrdersService {
                     amount: supplementAmount,
                     currency: 'CNY',
                     paidAt: new Date(),
-                    notifyRaw: { settlementMode: 'RESERVE_CAPTURE_SUPPLEMENT', idempotencyKey } as any,
+                    notifyRaw: {
+                        settlementMode: 'RESERVE_CAPTURE_SUPPLEMENT',
+                        idempotencyKey,
+                    } as any,
                 },
             });
             const accountAfter = await tx.walletAccount.update({
-                where: { userId },
-                data: { availableBalance: { decrement: supplementAmount } },
+                where: {userId},
+                data: {availableBalance: {decrement: supplementAmount}},
             });
             const allocation = await this.allocateMemberBalanceLotsTx(tx, {
                 userId,
@@ -3834,7 +4290,7 @@ export class OrdersService {
             });
             const totalCaptured = this.toAmount2(Number(reservation.capturedAmount) + supplementAmount);
             await tx.orderPayment.update({
-                where: { id: payment.id },
+                where: {id: payment.id},
                 data: {
                     notifyRaw: this.buildOrderBalanceReceiptMeta({
                         deductedAmount: totalCaptured,
@@ -3845,11 +4301,15 @@ export class OrdersService {
                 },
             });
             await tx.memberOrderBalanceReservation.update({
-                where: { id: reservation.id },
-                data: { capturedAmount: totalCaptured, supplementAmount: 0, status: 'SETTLED' },
+                where: {id: reservation.id},
+                data: {
+                    capturedAmount: totalCaptured,
+                    supplementAmount: 0,
+                    status: 'SETTLED',
+                },
             });
             await tx.order.update({
-                where: { id: orderId },
+                where: {id: orderId},
                 data: {
                     paidAmount: totalCaptured,
                     latestPaymentId: payment.id,
@@ -3865,30 +4325,34 @@ export class OrdersService {
                 action: 'MEMBER_BALANCE_SUPPLEMENT_PAID',
                 targetType: 'ORDER',
                 targetId: orderId,
-                oldData: { pendingSupplementAmount: supplementAmount } as any,
-                newData: { capturedAmount: totalCaptured, paymentId: payment.id } as any,
+                oldData: {pendingSupplementAmount: supplementAmount} as any,
+                newData: {
+                    capturedAmount: totalCaptured,
+                    paymentId: payment.id,
+                } as any,
                 remark: `储值补款 ¥${supplementAmount.toFixed(2)}`,
             });
-            return { orderId, paymentId: payment.id, amount: supplementAmount, status: 'SUCCESS', idempotent: false };
+            return {
+                orderId,
+                paymentId: payment.id,
+                amount: supplementAmount,
+                status: 'SUCCESS',
+                idempotent: false,
+            };
         });
     }
 
     /*** -----------------------------
      * 更新参与者；前端目前是存单模式下调用 todo 1-24 需优化，同派单方法一致即可
      * --------------------------*/
-    async updateDispatchParticipants(
-        dto: { dispatchId: number; playerIds: number[]; remark?: string },
-        operatorId: number,
-    ) {
+    async updateDispatchParticipants(dto: {dispatchId: number; playerIds: number[]; remark?: string}, operatorId: number) {
         const dispatchId = Number(dto?.dispatchId);
         operatorId = Number(operatorId);
 
         if (!dispatchId) throw new BadRequestException('dispatchId 必填');
         if (!operatorId) throw new BadRequestException('未登录或无权限操作');
 
-        const targetUserIds = Array.isArray(dto?.playerIds)
-            ? dto.playerIds.map((x: any) => Number(x)).filter((n: number) => Number.isFinite(n))
-            : [];
+        const targetUserIds = Array.isArray(dto?.playerIds) ? dto.playerIds.map((x: any) => Number(x)).filter((n: number) => Number.isFinite(n)) : [];
 
         if (targetUserIds.length <= 0) {
             throw new BadRequestException('参与者不能为空');
@@ -3928,8 +4392,7 @@ export class OrdersService {
             const hasAccepted = acceptedActiveParticipants.length > 0;
             const hasRejected = allParticipants.some((p: any) => !!p?.rejectedAt);
 
-            const shouldCreateNewRound =
-                dispatch.status !== DispatchStatus.WAIT_ACCEPT || hasRejected;
+            const shouldCreateNewRound = dispatch.status !== DispatchStatus.WAIT_ACCEPT || hasRejected;
 
             if (shouldCreateNewRound) {
                 const oldActiveUserIds = activeParticipants.map((p: any) => Number(p.userId));
@@ -3946,8 +4409,8 @@ export class OrdersService {
 
                 // 2) 旧轮有效参与者归档，避免继续以旧轮操作
                 await tx.orderParticipant.updateMany({
-                    where: { dispatchId, isActive: true },
-                    data: { isActive: false },
+                    where: {dispatchId, isActive: true},
+                    data: {isActive: false},
                 });
 
                 // 3) 新建一轮派单
@@ -3977,7 +4440,7 @@ export class OrdersService {
 
                 // 5) 切到新轮次，订单状态回到待接单
                 await tx.order.update({
-                    where: { id: dispatch.orderId },
+                    where: {id: dispatch.orderId},
                     data: {
                         status: OrderStatus.WAIT_ACCEPT,
                         currentDispatchId: newDispatch.id,
@@ -4022,15 +4485,12 @@ export class OrdersService {
                 }
             }
 
-            const removablePendingParticipants = activeParticipants.filter((p: any) => (
-                toDisable.includes(Number(p.userId))
-                && !p?.acceptedAt
-                && !p?.rejectedAt
-            ));
-            const invalidRemovedParticipants = activeParticipants.filter((p: any) => (
-                toDisable.includes(Number(p.userId))
-                && (!!p?.acceptedAt || !!p?.rejectedAt)
-            ));
+            const removablePendingParticipants = activeParticipants.filter(
+                (p: any) => toDisable.includes(Number(p.userId)) && !p?.acceptedAt && !p?.rejectedAt,
+            );
+            const invalidRemovedParticipants = activeParticipants.filter(
+                (p: any) => toDisable.includes(Number(p.userId)) && (!!p?.acceptedAt || !!p?.rejectedAt),
+            );
             if (invalidRemovedParticipants.length > 0) {
                 throw new BadRequestException('当前仅支持替换未接单参与者');
             }
@@ -4038,7 +4498,9 @@ export class OrdersService {
             if (removablePendingParticipants.length > 0) {
                 await tx.orderParticipant.deleteMany({
                     where: {
-                        id: { in: removablePendingParticipants.map((p: any) => Number(p.id)).filter((id: number) => Number.isFinite(id) && id > 0) },
+                        id: {
+                            in: removablePendingParticipants.map((p: any) => Number(p.id)).filter((id: number) => Number.isFinite(id) && id > 0),
+                        },
                     },
                 });
             }
@@ -4083,8 +4545,11 @@ export class OrdersService {
 
             // 本轮仍是当前轮，确保订单状态保持待接单
             await tx.order.update({
-                where: { id: dispatch.orderId },
-                data: { status: OrderStatus.WAIT_ACCEPT, currentDispatchId: dispatchId },
+                where: {id: dispatch.orderId},
+                data: {
+                    status: OrderStatus.WAIT_ACCEPT,
+                    currentDispatchId: dispatchId,
+                },
             });
 
             // 同步被移除参与者的工作状态，避免“已被替换但仍无法再次派单”
@@ -4109,8 +4574,8 @@ export class OrdersService {
         // 这里补齐与 assignDispatch 一致的推送行为。
         try {
             const order = await this.prisma.order.findUnique({
-                where: { id: Number(finalOrderId) },
-                select: { autoSerial: true },
+                where: {id: Number(finalOrderId)},
+                select: {autoSerial: true},
             });
 
             await this.notificationsService.pushDispatchAssigned({
@@ -4124,11 +4589,7 @@ export class OrdersService {
         }
 
         try {
-            await this.miniSubscribeMessageService.pushOrderProgressMessage(
-                Number(finalOrderId),
-                '订单已派单，请留意接单与服务进度',
-                '待接单',
-            );
+            await this.miniSubscribeMessageService.pushOrderProgressMessage(Number(finalOrderId), '订单已派单，请留意接单与服务进度', '待接单');
         } catch (e: any) {
             console.error('[notify][mini-order-progress][update-dispatch-participants] failed', e?.message || e);
         }
@@ -4139,7 +4600,7 @@ export class OrdersService {
     /*** -----------------------------
      * 结算手动调整（管理端/财务） todo 1-24 即将废弃，前提是需上线重新结算，且不允许所有订单类型可手动调整
      * --------------------------*/
-    async adjustSettlementFinalEarnings(dto: { settlementId: number; finalEarnings: number; remark?: string }, operatorId: number,) {
+    async adjustSettlementFinalEarnings(dto: {settlementId: number; finalEarnings: number; remark?: string}, operatorId: number) {
         const settlementId = Number(dto.settlementId);
         const finalEarnings = Number(dto.finalEarnings);
 
@@ -4209,14 +4670,10 @@ export class OrdersService {
             const manualAdjustment = finalEarnings - calculated;
 
             const orderSettlements = await tx.orderSettlement.findMany({
-                where: { orderId: Number(s.orderId) },
-                select: { id: true, finalEarnings: true, settlementType: true },
+                where: {orderId: Number(s.orderId)},
+                select: {id: true, finalEarnings: true, settlementType: true},
             });
-            const adjustedRows = orderSettlements.map((row: any) => (
-                Number(row.id) === settlementId
-                    ? { ...row, finalEarnings }
-                    : row
-            ));
+            const adjustedRows = orderSettlements.map((row: any) => (Number(row.id) === settlementId ? {...row, finalEarnings} : row));
             this.assertOrderSettlementPayoutWithinBase({
                 order: s.order,
                 settlements: adjustedRows,
@@ -4285,17 +4742,15 @@ export class OrdersService {
         return result;
     }
 
-
-
     private isComplaintRefundSupportedChannel(channel?: string | null) {
-        const c = String(channel || '').trim().toUpperCase();
+        const c = String(channel || '')
+            .trim()
+            .toUpperCase();
         return c === 'MINIAPP_WECHAT' || c === 'WECHAT' || c === 'BALANCE';
     }
 
     private getComplaintRefundUnsupportedReason(channel?: string | null) {
-        return this.isComplaintRefundSupportedChannel(channel)
-            ? null
-            : '退款仅支持原路退回，代付下单等不支持售后退款';
+        return this.isComplaintRefundSupportedChannel(channel) ? null : '退款仅支持原路退回，代付下单等不支持售后退款';
     }
 
     private getComplaintSuggestedRefundAmount(paidAmount: number) {
@@ -4315,31 +4770,21 @@ export class OrdersService {
             userId: Number(row.userId),
             refundSupported: Boolean(Number(row.refundSupported || 0)),
             suggestedRefundAmount:
-                row.suggestedRefundAmount === null || row.suggestedRefundAmount === undefined
-                    ? null
-                    : this.toAmount2(Number(row.suggestedRefundAmount)),
+                row.suggestedRefundAmount === null || row.suggestedRefundAmount === undefined ? null : this.toAmount2(Number(row.suggestedRefundAmount)),
             approvedRefundAmount:
-                row.approvedRefundAmount === null || row.approvedRefundAmount === undefined
-                    ? null
-                    : this.toAmount2(Number(row.approvedRefundAmount)),
+                row.approvedRefundAmount === null || row.approvedRefundAmount === undefined ? null : this.toAmount2(Number(row.approvedRefundAmount)),
             reviewedBy: row.reviewedBy == null ? null : Number(row.reviewedBy),
             refundedBy: row.refundedBy == null ? null : Number(row.refundedBy),
         };
     }
 
     private async findComplaintWorkOrderById(db: any, id: number) {
-        const rows = await db.$queryRawUnsafe(
-            'SELECT * FROM complaint_work_orders WHERE id = ? LIMIT 1',
-            Number(id),
-        );
+        const rows = await db.$queryRawUnsafe('SELECT * FROM complaint_work_orders WHERE id = ? LIMIT 1', Number(id));
         return this.normalizeComplaintWorkOrderRow(rows?.[0]);
     }
 
     private async findComplaintWorkOrderByOrderId(db: any, orderId: number) {
-        const rows = await db.$queryRawUnsafe(
-            'SELECT * FROM complaint_work_orders WHERE orderId = ? ORDER BY id DESC LIMIT 1',
-            Number(orderId),
-        );
+        const rows = await db.$queryRawUnsafe('SELECT * FROM complaint_work_orders WHERE orderId = ? ORDER BY id DESC LIMIT 1', Number(orderId));
         return this.normalizeComplaintWorkOrderRow(rows?.[0]);
     }
 
@@ -4375,25 +4820,24 @@ export class OrdersService {
             values.push(value);
         }
         sets.push('`updatedAt` = NOW()');
-        await db.$executeRawUnsafe(
-            `UPDATE complaint_work_orders SET ${sets.join(', ')} WHERE id = ?`,
-            ...values,
-            Number(id),
-        );
+        await db.$executeRawUnsafe(`UPDATE complaint_work_orders SET ${sets.join(', ')} WHERE id = ?`, ...values, Number(id));
         return this.findComplaintWorkOrderById(db, id);
     }
 
-    private async createComplaintWorkOrderTx(db: any, payload: {
-        orderId: number;
-        userId: number;
-        status: string;
-        reason: string;
-        description?: string | null;
-        paymentChannel?: string | null;
-        refundSupported: boolean;
-        refundUnsupportedReason?: string | null;
-        suggestedRefundAmount?: number | null;
-    }) {
+    private async createComplaintWorkOrderTx(
+        db: any,
+        payload: {
+            orderId: number;
+            userId: number;
+            status: string;
+            reason: string;
+            description?: string | null;
+            paymentChannel?: string | null;
+            refundSupported: boolean;
+            refundUnsupportedReason?: string | null;
+            suggestedRefundAmount?: number | null;
+        },
+    ) {
         const ticketNo = this.buildComplaintTicketNo(payload.orderId);
         await db.$executeRawUnsafe(
             `INSERT INTO complaint_work_orders (
@@ -4412,10 +4856,7 @@ export class OrdersService {
             payload.refundUnsupportedReason ? String(payload.refundUnsupportedReason).trim() : null,
             payload.suggestedRefundAmount == null ? null : this.toAmount2(Number(payload.suggestedRefundAmount)),
         );
-        const rows = await db.$queryRawUnsafe(
-            'SELECT * FROM complaint_work_orders WHERE orderId = ? ORDER BY id DESC LIMIT 1',
-            Number(payload.orderId),
-        );
+        const rows = await db.$queryRawUnsafe('SELECT * FROM complaint_work_orders WHERE orderId = ? ORDER BY id DESC LIMIT 1', Number(payload.orderId));
         return this.normalizeComplaintWorkOrderRow(rows?.[0]);
     }
 
@@ -4423,7 +4864,7 @@ export class OrdersService {
         const ids = Array.from(new Set((orderIds || []).map((item) => Number(item)).filter((item) => Number.isFinite(item) && item > 0)));
         if (!ids.length) return new Map<number, any>();
         const orders = await this.prisma.order.findMany({
-            where: { id: { in: ids } },
+            where: {id: {in: ids}},
             select: {
                 id: true,
                 autoSerial: true,
@@ -4432,9 +4873,11 @@ export class OrdersService {
                 finalPayableAmount: true,
                 status: true,
                 createdAt: true,
-                customerUser: { select: { id: true, name: true, phone: true } },
-                latestPayment: { select: { channel: true, status: true, amount: true, paidAt: true } },
-                project: { select: { id: true, name: true, coverImage: true } },
+                customerUser: {select: {id: true, name: true, phone: true}},
+                latestPayment: {
+                    select: {channel: true, status: true, amount: true, paidAt: true},
+                },
+                project: {select: {id: true, name: true, coverImage: true}},
             },
         });
         return new Map<number, any>(orders.map((item: any) => [Number(item.id), item]));
@@ -4443,7 +4886,9 @@ export class OrdersService {
     private buildComplaintWorkOrderView(row: any, order?: any) {
         const complaint = this.normalizeComplaintWorkOrderRow(row);
         if (!complaint) return null;
-        const paidAmount = this.toAmount2(Number(order?.paidAmount ?? order?.latestPayment?.amount ?? order?.finalPayableAmount ?? order?.receivableAmount ?? 0));
+        const paidAmount = this.toAmount2(
+            Number(order?.paidAmount ?? order?.latestPayment?.amount ?? order?.finalPayableAmount ?? order?.receivableAmount ?? 0),
+        );
         return {
             ...complaint,
             order: order
@@ -4469,7 +4914,7 @@ export class OrdersService {
         orderId = Number(orderId);
         userId = Number(userId);
         const order = await this.prisma.order.findFirst({
-            where: { id: orderId, customerUserId: userId },
+            where: {id: orderId, customerUserId: userId},
             select: {
                 id: true,
                 autoSerial: true,
@@ -4478,15 +4923,17 @@ export class OrdersService {
                 finalPayableAmount: true,
                 status: true,
                 createdAt: true,
-                customerUser: { select: { id: true, name: true, phone: true } },
-                latestPayment: { select: { channel: true, status: true, amount: true, paidAt: true } },
-                project: { select: { id: true, name: true, coverImage: true } },
+                customerUser: {select: {id: true, name: true, phone: true}},
+                latestPayment: {
+                    select: {channel: true, status: true, amount: true, paidAt: true},
+                },
+                project: {select: {id: true, name: true, coverImage: true}},
             },
         });
         if (!order) throw new NotFoundException('订单不存在');
         const complaint = await this.findComplaintWorkOrderByOrderId(this.prisma, orderId);
         return {
-            order: this.buildComplaintWorkOrderView({ orderId }, order)?.order || null,
+            order: this.buildComplaintWorkOrderView({orderId}, order)?.order || null,
             complaint: complaint ? this.buildComplaintWorkOrderView(complaint, order) : null,
         };
     }
@@ -4499,7 +4946,7 @@ export class OrdersService {
         const description = body?.description ? String(body.description).trim() : '';
 
         const order = await this.prisma.order.findFirst({
-            where: { id: orderId, customerUserId: userId },
+            where: {id: orderId, customerUserId: userId},
             select: {
                 id: true,
                 autoSerial: true,
@@ -4510,14 +4957,16 @@ export class OrdersService {
                 createdAt: true,
                 updatedAt: true,
                 dispatches: {
-                    where: { completedAt: { not: null } },
-                    orderBy: { completedAt: 'desc' },
+                    where: {completedAt: {not: null}},
+                    orderBy: {completedAt: 'desc'},
                     take: 1,
-                    select: { completedAt: true },
+                    select: {completedAt: true},
                 },
-                customerUser: { select: { id: true, name: true, phone: true } },
-                latestPayment: { select: { channel: true, status: true, amount: true, paidAt: true } },
-                project: { select: { id: true, name: true, coverImage: true } },
+                customerUser: {select: {id: true, name: true, phone: true}},
+                latestPayment: {
+                    select: {channel: true, status: true, amount: true, paidAt: true},
+                },
+                project: {select: {id: true, name: true, coverImage: true}},
             },
         });
         if (!order) throw new NotFoundException('订单不存在');
@@ -4538,10 +4987,14 @@ export class OrdersService {
             throw new BadRequestException('已退款订单不可重复申请售后');
         }
 
-        const paymentChannel = String(order?.latestPayment?.channel || '').trim().toUpperCase();
+        const paymentChannel = String(order?.latestPayment?.channel || '')
+            .trim()
+            .toUpperCase();
         const refundSupported = this.isComplaintRefundSupportedChannel(paymentChannel);
         const refundUnsupportedReason = this.getComplaintRefundUnsupportedReason(paymentChannel);
-        const paidAmount = this.toAmount2(Number(order?.latestPayment?.amount ?? order?.paidAmount ?? order?.finalPayableAmount ?? order?.receivableAmount ?? 0));
+        const paidAmount = this.toAmount2(
+            Number(order?.latestPayment?.amount ?? order?.paidAmount ?? order?.finalPayableAmount ?? order?.receivableAmount ?? 0),
+        );
         const suggestedRefundAmount = this.getComplaintSuggestedRefundAmount(paidAmount);
 
         const complaint = await this.prisma.$transaction(async (tx) => {
@@ -4551,8 +5004,8 @@ export class OrdersService {
             }
 
             await tx.order.update({
-                where: { id: orderId },
-                data: { status: OrderStatus.WAIT_AFTERSALE },
+                where: {id: orderId},
+                data: {status: OrderStatus.WAIT_AFTERSALE},
             });
 
             if (exists) {
@@ -4596,11 +5049,13 @@ export class OrdersService {
         };
     }
 
-    async listComplaintWorkOrders(query: { page?: number; limit?: number; status?: string; keyword?: string }) {
+    async listComplaintWorkOrders(query: {page?: number; limit?: number; status?: string; keyword?: string}) {
         const page = Math.max(1, Number(query?.page || 1));
         const limit = Math.min(100, Math.max(1, Number(query?.limit || 20)));
         const offset = (page - 1) * limit;
-        const status = String(query?.status || '').trim().toUpperCase();
+        const status = String(query?.status || '')
+            .trim()
+            .toUpperCase();
         const keyword = String(query?.keyword || '').trim();
         const where: string[] = ['1=1'];
         const params: any[] = [];
@@ -4619,10 +5074,7 @@ export class OrdersService {
             limit,
             offset,
         );
-        const totalRows = await this.prisma.$queryRawUnsafe(
-            `SELECT COUNT(*) AS total FROM complaint_work_orders WHERE ${whereSql}`,
-            ...params,
-        );
+        const totalRows = await this.prisma.$queryRawUnsafe(`SELECT COUNT(*) AS total FROM complaint_work_orders WHERE ${whereSql}`, ...params);
         const normalized = ((rows as any[]) || []).map((item) => this.normalizeComplaintWorkOrderRow(item)).filter(Boolean);
         const orderMap = await this.getComplaintOrderMap(normalized.map((item: any) => Number(item.orderId)));
         return {
@@ -4634,7 +5086,15 @@ export class OrdersService {
         };
     }
 
-    async reviewComplaintWorkOrder(id: number, operatorId: number, body: { action?: string; reviewRemark?: string; approvedRefundAmount?: number }) {
+    async reviewComplaintWorkOrder(
+        id: number,
+        operatorId: number,
+        body: {
+            action?: string;
+            reviewRemark?: string;
+            approvedRefundAmount?: number;
+        },
+    ) {
         id = Number(id);
         operatorId = Number(operatorId);
         if (!id) throw new BadRequestException('id 必填');
@@ -4642,13 +5102,18 @@ export class OrdersService {
         const ticket = await this.findComplaintWorkOrderById(this.prisma, id);
         if (!ticket) throw new NotFoundException('客诉工单不存在');
         if (String(ticket.status || '') === 'REFUNDED') throw new BadRequestException('该工单已完成退款');
-        const action = String(body?.action || '').trim().toUpperCase();
+        const action = String(body?.action || '')
+            .trim()
+            .toUpperCase();
         const reviewRemark = body?.reviewRemark ? String(body.reviewRemark).trim().slice(0, 255) : null;
         if (!['APPROVE', 'REJECT'].includes(action)) throw new BadRequestException('审核动作不合法');
 
         const next = await this.prisma.$transaction(async (tx) => {
             if (action === 'REJECT') {
-                await tx.order.update({ where: { id: Number(ticket.orderId) }, data: { status: OrderStatus.AFTERSALE_DONE } });
+                await tx.order.update({
+                    where: {id: Number(ticket.orderId)},
+                    data: {status: OrderStatus.AFTERSALE_DONE},
+                });
                 return this.updateComplaintWorkOrderTx(tx, id, {
                     status: 'REJECTED',
                     reviewRemark,
@@ -4661,7 +5126,7 @@ export class OrdersService {
                 reviewRemark,
                 approvedRefundAmount:
                     body?.approvedRefundAmount === undefined || body?.approvedRefundAmount === null
-                        ? ticket.approvedRefundAmount ?? ticket.suggestedRefundAmount
+                        ? (ticket.approvedRefundAmount ?? ticket.suggestedRefundAmount)
                         : this.toAmount2(Number(body.approvedRefundAmount)),
                 reviewedBy: operatorId,
                 reviewedAt: new Date(),
@@ -4685,7 +5150,7 @@ export class OrdersService {
         return this.buildComplaintWorkOrderView(next, orderMap.get(Number(ticket.orderId)));
     }
 
-    async refundComplaintWorkOrder(id: number, operatorId: number, body: { refundAmount?: number; refundRemark?: string }) {
+    async refundComplaintWorkOrder(id: number, operatorId: number, body: {refundAmount?: number; refundRemark?: string}) {
         id = Number(id);
         operatorId = Number(operatorId);
         if (!id) throw new BadRequestException('id 必填');
@@ -4697,9 +5162,10 @@ export class OrdersService {
             throw new BadRequestException('仅审核通过的工单可执行退款');
         }
 
-        const amount = body?.refundAmount === undefined || body?.refundAmount === null
-            ? this.toAmount2(Number(ticket.approvedRefundAmount ?? ticket.suggestedRefundAmount ?? 0))
-            : this.toAmount2(Number(body.refundAmount));
+        const amount =
+            body?.refundAmount === undefined || body?.refundAmount === null
+                ? this.toAmount2(Number(ticket.approvedRefundAmount ?? ticket.suggestedRefundAmount ?? 0))
+                : this.toAmount2(Number(body.refundAmount));
         if (!(amount > 0)) throw new BadRequestException('退款金额必须大于 0');
 
         const refundRemark = body?.refundRemark ? String(body.refundRemark).trim().slice(0, 255) : null;
@@ -4777,15 +5243,39 @@ export class OrdersService {
                         },
                     },
                 },
-                settlements: {select: {id: true, userId: true, paymentStatus: true, calculatedEarnings: true, finalEarnings: true}},
-                latestPayment: { select: { id: true, channel: true, status: true, amount: true, transactionId: true, paymentNo: true } },
+                settlements: {
+                    select: {
+                        id: true,
+                        userId: true,
+                        paymentStatus: true,
+                        calculatedEarnings: true,
+                        finalEarnings: true,
+                    },
+                },
+                latestPayment: {
+                    select: {
+                        id: true,
+                        channel: true,
+                        status: true,
+                        amount: true,
+                        transactionId: true,
+                        paymentNo: true,
+                        providerSn: true,
+                        clientSn: true,
+                    },
+                },
                 payments: {
-                    where: { channel: 'BALANCE' },
-                    select: { id: true, amount: true, status: true, createdAt: true },
-                    orderBy: { createdAt: 'desc' },
+                    where: {channel: 'BALANCE'},
+                    select: {id: true, amount: true, status: true, createdAt: true},
+                    orderBy: {createdAt: 'desc'},
                 },
                 memberBalanceReservation: {
-                    select: { id: true, status: true, reservedAmount: true, capturedAmount: true },
+                    select: {
+                        id: true,
+                        status: true,
+                        reservedAmount: true,
+                        capturedAmount: true,
+                    },
                 },
             },
         });
@@ -4797,21 +5287,23 @@ export class OrdersService {
 
         const isReservedBalanceOrder = (order as any).balanceSettlementMode === 'RESERVE_CAPTURE';
         const reservation = (order as any).memberBalanceReservation;
-        const isHeldReservedBalanceOrder = isReservedBalanceOrder
-            && String(reservation?.status || '') === 'HELD'
-            && this.toAmount2(Number(reservation?.capturedAmount || 0)) <= 0;
-        const orderWithPayment = isReservedBalanceOrder
-            ? order
-            : await this.ensureLegacySuccessfulPaymentForRefund(order);
-        const latestPaymentChannel = String((orderWithPayment as any)?.latestPayment?.channel || '').trim().toUpperCase();
-        const latestPaymentStatus = String((orderWithPayment as any)?.latestPayment?.status || '').trim().toUpperCase();
+        const isHeldReservedBalanceOrder =
+            isReservedBalanceOrder && String(reservation?.status || '') === 'HELD' && this.toAmount2(Number(reservation?.capturedAmount || 0)) <= 0;
+        const orderWithPayment = isReservedBalanceOrder ? order : await this.ensureLegacySuccessfulPaymentForRefund(order);
+        const latestPaymentChannel = String((orderWithPayment as any)?.latestPayment?.channel || '')
+            .trim()
+            .toUpperCase();
+        const latestPaymentStatus = String((orderWithPayment as any)?.latestPayment?.status || '')
+            .trim()
+            .toUpperCase();
         if (!isHeldReservedBalanceOrder && latestPaymentStatus !== OrderPayStatus.SUCCESS) {
             throw new BadRequestException('订单未支付完成，无法退款');
         }
 
         const shouldAutoRefund = this.shouldAutoRefundWithWechat(orderWithPayment as any);
         const shouldRefundBalance = latestPaymentChannel === 'BALANCE';
-        const manualRefundRequired = !shouldAutoRefund && !shouldRefundBalance;
+        const shouldRefundShouqianba = latestPaymentChannel === 'SHOUQIANBA_WAP';
+        const manualRefundRequired = !shouldAutoRefund && !shouldRefundBalance && !shouldRefundShouqianba;
         if (Boolean(options?.strictOriginalReturn) && manualRefundRequired) {
             throw new BadRequestException(this.getComplaintRefundUnsupportedReason(latestPaymentChannel) || '当前支付渠道不支持原路退款');
         }
@@ -4819,37 +5311,25 @@ export class OrdersService {
         const reservedBalancePayments = isReservedBalanceOrder
             ? ((order as any).payments || []).filter((item: any) => String(item?.status || '') === OrderPayStatus.SUCCESS)
             : [];
-        const heldReservedAmount = isHeldReservedBalanceOrder
-            ? this.toAmount2(Number(reservation?.reservedAmount || 0))
-            : 0;
+        const heldReservedAmount = isHeldReservedBalanceOrder ? this.toAmount2(Number(reservation?.reservedAmount || 0)) : 0;
         const paidTotalForRefund = isHeldReservedBalanceOrder
             ? heldReservedAmount
             : isReservedBalanceOrder
-            ? reservedBalancePayments.reduce((sum: number, item: any) => sum + Number(item.amount || 0), 0)
-            : Number(
-                (orderWithPayment as any)?.latestPayment?.amount ??
-                order.paidAmount ??
-                order.receivableAmount ??
-                order.finalPayableAmount ??
-                0,
-            );
+              ? reservedBalancePayments.reduce((sum: number, item: any) => sum + Number(item.amount || 0), 0)
+              : Number((orderWithPayment as any)?.latestPayment?.amount ?? order.paidAmount ?? order.receivableAmount ?? order.finalPayableAmount ?? 0);
         const latestPaymentAmountFen = this.toAmountFen(paidTotalForRefund);
         if ((shouldAutoRefund || shouldRefundBalance || isHeldReservedBalanceOrder) && latestPaymentAmountFen <= 0) {
             throw new BadRequestException('订单支付金额异常，无法发起退款');
         }
         const requestedRefundAmount =
-            options?.refundAmount === undefined || options?.refundAmount === null
-                ? null
-                : this.toAmount2(Number(options.refundAmount));
+            options?.refundAmount === undefined || options?.refundAmount === null ? null : this.toAmount2(Number(options.refundAmount));
         if (requestedRefundAmount !== null && !(requestedRefundAmount > 0)) {
             throw new BadRequestException('退款金额必须大于 0');
         }
         if (requestedRefundAmount !== null && requestedRefundAmount > this.toAmount2(Number(latestPaymentAmountFen / 100))) {
             throw new BadRequestException('退款金额不能超过订单实付金额');
         }
-        if (isHeldReservedBalanceOrder
-            && requestedRefundAmount !== null
-            && requestedRefundAmount !== heldReservedAmount) {
+        if (isHeldReservedBalanceOrder && requestedRefundAmount !== null && requestedRefundAmount !== heldReservedAmount) {
             throw new BadRequestException('未扣款的储值预占订单仅支持全额释放');
         }
         const refundAmountFen = requestedRefundAmount === null ? latestPaymentAmountFen : this.toAmountFen(requestedRefundAmount);
@@ -4866,14 +5346,17 @@ export class OrdersService {
                   totalFen: latestPaymentAmountFen,
                   reason: refundReason,
               })
-            : null;
+            : shouldRefundShouqianba
+              ? await this.shouqianbaService.refundPayment({
+                    paymentId: Number((orderWithPayment as any)?.latestPayment?.id),
+                    refundRequestNo: refundNo,
+                    amountFen: refundAmountFen,
+                    operator: `BlueCat user ${operatorId}`,
+                })
+              : null;
 
         const settlementUserIds: number[] = Array.from(
-            new Set(
-                (order.settlements || [])
-                    .map((x) => Number((x as any).userId))
-                    .filter((n) => Number.isFinite(n) && n > 0),
-            ),
+            new Set((order.settlements || []).map((x) => Number((x as any).userId)).filter((n) => Number.isFinite(n) && n > 0)),
         );
         const participantUserIds: number[] = Array.from(
             new Set(
@@ -4888,18 +5371,10 @@ export class OrdersService {
         );
         const defaultLiableUserIds = settlementUserIds.length ? settlementUserIds : participantUserIds;
         const customLiableUserIds: number[] = Array.isArray(options?.liableUserIds)
-            ? Array.from(
-                new Set(
-                    options.liableUserIds
-                        .map((x) => Number(x))
-                        .filter((n) => Number.isFinite(n) && n > 0),
-                ),
-            )
+            ? Array.from(new Set(options.liableUserIds.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0)))
             : [];
 
-        const liableUserIds = customLiableUserIds.length
-            ? customLiableUserIds.filter((id) => defaultLiableUserIds.includes(id))
-            : defaultLiableUserIds;
+        const liableUserIds = customLiableUserIds.length ? customLiableUserIds.filter((id) => defaultLiableUserIds.includes(id)) : defaultLiableUserIds;
 
         if (staffLiable && liableUserIds.length === 0) {
             throw new BadRequestException('当前订单未找到可处罚打手，请指定 liableUserIds 或检查结算参与人');
@@ -4918,16 +5393,10 @@ export class OrdersService {
         }
 
         const orderAmountBase = this.toAmount2(
-            Math.max(
-                Number(order.paidAmount || 0),
-                Number(order.receivableAmount || 0),
-                Number((order as any).finalPayableAmount || 0),
-            ),
+            Math.max(Number(order.paidAmount || 0), Number(order.receivableAmount || 0), Number((order as any).finalPayableAmount || 0)),
         );
         const liabilityPenaltyPerUser = this.toAmount2(Math.max(20, orderAmountBase * 0.1));
-        const compensationAllocations = hasCompensation
-            ? this.splitSharedAmountByUsers(compensationAmount, defaultLiableUserIds)
-            : [];
+        const compensationAllocations = hasCompensation ? this.splitSharedAmountByUsers(compensationAmount, defaultLiableUserIds) : [];
         if (hasCompensation && compensationAllocations.length === 0) {
             throw new BadRequestException('赔付分摊失败，请检查本单打手信息');
         }
@@ -4942,13 +5411,13 @@ export class OrdersService {
                 data: {
                     orderId,
                     paymentId: isHeldReservedBalanceOrder
-                        ? (Number((orderWithPayment as any)?.latestPayment?.id || 0) || null)
+                        ? Number((orderWithPayment as any)?.latestPayment?.id || 0) || null
                         : isReservedBalanceOrder
-                        ? null
-                        : (Number((orderWithPayment as any)?.latestPayment?.id || 0) || null),
+                          ? null
+                          : Number((orderWithPayment as any)?.latestPayment?.id || 0) || null,
                     refundNo,
                     channel: latestPaymentChannel || this.resolvePaymentChannelByOrderSource((orderWithPayment as any)?.orderSource),
-                    status: isHeldReservedBalanceOrder ? 'SUCCESS' : (manualRefundRequired ? 'MANUAL_REQUIRED' : 'SUCCESS'),
+                    status: isHeldReservedBalanceOrder ? 'SUCCESS' : manualRefundRequired ? 'MANUAL_REQUIRED' : 'SUCCESS',
                     amount: refundAmount,
                     currency: 'CNY',
                     reason: refundReason,
@@ -4989,7 +5458,9 @@ export class OrdersService {
             await tx.orderDispatch.updateMany({
                 where: {
                     orderId,
-                    status: {in: [DispatchStatus.WAIT_ASSIGN, DispatchStatus.WAIT_ACCEPT, DispatchStatus.ACCEPTED, DispatchStatus.ARCHIVED]},
+                    status: {
+                        in: [DispatchStatus.WAIT_ASSIGN, DispatchStatus.WAIT_ACCEPT, DispatchStatus.ACCEPTED, DispatchStatus.ARCHIVED],
+                    },
                 },
                 data: {
                     status: DispatchStatus.COMPLETED,
@@ -5003,7 +5474,9 @@ export class OrdersService {
                 new Set(
                     [
                         ...((order.dispatches || []).flatMap((d: any) => d?.participants || []) as any[]),
-                        ...((order.settlements || []).map((s: any) => ({userId: s?.userId})) as any[]),
+                        ...((order.settlements || []).map((s: any) => ({
+                            userId: s?.userId,
+                        })) as any[]),
                     ]
                         .map((p: any) => Number(p?.userId || 0))
                         .filter((n: number) => Number.isFinite(n) && n > 0),
@@ -5067,7 +5540,7 @@ export class OrdersService {
             }
 
             // 退款后及时同步订单财务快照，避免原成本继续占用月度利润。
-            await this.rebuildPerformanceAndFinanceByOrderId({ tx, orderId });
+            await this.rebuildPerformanceAndFinanceByOrderId({tx, orderId});
         });
 
         // 5) 退款后处罚（不阻断退款主流程）
@@ -5120,32 +5593,30 @@ export class OrdersService {
             liabilityPenaltyPerUser: staffLiable ? liabilityPenaltyPerUser : 0,
             liabilityPenaltyUserIds: staffLiable ? liableUserIds : [],
             liabilityPenaltyCount: Number(liabilityPenaltyResult?.count || 0),
-            liabilityPenaltyTicketIds: Array.isArray(liabilityPenaltyResult?.ticketIds)
-                ? liabilityPenaltyResult.ticketIds
-                : [],
+            liabilityPenaltyTicketIds: Array.isArray(liabilityPenaltyResult?.ticketIds) ? liabilityPenaltyResult.ticketIds : [],
             liabilityPendingCount: Number(liabilityPenaltyResult?.pendingCount || 0),
             hasCompensation,
             compensationAmount: hasCompensation ? compensationAmount : 0,
             compensationAllocations: hasCompensation ? compensationAllocations : [],
             compensationPenaltyCount: Number(compensationPenaltyResult?.count || 0),
-            compensationPenaltyTicketIds: Array.isArray(compensationPenaltyResult?.ticketIds)
-                ? compensationPenaltyResult.ticketIds
-                : [],
+            compensationPenaltyTicketIds: Array.isArray(compensationPenaltyResult?.ticketIds) ? compensationPenaltyResult.ticketIds : [],
             compensationPendingCount: Number(compensationPenaltyResult?.pendingCount || 0),
             penaltyWarnings,
         });
 
         try {
             const pointAccount = await this.prisma.memberPointAccount.findUnique({
-                where: { userId: Number((order as any)?.customerUserId || 0) },
-                select: { availablePoints: true },
+                where: {userId: Number((order as any)?.customerUserId || 0)},
+                select: {availablePoints: true},
             });
-            const benefitRollbackAmount = round2(Math.min(
-                this.resolveMemberBenefitBaseAmount(order),
-                Number(refundAmount || 0) >= Number((order as any)?.paidAmount || 0)
-                    ? this.resolveMemberBenefitBaseAmount(order)
-                    : Number(refundAmount || 0),
-            ));
+            const benefitRollbackAmount = round2(
+                Math.min(
+                    this.resolveMemberBenefitBaseAmount(order),
+                    Number(refundAmount || 0) >= Number((order as any)?.paidAmount || 0)
+                        ? this.resolveMemberBenefitBaseAmount(order)
+                        : Number(refundAmount || 0),
+                ),
+            );
             const points = this.getOrderRewardPointsByPaidAmount(benefitRollbackAmount);
             if (Number((order as any)?.customerUserId || 0) > 0) {
                 await this.miniSubscribeMessageService.pushMemberAssetMessage({
@@ -5155,7 +5626,7 @@ export class OrdersService {
                     balanceAfter: `积分余额 ${Number(pointAccount?.availablePoints || 0)}`,
                     targetType: 'ORDER',
                     targetId: Number(orderId),
-                    pageQuery: { id: Number(orderId) },
+                    pageQuery: {id: Number(orderId)},
                     remark: `订单退款 ¥${Number(refundAmount || 0).toFixed(2)}，对应会员资产已回退`,
                 });
             }
@@ -5173,7 +5644,7 @@ export class OrdersService {
 
         return this.prisma.$transaction(async (tx) => {
             const dispatch = await tx.orderDispatch.findUnique({
-                where: { id: dispatchId },
+                where: {id: dispatchId},
                 include: {
                     order: true,
                     participants: true,
@@ -5194,7 +5665,7 @@ export class OrdersService {
             await tx.orderParticipant.updateMany({
                 where: {
                     dispatchId,
-                    id: { in: activeParticipants.map((p: any) => Number(p.id)) },
+                    id: {in: activeParticipants.map((p: any) => Number(p.id))},
                     acceptedAt: null,
                 },
                 data: {
@@ -5204,7 +5675,7 @@ export class OrdersService {
 
             await tx.user.updateMany({
                 where: {
-                    id: { in: activeParticipants.map((p: any) => Number(p.userId)) },
+                    id: {in: activeParticipants.map((p: any) => Number(p.userId))},
                 },
                 data: {
                     workStatus: 'WORKING' as any,
@@ -5212,7 +5683,7 @@ export class OrdersService {
                 },
             });
             await tx.orderDispatch.update({
-                where: { id: dispatchId },
+                where: {id: dispatchId},
                 data: {
                     status: DispatchStatus.ACCEPTED,
                     acceptedAllAt: dispatch.acceptedAllAt || now,
@@ -5220,23 +5691,30 @@ export class OrdersService {
             });
 
             await tx.order.update({
-                where: { id: dispatch.orderId },
-                data: { status: OrderStatus.ACCEPTED },
+                where: {id: dispatch.orderId},
+                data: {status: OrderStatus.ACCEPTED},
             });
 
-            await this.logOrderAction(operatorId, dispatch.orderId, 'ADMIN_ACCEPT_DISPATCH', {
-                dispatchId,
-                acceptedAt: now.toISOString(),
-                participantUserIds: activeParticipants.map((p: any) => Number(p.userId)),
-                remark: requiredRemark,
-            }, tx, '客服代接单');
+            await this.logOrderAction(
+                operatorId,
+                dispatch.orderId,
+                'ADMIN_ACCEPT_DISPATCH',
+                {
+                    dispatchId,
+                    acceptedAt: now.toISOString(),
+                    participantUserIds: activeParticipants.map((p: any) => Number(p.userId)),
+                    remark: requiredRemark,
+                },
+                tx,
+                '客服代接单',
+            );
 
             return this.getDispatchWithParticipants(dispatchId);
         });
     }
 
     async adminArchiveDispatch(dispatchStatus: DispatchStatus, dispatchId: number, operator: any, dto: any) {
-        return this.archiveDispatchWithOptions(dispatchStatus, dispatchId, operator, dto, { forceByAdmin: true });
+        return this.archiveDispatchWithOptions(dispatchStatus, dispatchId, operator, dto, {forceByAdmin: true});
     }
 
     async rollbackDispatchToAccepted(dispatchId: number, operator: any, remark?: string) {
@@ -5246,7 +5724,7 @@ export class OrdersService {
 
         const orderId = await this.prisma.$transaction(async (tx) => {
             const dispatch = await tx.orderDispatch.findUnique({
-                where: { id: dispatchId },
+                where: {id: dispatchId},
                 include: {
                     order: true,
                     participants: true,
@@ -5259,28 +5737,26 @@ export class OrdersService {
             if (Number(dispatch.order.currentDispatchId || 0) !== Number(dispatch.id)) {
                 throw new BadRequestException('该轮已不是当前轮，不支持回退');
             }
-            const settlementCount = await tx.orderSettlement.count({ where: { dispatchId } });
+            const settlementCount = await tx.orderSettlement.count({
+                where: {dispatchId},
+            });
             if (settlementCount > 0) {
                 throw new BadRequestException('该轮已生成结算数据，不支持回退');
             }
 
-            const participantIds = (dispatch.participants || [])
-                .filter((p: any) => !p?.rejectedAt)
-                .map((p: any) => Number(p.id));
-            const participantUserIds = (dispatch.participants || [])
-                .filter((p: any) => !p?.rejectedAt)
-                .map((p: any) => Number(p.userId));
+            const participantIds = (dispatch.participants || []).filter((p: any) => !p?.rejectedAt).map((p: any) => Number(p.id));
+            const participantUserIds = (dispatch.participants || []).filter((p: any) => !p?.rejectedAt).map((p: any) => Number(p.userId));
 
             if (!participantIds.length) {
                 throw new BadRequestException('当前轮没有可恢复的参与者');
             }
 
             await tx.orderParticipant.updateMany({
-                where: { id: { in: participantIds } },
-                data: { isActive: true },
+                where: {id: {in: participantIds}},
+                data: {isActive: true},
             });
             await tx.orderDispatch.update({
-                where: { id: dispatchId },
+                where: {id: dispatchId},
                 data: {
                     status: DispatchStatus.ACCEPTED,
                     archivedAt: null,
@@ -5288,19 +5764,26 @@ export class OrdersService {
                 },
             });
             await tx.order.update({
-                where: { id: dispatch.orderId },
-                data: { status: OrderStatus.ACCEPTED },
+                where: {id: dispatch.orderId},
+                data: {status: OrderStatus.ACCEPTED},
             });
             await tx.user.updateMany({
-                where: { id: { in: participantUserIds } },
-                data: { workStatus: 'WORKING' as any },
+                where: {id: {in: participantUserIds}},
+                data: {workStatus: 'WORKING' as any},
             });
-            await this.logOrderAction(operatorId, dispatch.orderId, 'ADMIN_ROLLBACK_DISPATCH_TO_ACCEPTED', {
-                dispatchId,
-                fromStatus: DispatchStatus.ARCHIVED,
-                toStatus: DispatchStatus.ACCEPTED,
-                remark: requiredRemark,
-            }, tx, '客服回退存单到接单中');
+            await this.logOrderAction(
+                operatorId,
+                dispatch.orderId,
+                'ADMIN_ROLLBACK_DISPATCH_TO_ACCEPTED',
+                {
+                    dispatchId,
+                    fromStatus: DispatchStatus.ARCHIVED,
+                    toStatus: DispatchStatus.ACCEPTED,
+                    remark: requiredRemark,
+                },
+                tx,
+                '客服回退存单到接单中',
+            );
 
             return dispatch.orderId;
         });
@@ -5315,7 +5798,7 @@ export class OrdersService {
 
         const orderId = await this.prisma.$transaction(async (tx) => {
             const dispatch = await tx.orderDispatch.findUnique({
-                where: { id: dispatchId },
+                where: {id: dispatchId},
                 include: {
                     order: true,
                 },
@@ -5330,29 +5813,38 @@ export class OrdersService {
             if (Number(dispatch.order.currentDispatchId || 0) !== Number(dispatch.id)) {
                 throw new BadRequestException('该轮已不是当前轮，不支持回退');
             }
-            const settlementCount = await tx.orderSettlement.count({ where: { dispatchId } });
+            const settlementCount = await tx.orderSettlement.count({
+                where: {dispatchId},
+            });
             if (settlementCount > 0) {
                 throw new BadRequestException('该轮已生成结算数据，不支持回退');
             }
 
             await tx.orderDispatch.update({
-                where: { id: dispatchId },
+                where: {id: dispatchId},
                 data: {
                     status: DispatchStatus.ARCHIVED,
                     completedAt: null,
                 },
             });
             await tx.order.update({
-                where: { id: dispatch.orderId },
-                data: { status: OrderStatus.ARCHIVED },
+                where: {id: dispatch.orderId},
+                data: {status: OrderStatus.ARCHIVED},
             });
 
-            await this.logOrderAction(operatorId, dispatch.orderId, 'ADMIN_ROLLBACK_DISPATCH_TO_ARCHIVED', {
-                dispatchId,
-                fromStatus: DispatchStatus.COMPLETED,
-                toStatus: DispatchStatus.ARCHIVED,
-                remark: requiredRemark,
-            }, tx, '客服回退误结单到存单');
+            await this.logOrderAction(
+                operatorId,
+                dispatch.orderId,
+                'ADMIN_ROLLBACK_DISPATCH_TO_ARCHIVED',
+                {
+                    dispatchId,
+                    fromStatus: DispatchStatus.COMPLETED,
+                    toStatus: DispatchStatus.ARCHIVED,
+                    remark: requiredRemark,
+                },
+                tx,
+                '客服回退误结单到存单',
+            );
 
             return dispatch.orderId;
         });
@@ -5379,35 +5871,45 @@ export class OrdersService {
         const forbid = new Set<OrderStatus>([OrderStatus.COMPLETED, OrderStatus.REFUNDED]);
         if (forbid.has(order.status)) throw new BadRequestException('已结单/已退款订单不允许编辑');
 
-        const rawCustomerIdentifierType = String(dto?.customerIdentifierType || '').trim().toUpperCase();
-        const nextCustomerIdentifierType = rawCustomerIdentifierType === 'ALIAS'
-            ? 'ALIAS'
-            : (rawCustomerIdentifierType === 'GAME_ID' ? 'GAME_ID' : undefined);
+        const rawCustomerIdentifierType = String(dto?.customerIdentifierType || '')
+            .trim()
+            .toUpperCase();
+        const nextCustomerIdentifierType = rawCustomerIdentifierType === 'ALIAS' ? 'ALIAS' : rawCustomerIdentifierType === 'GAME_ID' ? 'GAME_ID' : undefined;
         const nextCustomerGameId = dto.customerGameId != null ? String(dto.customerGameId || '').trim() : undefined;
-        const nextCustomerOriginalIdentifier = dto.customerOriginalIdentifier != null
-            ? String(dto.customerOriginalIdentifier || '').trim()
-            : undefined;
+        const nextCustomerOriginalIdentifier = dto.customerOriginalIdentifier != null ? String(dto.customerOriginalIdentifier || '').trim() : undefined;
 
         // 允许编辑的字段（不含陪玩/派单）
         const data: any = {
             orderQuantity: dto.orderQuantity != null ? Number(dto.orderQuantity) : undefined,
             receivableAmount: dto.receivableAmount != null ? Number(dto.receivableAmount) : undefined,
             paidAmount: dto.paidAmount != null ? Number(dto.paidAmount) : undefined,
-            settlementBaseAmount: dto.settlementAmount != null
-                ? Number(dto.settlementAmount)
-                : (dto.settlementBaseAmount != null
-                    ? Number(dto.settlementBaseAmount)
-                    : (dto.paidAmount != null
+            originalAmount: dto.receivableAmount != null ? Number(dto.receivableAmount) : undefined,
+            finalPayableAmount: dto.paidAmount != null ? Number(dto.paidAmount) : undefined,
+            discountAmount:
+                dto.receivableAmount != null && dto.paidAmount != null
+                    ? this.toAmount2(Math.max(0, Number(dto.receivableAmount) - Number(dto.paidAmount)))
+                    : undefined,
+            manualAdjustAmount: dto.manualAdjustAmount != null ? Number(dto.manualAdjustAmount) : undefined,
+            settlementBaseAmount:
+                dto.settlementAmount != null
+                    ? Number(dto.settlementAmount)
+                    : dto.settlementBaseAmount != null
+                      ? Number(dto.settlementBaseAmount)
+                      : dto.paidAmount != null
                         ? Number(dto.paidAmount)
-                        : (dto.receivableAmount != null ? Number(dto.receivableAmount) : undefined))),
+                        : dto.receivableAmount != null
+                          ? Number(dto.receivableAmount)
+                          : undefined,
             baseAmountWan: dto.baseAmountWan != null ? Number(dto.baseAmountWan) : undefined,
             customerGameId: nextCustomerGameId,
+            customerUserId: dto.customerUserId !== undefined ? (dto.customerUserId === null ? null : Number(dto.customerUserId)) : undefined,
             customerIdentifierType: nextCustomerIdentifierType,
-            customerOriginalIdentifier: nextCustomerOriginalIdentifier !== undefined
-                ? nextCustomerOriginalIdentifier
-                : (nextCustomerIdentifierType === 'GAME_ID' && nextCustomerGameId && !order.customerOriginalIdentifier
-                    ? nextCustomerGameId
-                    : undefined),
+            customerOriginalIdentifier:
+                nextCustomerOriginalIdentifier !== undefined
+                    ? nextCustomerOriginalIdentifier
+                    : nextCustomerIdentifierType === 'GAME_ID' && nextCustomerGameId && !order.customerOriginalIdentifier
+                      ? nextCustomerGameId
+                      : undefined,
             orderTime: dto.orderTime ? new Date(dto.orderTime) : undefined,
             paymentTime: dto.paymentTime ? new Date(dto.paymentTime) : undefined,
             csRate: dto.csRate != null ? Number(dto.csRate) : undefined,
@@ -5418,7 +5920,9 @@ export class OrdersService {
 
         // 项目变更：同步 projectSnapshot + clubRate（落库快照）
         if (dto.projectId && Number(dto.projectId) !== order.projectId) {
-            const project = await this.prisma.gameProject.findUnique({where: {id: Number(dto.projectId)}});
+            const project = await this.prisma.gameProject.findUnique({
+                where: {id: Number(dto.projectId)},
+            });
             if (!project) throw new NotFoundException('项目不存在');
 
             data.projectId = project.id;
@@ -5437,19 +5941,158 @@ export class OrdersService {
             } as any;
 
             // 注意：clubRate 是“订单级固定抽成快照”，仍遵循优先级：customClubRate > 项目 clubRate
-            data.clubRate = (dto.customClubRate != null ? Number(dto.customClubRate) : (project.clubRate ?? null));
+            data.clubRate = dto.customClubRate != null ? Number(dto.customClubRate) : (project.clubRate ?? null);
         }
 
         const updated = await this.prisma.$transaction(async (tx) => {
             await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
-            const current = await tx.order.findUnique({ where: { id: orderId } });
+            const current = await tx.order.findUnique({where: {id: orderId}});
             if (!current) throw new NotFoundException('订单不存在');
             // 已收款金额与日期不能通过普通编辑回写，否则会修改历史日收入。
-            if (current.isPaid && (
-                (data.paidAmount !== undefined && data.paidAmount !== Number(current.paidAmount)) ||
-                (data.paymentTime !== undefined && data.paymentTime.getTime() !== current.paymentTime?.getTime())
-            )) throw new BadRequestException('已收款订单不能直接修改实收金额或付款日期，请通过补收或退款流程处理');
-            return tx.order.update({ where: { id: orderId }, data });
+            if (
+                current.isPaid &&
+                ((data.paidAmount !== undefined && data.paidAmount !== Number(current.paidAmount)) ||
+                    (data.paymentTime !== undefined && data.paymentTime.getTime() !== current.paymentTime?.getTime()))
+            )
+                throw new BadRequestException('已收款订单不能直接修改实收金额或付款日期，请通过补收或退款流程处理');
+            let refreshedDiscountDetails: any[] | null = null;
+            if (new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.WAIT_PAYMENT]).has(current.status)) {
+                const nextProjectId = Number(dto.projectId ?? current.projectId);
+                const nextProject = await tx.gameProject.findUnique({
+                    where: {id: nextProjectId},
+                });
+                if (!nextProject) throw new NotFoundException('项目不存在');
+                const nextOriginalAmount = this.toAmount2(Number(dto.receivableAmount ?? current.originalAmount ?? current.receivableAmount));
+                const nextCustomerUserId =
+                    dto.customerUserId !== undefined ? (dto.customerUserId === null ? null : Number(dto.customerUserId)) : current.customerUserId;
+                const existingReservedCoupon = await tx.userCoupon.findFirst({
+                    where: {orderId, status: UserCouponStatus.UNUSED},
+                    include: {template: true},
+                });
+                const requestedCouponId = Object.prototype.hasOwnProperty.call(dto || {}, 'userCouponId')
+                    ? Number(dto.userCouponId || 0)
+                    : Number(existingReservedCoupon?.id || 0);
+                const requestedCoupon =
+                    requestedCouponId > 0
+                        ? await tx.userCoupon.findUnique({
+                              where: {id: requestedCouponId},
+                              include: {template: true},
+                          })
+                        : null;
+                if (requestedCoupon && Number(requestedCoupon.userId) !== Number(nextCustomerUserId || 0)) {
+                    throw new BadRequestException('该优惠券不属于当前会员');
+                }
+                const memberDiscount = await this.resolveMemberOrderDiscount({
+                    customerUserId: nextCustomerUserId,
+                    project: nextProject,
+                    originalAmount: nextOriginalAmount,
+                });
+                const memberDiscountAmount = this.toAmount2(memberDiscount.amount);
+                const couponBaseAmount = this.toAmount2(Math.max(0, nextOriginalAmount - memberDiscountAmount));
+                const couponDiscountAmount = requestedCoupon
+                    ? await this.calcCouponDiscount({
+                          originalAmount: couponBaseAmount,
+                          projectId: nextProject.id,
+                          template: requestedCoupon.template,
+                      })
+                    : 0;
+                const manualAdjustAmount =
+                    memberDiscountAmount > 0 || requestedCoupon ? 0 : this.toAmount2(Number(dto.manualAdjustAmount ?? current.manualAdjustAmount ?? 0));
+                const discountAmount = this.toAmount2(memberDiscountAmount + couponDiscountAmount + manualAdjustAmount);
+                const finalPayableAmount = this.toAmount2(Math.max(0, nextOriginalAmount - discountAmount));
+                Object.assign(data, {
+                    receivableAmount: nextOriginalAmount,
+                    paidAmount: finalPayableAmount,
+                    settlementBaseAmount: dto.settlementAmount != null ? Number(dto.settlementAmount) : finalPayableAmount,
+                    originalAmount: nextOriginalAmount,
+                    memberDiscountAmount,
+                    couponDiscountAmount,
+                    manualAdjustAmount,
+                    discountAmount,
+                    finalPayableAmount,
+                    marketingCostAmount: discountAmount,
+                    discountType: this.resolveDiscountType({
+                        memberDiscountAmount,
+                        couponDiscountAmount,
+                        activityDiscountAmount: 0,
+                        giftDiscountAmount: 0,
+                        manualAdjustAmount,
+                    }),
+                });
+                refreshedDiscountDetails = [];
+                if (memberDiscountAmount > 0)
+                    refreshedDiscountDetails.push({
+                        orderId,
+                        sourceType: 'MEMBER',
+                        sourceId: memberDiscount.benefitId || null,
+                        ruleType: 'LEVEL_DISCOUNT',
+                        amount: memberDiscountAmount,
+                        description: `${memberDiscount.levelCode || '会员'}会员折扣`,
+                    });
+                if (couponDiscountAmount > 0 && requestedCoupon)
+                    refreshedDiscountDetails.push({
+                        orderId,
+                        sourceType: 'COUPON',
+                        sourceId: requestedCoupon.templateId,
+                        ruleType: requestedCoupon.template.type,
+                        amount: couponDiscountAmount,
+                        description: `使用优惠券：${requestedCoupon.template.name}`,
+                    });
+                if (manualAdjustAmount > 0)
+                    refreshedDiscountDetails.push({
+                        orderId,
+                        sourceType: 'MANUAL',
+                        sourceId: operatorId,
+                        ruleType: 'MANUAL',
+                        amount: manualAdjustAmount,
+                        description: '人工优惠减免',
+                    });
+            }
+            if (
+                new Set<OrderStatus>([OrderStatus.DRAFT, OrderStatus.WAIT_PAYMENT]).has(current.status) &&
+                Object.prototype.hasOwnProperty.call(dto || {}, 'userCouponId')
+            ) {
+                const requestedCouponId = Number(dto.userCouponId || 0);
+                const reservedCoupons = await tx.userCoupon.findMany({
+                    where: {orderId, status: UserCouponStatus.UNUSED},
+                    select: {id: true},
+                });
+                const reservedIds = reservedCoupons.map((item) => Number(item.id));
+                if (reservedIds.some((id) => id !== requestedCouponId)) {
+                    await tx.userCoupon.updateMany({
+                        where: {
+                            id: {in: reservedIds.filter((id) => id !== requestedCouponId)},
+                            status: UserCouponStatus.UNUSED,
+                        },
+                        data: {orderId: null},
+                    });
+                }
+                if (requestedCouponId > 0 && !reservedIds.includes(requestedCouponId)) {
+                    const targetCoupon = await tx.userCoupon.findUnique({
+                        where: {id: requestedCouponId},
+                    });
+                    const targetCustomerUserId = Number(dto.customerUserId ?? current.customerUserId ?? 0);
+                    if (!targetCoupon || targetCoupon.status !== UserCouponStatus.UNUSED) {
+                        throw new ConflictException('优惠券已使用或不可用');
+                    }
+                    if (!targetCustomerUserId || Number(targetCoupon.userId) !== targetCustomerUserId) {
+                        throw new BadRequestException('该优惠券不属于当前会员');
+                    }
+                    if (targetCoupon.orderId && Number(targetCoupon.orderId) !== orderId) {
+                        throw new ConflictException('优惠券已被其他待支付订单占用');
+                    }
+                    await tx.userCoupon.update({
+                        where: {id: requestedCouponId},
+                        data: {orderId},
+                    });
+                }
+            }
+            const result = await tx.order.update({where: {id: orderId}, data});
+            if (refreshedDiscountDetails) {
+                await tx.orderDiscount.deleteMany({where: {orderId}});
+                if (refreshedDiscountDetails.length) await tx.orderDiscount.createMany({data: refreshedDiscountDetails});
+            }
+            return result;
         });
 
         await this.logOrderAction(operatorId, orderId, 'UPDATE_ORDER', {
@@ -5488,10 +6131,20 @@ export class OrdersService {
                 paymentTime: true,
                 autoSerial: true,
                 projectId: true,
+                latestPayment: {select: {channel: true, status: true}},
             },
         });
 
         if (!order) throw new NotFoundException('订单不存在');
+
+        if (
+            String(order.latestPayment?.channel || '')
+                .trim()
+                .toUpperCase()
+                .startsWith('SHOUQIANBA')
+        ) {
+            throw new BadRequestException('收钱吧在线付款订单不支持人工确认收款，请等待支付回调或重新生成付款码');
+        }
 
         // 赠送单不收款，避免误操作导致统计混乱
         if (order.isGifted) {
@@ -5527,18 +6180,18 @@ export class OrdersService {
             data: {
                 orderId,
                 paymentNo: `MAN-${orderId}-${Date.now()}`,
-                channel: 'MANUAL_SHOUQIANBA',
+                channel: 'MANUAL_CONFIRMED',
                 status: OrderPayStatus.SUCCESS,
                 amount: paidAmount,
                 currency: 'CNY',
                 paidAt: now,
             },
-            select: { id: true },
+            select: {id: true},
         });
 
         await this.prisma.order.update({
-            where: { id: orderId },
-            data: { latestPaymentId: manualPayment.id },
+            where: {id: orderId},
+            data: {latestPaymentId: manualPayment.id},
         });
 
         await this.logOrderAction(operatorId, orderId, 'MARK_PAID', {
@@ -5668,7 +6321,11 @@ export class OrdersService {
                     remark: remark || `ARCHIVED_FIX_HOURS=${hoursInt}（仅更新 billableHours，不触发重算）`,
                 });
 
-                return {orderId: dispatch.orderId, dispatchId, billableHours: hoursInt};
+                return {
+                    orderId: dispatch.orderId,
+                    dispatchId,
+                    billableHours: hoursInt,
+                };
             }
 
             // =========================
@@ -5717,13 +6374,15 @@ export class OrdersService {
                 remark: remark || `ARCHIVED_FIX_TOTAL_WAN=${totalInt}（均分到${activeParts.length}人；不触发重算）`,
             });
 
-            return {orderId: dispatch.orderId, dispatchId, totalProgressBaseWan: totalInt, splits};
+            return {
+                orderId: dispatch.orderId,
+                dispatchId,
+                totalProgressBaseWan: totalInt,
+                splits,
+            };
         });
     }
 
-
-    
-    
     /*** ===============客服确认结单结算和订单重算结算相关方法======================*/
 
     /**
@@ -5740,24 +6399,19 @@ export class OrdersService {
         scope?: 'COMPLETED_AND_ARCHIVED' | 'COMPLETED_ONLY' | 'ARCHIVED_ONLY';
         includeAllDispatches?: boolean;
     }) {
-        const {
-            tx,
-            orderId,
-            scope = 'COMPLETED_AND_ARCHIVED',
-            includeAllDispatches = false,
-        } = params;
+        const {tx, orderId, scope = 'COMPLETED_AND_ARCHIVED', includeAllDispatches = false} = params;
 
         const inStatuses =
             scope === 'COMPLETED_ONLY'
                 ? [DispatchStatus.COMPLETED as any]
                 : scope === 'ARCHIVED_ONLY'
-                    ? [DispatchStatus.ARCHIVED as any]
-                    : [DispatchStatus.COMPLETED as any, DispatchStatus.ARCHIVED as any];
+                  ? [DispatchStatus.ARCHIVED as any]
+                  : [DispatchStatus.COMPLETED as any, DispatchStatus.ARCHIVED as any];
 
-        const dispatchWhere = includeAllDispatches ? undefined : { status: { in: inStatuses } };
+        const dispatchWhere = includeAllDispatches ? undefined : {status: {in: inStatuses}};
 
         const order = await tx.order.findUnique({
-            where: { id: Number(orderId) },
+            where: {id: Number(orderId)},
             select: {
                 id: true,
                 autoSerial: true,
@@ -5839,7 +6493,7 @@ export class OrdersService {
                 // customerUserId: true,
 
                 dispatches: {
-                    ...(dispatchWhere ? { where: dispatchWhere } : {}),
+                    ...(dispatchWhere ? {where: dispatchWhere} : {}),
                     select: {
                         id: true,
                         round: true,
@@ -5872,8 +6526,8 @@ export class OrdersService {
                 },
 
                 settlements: {
-                    where: { orderId: Number(orderId) },
-                    orderBy: { id: 'asc' },
+                    where: {orderId: Number(orderId)},
+                    orderBy: {id: 'asc'},
                     select: {
                         id: true,
                         orderId: true,
@@ -5896,7 +6550,7 @@ export class OrdersService {
                 },
 
                 playerEvaluations: {
-                    orderBy: { id: 'asc' },
+                    orderBy: {id: 'asc'},
                     select: {
                         id: true,
                         orderId: true,
@@ -5946,7 +6600,7 @@ export class OrdersService {
         skipValidation?: boolean;
         defaultToGood?: boolean;
     }) {
-        const { order, modePlayAllocList } = params;
+        const {order, modePlayAllocList} = params;
         const skipValidation = Boolean(params.skipValidation);
 
         const billingMode = this.getBillingModeFromOrder(order);
@@ -5954,9 +6608,7 @@ export class OrdersService {
             throw new BadRequestException('订单缺少 billingMode');
         }
 
-        const dispatches = [...(order.dispatches ?? [])].sort(
-            (a, b) => (a.round ?? 0) - (b.round ?? 0),
-        );
+        const dispatches = [...(order.dispatches ?? [])].sort((a, b) => (a.round ?? 0) - (b.round ?? 0));
 
         if (!dispatches.length) {
             throw new BadRequestException('未找到可用于结算的派单轮次');
@@ -6030,7 +6682,7 @@ export class OrdersService {
         mode: 'FINAL_CONFIRM' | 'REPAIR_REBUILD';
         reason?: string;
     }) {
-        const { tx, order, operatorId, settlementsToCreate, mode, reason } = params;
+        const {tx, order, operatorId, settlementsToCreate, mode, reason} = params;
 
         const orderId = Number(order.id);
 
@@ -6081,7 +6733,7 @@ export class OrdersService {
         const getSettlementFreezeInfo = (userId: number) => {
             const freezeInfo = settlementFreezeInfoByUser.get(Number(userId));
             if (freezeInfo) return freezeInfo;
-            return computeSettlementFreezeTime({ order });
+            return computeSettlementFreezeTime({order});
         };
         const buildFreezeInfoList = (rows: any[]) =>
             rows.map((row: any) => {
@@ -6103,21 +6755,17 @@ export class OrdersService {
         /**
          * 先做重复键校验，避免 createMany 后才炸
          */
-        const keys = settlementCreateData.map(
-            (s: any) => `${s.dispatchId}_${s.userId}_${s.settlementType}`,
-        );
+        const keys = settlementCreateData.map((s: any) => `${s.dispatchId}_${s.userId}_${s.settlementType}`);
         const dupKeys = keys.filter((k: string, i: number) => keys.indexOf(k) !== i);
         if (dupKeys.length > 0) {
-            throw new BadRequestException(
-                `结算计划存在重复键：${Array.from(new Set(dupKeys)).join(',')}`,
-            );
+            throw new BadRequestException(`结算计划存在重复键：${Array.from(new Set(dupKeys)).join(',')}`);
         }
 
         /**
          * 读取旧 settlement
          */
         const oldSettlements = await tx.orderSettlement.findMany({
-            where: { orderId },
+            where: {orderId},
             select: {
                 id: true,
                 orderId: true,
@@ -6135,9 +6783,7 @@ export class OrdersService {
          */
         if (mode === 'FINAL_CONFIRM') {
             if (oldSettlements.length > 0) {
-                throw new BadRequestException(
-                    '检测到已存在结算记录，首次确认结单仅允许全新写入，请走重算/修复流程',
-                );
+                throw new BadRequestException('检测到已存在结算记录，首次确认结单仅允许全新写入，请走重算/修复流程');
             }
 
             await tx.orderSettlement.createMany({
@@ -6145,7 +6791,7 @@ export class OrdersService {
             });
 
             const createdSettlements = await tx.orderSettlement.findMany({
-                where: { orderId, settlementBatchId },
+                where: {orderId, settlementBatchId},
                 select: {
                     id: true,
                     userId: true,
@@ -6161,9 +6807,7 @@ export class OrdersService {
             });
 
             if (createdSettlements.length !== settlementCreateData.length) {
-                throw new BadRequestException(
-                    `首次写入结算条数不一致：期望=${settlementCreateData.length}, 实际=${createdSettlements.length}`,
-                );
+                throw new BadRequestException(`首次写入结算条数不一致：期望=${settlementCreateData.length}, 实际=${createdSettlements.length}`);
             }
 
             // ✅ 首次确认：沿用旧逻辑，正收益冻结
@@ -6192,12 +6836,7 @@ export class OrdersService {
             }
 
             // ✅ 合并原始计划里的辅助字段，供业绩/财务表使用
-            const extraMap = new Map(
-                settlementsToCreate.map((s: any) => [
-                    `${Number(s.dispatchId)}_${Number(s.userId)}_${String(s.settlementType)}`,
-                    s,
-                ]),
-            );
+            const extraMap = new Map(settlementsToCreate.map((s: any) => [`${Number(s.dispatchId)}_${Number(s.userId)}_${String(s.settlementType)}`, s]));
 
             const mergedSettlements = createdSettlements.map((s: any) => {
                 const key = `${Number(s.dispatchId)}_${Number(s.userId)}_${String(s.settlementType)}`;
@@ -6216,9 +6855,7 @@ export class OrdersService {
                 };
             });
             const freezeInfoByUser = buildFreezeInfoList(createdSettlements);
-            const summaryFreezeInfo = freezeInfoByUser.reduce((max: any, item: any) => (
-                !max || item.freezeEndAt > max.freezeEndAt ? item : max
-            ), null);
+            const summaryFreezeInfo = freezeInfoByUser.reduce((max: any, item: any) => (!max || item.freezeEndAt > max.freezeEndAt ? item : max), null);
 
             return {
                 mode,
@@ -6249,10 +6886,7 @@ export class OrdersService {
 
             const oldSettlementIds = oldSettlements.map((s: any) => s.id);
             const oldSettlementKeyById = new Map<number, string>(
-                oldSettlements.map((s: any) => [
-                    Number(s.id),
-                    `${Number(s.dispatchId)}_${Number(s.userId)}_${String(s.settlementType)}`,
-                ]),
+                oldSettlements.map((s: any) => [Number(s.id), `${Number(s.dispatchId)}_${Number(s.userId)}_${String(s.settlementType)}`]),
             );
 
             /**
@@ -6271,12 +6905,12 @@ export class OrdersService {
             for (const plan of rollbackSettlementResult.reversalPlans ?? []) {
                 const freezeInfo = getSettlementFreezeInfo(Number(plan.userId));
                 const r = await this.wallet.applySettlementEarningToWalletV2({
-                tx,
-                userId: plan.userId,
-                settlementId: plan.settlementId ?? null,
-                orderId: plan.orderId ?? orderId,
-                dispatchId: plan.dispatchId ?? null,
-                finalEarnings: Number(plan.finalEarnings ?? 0),
+                    tx,
+                    userId: plan.userId,
+                    settlementId: plan.settlementId ?? null,
+                    orderId: plan.orderId ?? orderId,
+                    dispatchId: plan.dispatchId ?? null,
+                    finalEarnings: Number(plan.finalEarnings ?? 0),
 
                     unlockAt: freezeInfo.freezeEndAt,
                     freezeWhenPositive: true,
@@ -6311,9 +6945,9 @@ export class OrdersService {
                             WalletBizType.SETTLEMENT_BOMB_LOSS,
                         ] as any,
                     },
-                    status: { in: ['FROZEN', 'AVAILABLE'] as any },
-                    createdAt: { lte: windowEndAt },
-                    OR: [{ settlementId: null }, { settlementId: { notIn: oldSettlementIds } }],
+                    status: {in: ['FROZEN', 'AVAILABLE'] as any},
+                    createdAt: {lte: windowEndAt},
+                    OR: [{settlementId: null}, {settlementId: {notIn: oldSettlementIds}}],
                 },
                 select: {
                     id: true,
@@ -6365,7 +6999,7 @@ export class OrdersService {
              * Step 4：删除旧 settlement（钱包流水不删）
              */
             const deleteOldSettlementResult = await tx.orderSettlement.deleteMany({
-                where: { orderId },
+                where: {orderId},
             });
 
             /**
@@ -6376,7 +7010,7 @@ export class OrdersService {
             });
 
             const createdSettlements = await tx.orderSettlement.findMany({
-                where: { orderId, settlementBatchId },
+                where: {orderId, settlementBatchId},
                 select: {
                     id: true,
                     userId: true,
@@ -6392,9 +7026,7 @@ export class OrdersService {
             });
 
             if (createdSettlements.length !== settlementCreateData.length) {
-                throw new BadRequestException(
-                    `重建结算条数不一致：期望=${settlementCreateData.length}, 实际=${createdSettlements.length}`,
-                );
+                throw new BadRequestException(`重建结算条数不一致：期望=${settlementCreateData.length}, 实际=${createdSettlements.length}`);
             }
 
             const recalcStatusHintByKey = new Map<string, 'FROZEN' | 'AVAILABLE'>();
@@ -6445,12 +7077,7 @@ export class OrdersService {
             /**
              * Step 7：合并计划里的辅助字段，供业绩/财务重建
              */
-            const extraMap = new Map(
-                settlementsToCreate.map((s: any) => [
-                    `${Number(s.dispatchId)}_${Number(s.userId)}_${String(s.settlementType)}`,
-                    s,
-                ]),
-            );
+            const extraMap = new Map(settlementsToCreate.map((s: any) => [`${Number(s.dispatchId)}_${Number(s.userId)}_${String(s.settlementType)}`, s]));
 
             const mergedSettlements = createdSettlements.map((s: any) => {
                 const key = `${Number(s.dispatchId)}_${Number(s.userId)}_${String(s.settlementType)}`;
@@ -6469,9 +7096,7 @@ export class OrdersService {
                 };
             });
             const freezeInfoByUser = buildFreezeInfoList(createdSettlements);
-            const summaryFreezeInfo = freezeInfoByUser.reduce((max: any, item: any) => (
-                !max || item.freezeEndAt > max.freezeEndAt ? item : max
-            ), null);
+            const summaryFreezeInfo = freezeInfoByUser.reduce((max: any, item: any) => (!max || item.freezeEndAt > max.freezeEndAt ? item : max), null);
 
             return {
                 mode,
@@ -6514,16 +7139,7 @@ export class OrdersService {
         orderStatusToUpdate?: OrderStatus;
         logExtra?: any;
     }) {
-        const {
-            tx,
-            orderId,
-            operatorId,
-            settlements,
-            action,
-            remark,
-            orderStatusToUpdate,
-            logExtra,
-        } = params;
+        const {tx, orderId, operatorId, settlements, action, remark, orderStatusToUpdate, logExtra} = params;
 
         /**
          * 如果需要更新订单状态，则在这里统一更新
@@ -6531,8 +7147,8 @@ export class OrdersService {
         let updatedOrder: any = null;
         if (orderStatusToUpdate) {
             updatedOrder = await tx.order.update({
-                where: { id: Number(orderId) },
-                data: { status: orderStatusToUpdate },
+                where: {id: Number(orderId)},
+                data: {status: orderStatusToUpdate},
                 select: {
                     id: true,
                     status: true,
@@ -6592,9 +7208,7 @@ export class OrdersService {
         const originalAmount = this.toAmount2(unitPrice * actualHours);
         const originalAtCreate = this.toAmount2(Number(order?.originalAmount ?? order?.receivableAmount ?? 0));
         const memberDiscountAtCreate = this.toAmount2(Number(order?.memberDiscountAmount ?? 0));
-        const memberDiscountRate = originalAtCreate > 0
-            ? Math.min(1, Math.max(0, memberDiscountAtCreate / originalAtCreate))
-            : 0;
+        const memberDiscountRate = originalAtCreate > 0 ? Math.min(1, Math.max(0, memberDiscountAtCreate / originalAtCreate)) : 0;
         const memberDiscountAmount = this.toAmount2(originalAmount * memberDiscountRate);
         const couponBaseAmount = this.toAmount2(Math.max(0, originalAmount - memberDiscountAmount));
         const template: any = order?.appliedUserCoupon?.template;
@@ -6621,10 +7235,7 @@ export class OrdersService {
         }
         const activityDiscountAmount = this.toAmount2(Number(order?.activityDiscountAmount ?? 0));
         const manualAdjustAmount = this.toAmount2(Number(order?.manualAdjustAmount ?? 0));
-        const otherDiscountAmount = this.toAmount2(Math.min(
-            Math.max(0, couponBaseAmount - couponDiscountAmount),
-            activityDiscountAmount + manualAdjustAmount,
-        ));
+        const otherDiscountAmount = this.toAmount2(Math.min(Math.max(0, couponBaseAmount - couponDiscountAmount), activityDiscountAmount + manualAdjustAmount));
         const discountAmount = this.toAmount2(memberDiscountAmount + couponDiscountAmount + otherDiscountAmount);
         const finalPayableAmount = this.toAmount2(Math.max(0, originalAmount - discountAmount));
         return {
@@ -6648,8 +7259,11 @@ export class OrdersService {
         const orderId = Number(orderIdInput);
         if (!orderId) throw new BadRequestException('orderId 必填');
         const order = await this.prisma.order.findUnique({
-            where: { id: orderId },
-            include: { project: true, appliedUserCoupon: { include: { template: true } } },
+            where: {id: orderId},
+            include: {
+                project: true,
+                appliedUserCoupon: {include: {template: true}},
+            },
         });
         if (!order) throw new NotFoundException('订单不存在');
         if ((order as any).balanceSettlementMode !== 'RESERVE_CAPTURE') {
@@ -6694,11 +7308,7 @@ export class OrdersService {
              * Step 0：并发保护
              */
             await this.lockOrderForSettlement(tx, orderId);
-            await this.assertOrderNotSettlingOrThrow(
-                tx,
-                orderId,
-                '订单正在结算处理中，禁止确认结单',
-            );
+            await this.assertOrderNotSettlingOrThrow(tx, orderId, '订单正在结算处理中，禁止确认结单');
 
             /**
              * Step 1：读取订单
@@ -6731,30 +7341,23 @@ export class OrdersService {
             const billingMode: BillingMode | undefined = this.getBillingModeFromOrder(order);
             if (!billingMode) throw new BadRequestException('订单缺少 billingMode');
 
-            const newPaidAmount =
-                dto?.paidAmount === undefined || dto?.paidAmount === null
-                    ? undefined
-                    : Number(dto.paidAmount);
+            const newPaidAmount = dto?.paidAmount === undefined || dto?.paidAmount === null ? undefined : Number(dto.paidAmount);
 
             const isReservedBalanceOrder = (order as any).balanceSettlementMode === 'RESERVE_CAPTURE';
             if (isReservedBalanceOrder) {
                 let pricing: any = null;
-                let actualAmount = this.toAmount2(Number(
-                    (order as any).finalPayableAmount ?? order.paidAmount ?? 0,
-                ));
+                let actualAmount = this.toAmount2(Number((order as any).finalPayableAmount ?? order.paidAmount ?? 0));
                 if ((order as any).balanceReservationStatus === 'HELD' && billingMode === BillingMode.HOURLY) {
-                    const fallbackHours = (order.dispatches || []).reduce(
-                        (sum: number, dispatch: any) => sum + Number(dispatch?.billableHours || 0),
-                        0,
-                    );
-                    const actualHours = dto?.actualHours !== undefined && dto?.actualHours !== null
-                        ? Number(dto.actualHours)
-                        : fallbackHours > 0
-                            ? fallbackHours
-                            : Number(order.orderQuantity || 0);
+                    const fallbackHours = (order.dispatches || []).reduce((sum: number, dispatch: any) => sum + Number(dispatch?.billableHours || 0), 0);
+                    const actualHours =
+                        dto?.actualHours !== undefined && dto?.actualHours !== null
+                            ? Number(dto.actualHours)
+                            : fallbackHours > 0
+                              ? fallbackHours
+                              : Number(order.orderQuantity || 0);
                     pricing = this.calculateReservedHourlyFinalAmount(order, actualHours);
                     await tx.order.update({
-                        where: { id: orderId },
+                        where: {id: orderId},
                         data: {
                             receivableAmount: pricing.originalAmount,
                             originalAmount: pricing.originalAmount,
@@ -6767,12 +7370,12 @@ export class OrdersService {
                         },
                     });
                     await tx.orderDiscount.updateMany({
-                        where: { orderId, sourceType: 'MEMBER' },
-                        data: { amount: pricing.memberDiscountAmount },
+                        where: {orderId, sourceType: 'MEMBER'},
+                        data: {amount: pricing.memberDiscountAmount},
                     });
                     await tx.orderDiscount.updateMany({
-                        where: { orderId, sourceType: 'COUPON' },
-                        data: { amount: pricing.couponDiscountAmount },
+                        where: {orderId, sourceType: 'COUPON'},
+                        data: {amount: pricing.couponDiscountAmount},
                     });
                     actualAmount = pricing.finalPayableAmount;
                 }
@@ -6783,7 +7386,9 @@ export class OrdersService {
                         action: 'MEMBER_BALANCE_SUPPLEMENT_REQUIRED',
                         targetType: 'ORDER',
                         targetId: orderId,
-                        oldData: { reservedAmount: Number((order as any).balanceReservedAmount || 0) } as any,
+                        oldData: {
+                            reservedAmount: Number((order as any).balanceReservedAmount || 0),
+                        } as any,
                         newData: captureResult as any,
                         remark: remark || '实际消费超过预占金额，等待补款',
                     });
@@ -6793,7 +7398,7 @@ export class OrdersService {
                         status: order.status,
                         capturedAmount: captureResult.capturedAmount,
                         pendingSupplementAmount: captureResult.pendingSupplementAmount,
-                        ...(pricing ? { pricing } : {}),
+                        ...(pricing ? {pricing} : {}),
                         message: `尚需补款 ¥${captureResult.pendingSupplementAmount.toFixed(2)}，补款完成后方可最终结单`,
                     };
                 }
@@ -6807,14 +7412,7 @@ export class OrdersService {
                 }
 
                 if (newPaidAmount > oldPaid) {
-                    await this.applyPaidAmountUpdateInTx(
-                        tx,
-                        order,
-                        newPaidAmount,
-                        operatorId,
-                        remark,
-                        dto?.confirmPaid,
-                    );
+                    await this.applyPaidAmountUpdateInTx(tx, order, newPaidAmount, operatorId, remark, dto?.confirmPaid);
                 } else if (newPaidAmount < oldPaid) {
                     throw new BadRequestException('确认结单时实付金额仅允许不变或增加，不允许减少');
                 }
@@ -6830,13 +7428,9 @@ export class OrdersService {
             });
 
             // 仅储值小时单按最终实际扣款结算；玩法单/保底单继续沿用历史结算基数选择。
-            const settlementBaseMode = isReservedBalanceOrder && billingMode === BillingMode.HOURLY
-                ? 'PAID_AMOUNT'
-                : this.normalizeSettlementBaseMode(dto?.settlementBaseMode);
-            const chosenSettlementBaseAmount = this.getSettlementBaseAmountForConfirmation(
-                latestOrder,
-                settlementBaseMode,
-            );
+            const settlementBaseMode =
+                isReservedBalanceOrder && billingMode === BillingMode.HOURLY ? 'PAID_AMOUNT' : this.normalizeSettlementBaseMode(dto?.settlementBaseMode);
+            const chosenSettlementBaseAmount = this.getSettlementBaseAmountForConfirmation(latestOrder, settlementBaseMode);
 
             if (!Number.isFinite(chosenSettlementBaseAmount) || chosenSettlementBaseAmount <= 0) {
                 throw new BadRequestException('订单结算基数非法');
@@ -6865,7 +7459,7 @@ export class OrdersService {
                 /**
                  * Step 5：构建 settlement 计划
                  */
-                const { settlementsToCreate, evaluationRows } = await this.buildSettlementPlanFromOrder({
+                const {settlementsToCreate, evaluationRows} = await this.buildSettlementPlanFromOrder({
                     order: latestOrder,
                     modePlayAllocList: dto?.modePlayAllocList,
                     // 客服确认结单不再采集评价；结算统一按默认好评计算。
@@ -6990,8 +7584,7 @@ export class OrdersService {
                 const errMsg = String(err?.message || err || '');
                 if (
                     err instanceof BadRequestException &&
-                    (errMsg.includes('订单结算基数与实付金额不一致') ||
-                        errMsg.includes('订单结算基数与结算金额不一致'))
+                    (errMsg.includes('订单结算基数与实付金额不一致') || errMsg.includes('订单结算基数与结算金额不一致'))
                 ) {
                     const preview = await this.buildSettlementPlanFromOrder({
                         order: latestOrder,
@@ -7026,17 +7619,13 @@ export class OrdersService {
 
         if (!result?.previewOnly && String(result?.status || '') === String(OrderStatus.COMPLETED)) {
             try {
-                await this.miniSubscribeMessageService.pushOrderProgressMessage(
-                    Number(orderId),
-                    '订单已完成，欢迎前往评价本次服务',
-                    '待评价',
-                );
+                await this.miniSubscribeMessageService.pushOrderProgressMessage(Number(orderId), '订单已完成，欢迎前往评价本次服务', '待评价');
             } catch (e: any) {
                 console.error('[notify][mini-order-progress][confirm-complete] failed', e?.message || e);
             }
             try {
                 const orderAfter = await this.prisma.order.findUnique({
-                    where: { id: Number(orderId) },
+                    where: {id: Number(orderId)},
                     select: {
                         id: true,
                         customerUserId: true,
@@ -7047,8 +7636,8 @@ export class OrdersService {
                 });
                 if (orderAfter?.customerUserId) {
                     const pointAccount = await this.prisma.memberPointAccount.findUnique({
-                        where: { userId: Number(orderAfter.customerUserId) },
-                        select: { availablePoints: true },
+                        where: {userId: Number(orderAfter.customerUserId)},
+                        select: {availablePoints: true},
                     });
                     const benefitBaseAmount = this.resolveMemberBenefitBaseAmount(orderAfter);
                     const points = this.getOrderRewardPointsByPaidAmount(benefitBaseAmount);
@@ -7059,7 +7648,7 @@ export class OrdersService {
                         balanceAfter: `积分余额 ${Number(pointAccount?.availablePoints || 0)}`,
                         targetType: 'ORDER',
                         targetId: Number(orderAfter.id),
-                        pageQuery: { id: orderAfter.id },
+                        pageQuery: {id: orderAfter.id},
                         remark: `订单完成后已发放积分`,
                     });
                 }
@@ -7093,25 +7682,18 @@ export class OrdersService {
             const day = start.getDay();
             const diff = day === 0 ? 6 : day - 1;
             start.setDate(start.getDate() - diff);
-            return { gte: start };
+            return {gte: start};
         }
 
         if (s === 'MONTH') {
             start.setDate(1);
-            return { gte: start };
+            return {gte: start};
         }
 
         return {};
     }
 
-    async getPlayerEvaluationLeaderboard(params: {
-        scope?: string;
-        startAt?: string;
-        endAt?: string;
-        keyword?: string;
-        page?: number;
-        limit?: number;
-    }) {
+    async getPlayerEvaluationLeaderboard(params: {scope?: string; startAt?: string; endAt?: string; keyword?: string; page?: number; limit?: number}) {
         const page = Math.max(1, Number(params.page ?? 1));
         const limit = Math.min(100, Math.max(1, Number(params.limit ?? 20)));
         const where: any = {};
@@ -7129,11 +7711,11 @@ export class OrdersService {
                         name: true,
                         avatar: true,
                         rating: true,
-                        staffRating: { select: { rate: true } },
+                        staffRating: {select: {rate: true}},
                     },
                 },
             },
-            orderBy: { createdAt: 'desc' },
+            orderBy: {createdAt: 'desc'},
         });
 
         const keyword = String(params.keyword || '').trim();
@@ -7142,9 +7724,7 @@ export class OrdersService {
         for (const row of rows) {
             const player = row.player;
             if (keyword) {
-                const hit =
-                    String(player?.name || '').includes(keyword) ||
-                    String(player?.id || '').includes(keyword);
+                const hit = String(player?.name || '').includes(keyword) || String(player?.id || '').includes(keyword);
                 if (!hit) continue;
             }
 
@@ -7180,25 +7760,27 @@ export class OrdersService {
             aggMap.set(userId, item);
         }
 
-        const list = Array.from(aggMap.values()).map((item) => {
-            const totalCount = Number(item.totalCount || 0);
-            const scoreAvg = totalCount > 0 ? round2(Number(item.scoreSum || 0) / totalCount) : 0;
-            const goodRate = totalCount > 0 ? round2((Number(item.goodCount || 0) / totalCount) * 100) : 0;
-            return {
-                ...item,
-                ratingAvg: scoreAvg,
-                goodRate,
-                badRate: totalCount > 0 ? round2((Number(item.badCount || 0) / totalCount) * 100) : 0,
-            };
-        }).sort((a, b) => {
-            const scoreDiff = Number(b.ratingAvg || 0) - Number(a.ratingAvg || 0);
-            if (scoreDiff !== 0) return scoreDiff;
-            const goodRateDiff = Number(b.goodRate || 0) - Number(a.goodRate || 0);
-            if (goodRateDiff !== 0) return goodRateDiff;
-            const goodCountDiff = Number(b.goodCount || 0) - Number(a.goodCount || 0);
-            if (goodCountDiff !== 0) return goodCountDiff;
-            return Number(b.tipTotal || 0) - Number(a.tipTotal || 0);
-        });
+        const list = Array.from(aggMap.values())
+            .map((item) => {
+                const totalCount = Number(item.totalCount || 0);
+                const scoreAvg = totalCount > 0 ? round2(Number(item.scoreSum || 0) / totalCount) : 0;
+                const goodRate = totalCount > 0 ? round2((Number(item.goodCount || 0) / totalCount) * 100) : 0;
+                return {
+                    ...item,
+                    ratingAvg: scoreAvg,
+                    goodRate,
+                    badRate: totalCount > 0 ? round2((Number(item.badCount || 0) / totalCount) * 100) : 0,
+                };
+            })
+            .sort((a, b) => {
+                const scoreDiff = Number(b.ratingAvg || 0) - Number(a.ratingAvg || 0);
+                if (scoreDiff !== 0) return scoreDiff;
+                const goodRateDiff = Number(b.goodRate || 0) - Number(a.goodRate || 0);
+                if (goodRateDiff !== 0) return goodRateDiff;
+                const goodCountDiff = Number(b.goodCount || 0) - Number(a.goodCount || 0);
+                if (goodCountDiff !== 0) return goodCountDiff;
+                return Number(b.tipTotal || 0) - Number(a.tipTotal || 0);
+            });
 
         const total = list.length;
         const items = list.slice((page - 1) * limit, (page - 1) * limit + limit);
@@ -7217,21 +7799,14 @@ export class OrdersService {
         };
     }
 
-    async getRenewalLeaderboard(params: {
-        dimension?: string;
-        startAt?: string;
-        endAt?: string;
-        keyword?: string;
-        page?: number;
-        limit?: number;
-    }) {
+    async getRenewalLeaderboard(params: {dimension?: string; startAt?: string; endAt?: string; keyword?: string; page?: number; limit?: number}) {
         const page = Math.max(1, Number(params.page ?? 1));
         const limit = Math.min(100, Math.max(1, Number(params.limit ?? 20)));
         const dimension = ['DAY', 'WEEK', 'MONTH'].includes(String(params.dimension || '').toUpperCase())
             ? String(params.dimension || '').toUpperCase()
             : 'DAY';
         const settledAtRange = this.buildEvaluationDateRange('CUSTOM', params.startAt, params.endAt);
-        const where: any = { status: 'SETTLED', attributionType: 'RENEWAL' };
+        const where: any = {status: 'SETTLED', attributionType: 'RENEWAL'};
         if (Object.keys(settledAtRange).length) {
             where.settledAt = settledAtRange;
         }
@@ -7249,11 +7824,11 @@ export class OrdersService {
                     },
                 },
             },
-            orderBy: [{ settledAt: 'desc' }, { id: 'desc' }],
+            orderBy: [{settledAt: 'desc'}, {id: 'desc'}],
         });
         const currentExcellentRows = await this.prisma.excellentStaff.findMany({
-            where: { status: 'ACTIVE' },
-            select: { userId: true },
+            where: {status: 'ACTIVE'},
+            select: {userId: true},
         });
         const currentExcellentSet = new Set(currentExcellentRows.map((row: any) => Number(row.userId)));
 
@@ -7263,16 +7838,7 @@ export class OrdersService {
             if (value === null || value === undefined) return '';
             if (typeof value === 'string' || typeof value === 'number') return String(value).trim();
             if (typeof value === 'object') {
-                return String(
-                    value.nickname ??
-                    value.name ??
-                    value.realName ??
-                    value.displayName ??
-                    value.username ??
-                    value.userId ??
-                    value.id ??
-                    '',
-                ).trim();
+                return String(value.nickname ?? value.name ?? value.realName ?? value.displayName ?? value.username ?? value.userId ?? value.id ?? '').trim();
             }
             return String(value || '').trim();
         };
@@ -7286,12 +7852,8 @@ export class OrdersService {
         };
 
         for (const group of groups) {
-            const memberNames = (Array.isArray(group.memberNamesSnapshot) ? group.memberNamesSnapshot : [])
-                .map(normalizeMemberName)
-                .filter(Boolean);
-            const memberUserIds = (Array.isArray(group.memberUserIds) ? group.memberUserIds : [])
-                .map(normalizeMemberId)
-                .filter(Boolean);
+            const memberNames = (Array.isArray(group.memberNamesSnapshot) ? group.memberNamesSnapshot : []).map(normalizeMemberName).filter(Boolean);
+            const memberUserIds = (Array.isArray(group.memberUserIds) ? group.memberUserIds : []).map(normalizeMemberId).filter(Boolean);
             const currentExcellentUserIds = memberUserIds
                 .map((id: any) => Number(id))
                 .filter((id: number) => Number.isFinite(id) && currentExcellentSet.has(id));
@@ -7330,10 +7892,7 @@ export class OrdersService {
             item.renewalAmount += Number(group.renewalAmount || group.bonusBaseAmount || 0);
             item.bonusTotalAmount += Number(group.bonusTotalAmount || 0);
             item.bonusRateSum += Number(group.bonusRate || 0) * renewalOrderCount;
-            item.currentExcellentUserIds = Array.from(new Set([
-                ...(item.currentExcellentUserIds || []),
-                ...currentExcellentUserIds,
-            ]));
+            item.currentExcellentUserIds = Array.from(new Set([...(item.currentExcellentUserIds || []), ...currentExcellentUserIds]));
             item.hasCurrentExcellentStaff = item.currentExcellentUserIds.length > 0;
 
             const settledAt = group.settledAt || group.updatedAt || group.createdAt;
@@ -7355,28 +7914,31 @@ export class OrdersService {
             aggMap.set(groupKey, item);
         }
 
-        const list = Array.from(aggMap.values()).map((item) => ({
-            ...item,
-            renewalAmount: round2(item.renewalAmount),
-            bonusTotalAmount: round2(item.bonusTotalAmount),
-            avgBonusRate: item.renewalOrderCount > 0 ? round2((item.bonusRateSum / item.renewalOrderCount) * 100) : 0,
-            orders: (Array.isArray(item.orders) ? item.orders : [])
-                .map((order: any) => ({
-                    ...order,
-                    renewalAmount: round2(order.renewalAmount),
-                    bonusTotalAmount: round2(order.bonusTotalAmount),
-                }))
-                .sort((a: any, b: any) => new Date(b.settledAt || 0).getTime() - new Date(a.settledAt || 0).getTime()),
-        })).sort((a, b) => {
-            const countDiff = Number(b.renewalOrderCount || 0) - Number(a.renewalOrderCount || 0);
-            if (countDiff !== 0) return countDiff;
-            const amountDiff = Number(b.renewalAmount || 0) - Number(a.renewalAmount || 0);
-            if (amountDiff !== 0) return amountDiff;
-            return Number(b.bonusTotalAmount || 0) - Number(a.bonusTotalAmount || 0);
-        }).map((item, index) => ({
-            ...item,
-            rank: index + 1,
-        }));
+        const list = Array.from(aggMap.values())
+            .map((item) => ({
+                ...item,
+                renewalAmount: round2(item.renewalAmount),
+                bonusTotalAmount: round2(item.bonusTotalAmount),
+                avgBonusRate: item.renewalOrderCount > 0 ? round2((item.bonusRateSum / item.renewalOrderCount) * 100) : 0,
+                orders: (Array.isArray(item.orders) ? item.orders : [])
+                    .map((order: any) => ({
+                        ...order,
+                        renewalAmount: round2(order.renewalAmount),
+                        bonusTotalAmount: round2(order.bonusTotalAmount),
+                    }))
+                    .sort((a: any, b: any) => new Date(b.settledAt || 0).getTime() - new Date(a.settledAt || 0).getTime()),
+            }))
+            .sort((a, b) => {
+                const countDiff = Number(b.renewalOrderCount || 0) - Number(a.renewalOrderCount || 0);
+                if (countDiff !== 0) return countDiff;
+                const amountDiff = Number(b.renewalAmount || 0) - Number(a.renewalAmount || 0);
+                if (amountDiff !== 0) return amountDiff;
+                return Number(b.bonusTotalAmount || 0) - Number(a.bonusTotalAmount || 0);
+            })
+            .map((item, index) => ({
+                ...item,
+                rank: index + 1,
+            }));
 
         const total = list.length;
         const items = list.slice((page - 1) * limit, (page - 1) * limit + limit);
@@ -7397,8 +7959,7 @@ export class OrdersService {
             },
         };
     }
-    
-    
+
     /**
      * ✅ 钱包对齐修复
      * - 不再考虑其他场景和状态，统一重算(并查询是否已经有对应的结算流水，如果有，直接删除或覆盖)。
@@ -7454,9 +8015,7 @@ export class OrdersService {
         } = params;
         const parsedSettlementBaseAmount = Number(settlementBaseAmount ?? 0);
         const hasExplicitSettlementBaseAmount = Number.isFinite(parsedSettlementBaseAmount) && parsedSettlementBaseAmount > 0;
-        const explicitSettlementBaseAmount = hasExplicitSettlementBaseAmount
-            ? this.toDecimal2(parsedSettlementBaseAmount)
-            : null;
+        const explicitSettlementBaseAmount = hasExplicitSettlementBaseAmount ? this.toDecimal2(parsedSettlementBaseAmount) : null;
 
         const normalizePlayerEvaluations = (rows: any[] = []) => {
             return (Array.isArray(rows) ? rows : [])
@@ -7470,10 +8029,7 @@ export class OrdersService {
                     responsibleUserIds: this.normalizeIdArray(item?.responsibleUserIds),
                     tippedUserIds: this.normalizeIdArray(item?.tippedUserIds),
                 }))
-                .sort((a, b) => (
-                    a.dispatchId - b.dispatchId ||
-                    a.playerUserId - b.playerUserId
-                ));
+                .sort((a, b) => a.dispatchId - b.dispatchId || a.playerUserId - b.playerUserId);
         };
 
         const normalizeModePlayAlloc = (rows: any[] = []) => {
@@ -7489,11 +8045,7 @@ export class OrdersService {
             /**
              * Step 0：并发保护
              */
-            await this.assertOrderNotSettlingOrThrow(
-                tx,
-                orderId,
-                '订单正在结算处理中，禁止历史结算修复',
-            );
+            await this.assertOrderNotSettlingOrThrow(tx, orderId, '订单正在结算处理中，禁止历史结算修复');
 
             /**
              * Step 1：读取订单
@@ -7504,8 +8056,7 @@ export class OrdersService {
                 scope,
             });
 
-            const resolvedRepairSettlementBaseAmount = explicitSettlementBaseAmount
-                ?? this.toDecimal2(this.getSettlementBaseAmountFromOrder(order));
+            const resolvedRepairSettlementBaseAmount = explicitSettlementBaseAmount ?? this.toDecimal2(this.getSettlementBaseAmountFromOrder(order));
 
             const repairOrder = {
                 ...order,
@@ -7515,7 +8066,7 @@ export class OrdersService {
             /**
              * Step 2：dryRun / applyRepair 共用 settlement 计划
              */
-            const { billingMode, settlementsToCreate } = await this.buildSettlementPlanFromOrder({
+            const {billingMode, settlementsToCreate} = await this.buildSettlementPlanFromOrder({
                 order: repairOrder,
                 modePlayAllocList,
                 playerEvaluations,
@@ -7583,26 +8134,22 @@ export class OrdersService {
 
                 const snap:
                     | {
-                    orderId: number;
-                    updatedAt: Date | null;
-                    paidAmount: number;
-                    settlementBaseAmount: number;
-                    status: any;
-                    dispatchCount: number;
-                    modePlayAllocList?: any[];
-                    playerEvaluations?: any[];
-                    orderTipEnabled?: boolean;
-                    orderTipUserIds?: number[];
-                }
+                          orderId: number;
+                          updatedAt: Date | null;
+                          paidAmount: number;
+                          settlementBaseAmount: number;
+                          status: any;
+                          dispatchCount: number;
+                          modePlayAllocList?: any[];
+                          playerEvaluations?: any[];
+                          orderTipEnabled?: boolean;
+                          orderTipUserIds?: number[];
+                      }
                     | undefined = cached.snapshot;
 
-                const currentUpdatedAt = order.updatedAt
-                    ? new Date(order.updatedAt).getTime()
-                    : 0;
+                const currentUpdatedAt = order.updatedAt ? new Date(order.updatedAt).getTime() : 0;
 
-                const cachedUpdatedAt = snap?.updatedAt
-                    ? new Date(snap.updatedAt).getTime()
-                    : 0;
+                const cachedUpdatedAt = snap?.updatedAt ? new Date(snap.updatedAt).getTime() : 0;
 
                 if (
                     Number(snap?.orderId ?? 0) !== Number(order.id) ||
@@ -7624,8 +8171,8 @@ export class OrdersService {
 
             if (explicitSettlementBaseAmount) {
                 await tx.order.update({
-                    where: { id: orderId },
-                    data: { settlementBaseAmount: explicitSettlementBaseAmount },
+                    where: {id: orderId},
+                    data: {settlementBaseAmount: explicitSettlementBaseAmount},
                 });
             }
 
@@ -7643,12 +8190,12 @@ export class OrdersService {
 
             const renewalRepairResult = invalidateRenewal
                 ? await this.reverseRenewalBonusesTx({
-                    tx,
-                    orderId,
-                    operatorId,
-                    reason: renewalInvalidateReason || reason || 'RENEWAL_INVALIDATED_BY_RECALCULATION',
-                    groupStatusAfter: 'INVALIDATED',
-                })
+                      tx,
+                      orderId,
+                      operatorId,
+                      reason: renewalInvalidateReason || reason || 'RENEWAL_INVALIDATED_BY_RECALCULATION',
+                      groupStatusAfter: 'INVALIDATED',
+                  })
                 : null;
 
             /**
@@ -7694,11 +8241,7 @@ export class OrdersService {
      * ⚠️ 注意：此方法不会自动回算 WalletAccount 余额
      *          必须在同一事务里紧接着“重写新流水 + 更新 WalletAccount”，否则余额会不一致
      */
-    async cleanupOrderSettlementSideEffects(params: {
-        tx: any;
-        orderId: number;
-    })
-    {
+    async cleanupOrderSettlementSideEffects(params: {tx: any; orderId: number}) {
         const {tx, orderId} = params;
 
         // 1) 查 settlementIds（只查 id）
@@ -7736,19 +8279,12 @@ export class OrdersService {
         };
     }
 
-
-
     /** ====================== 陪玩端（不应被管理端 orders 权限误伤） ====================== */
 
     /*** -----------------------------
      * 陪玩接单
      * -----------------------------*/
-    async acceptDispatch(
-        dispatchId: number,
-        userId: number,
-        dto: AcceptDispatchDto,
-        payload?: string | { remark?: string },
-    ) {
+    async acceptDispatch(dispatchId: number, userId: number, dto: AcceptDispatchDto, payload?: string | {remark?: string}) {
         const dispatch = await this.prisma.orderDispatch.findUnique({
             where: {id: dispatchId},
             include: {
@@ -7823,11 +8359,7 @@ export class OrdersService {
 
         if (allAccepted) {
             try {
-                await this.miniSubscribeMessageService.pushOrderProgressMessage(
-                    Number(refreshed.orderId),
-                    '订单已接单，服务即将开始',
-                    '服务中',
-                );
+                await this.miniSubscribeMessageService.pushOrderProgressMessage(Number(refreshed.orderId), '订单已接单，服务即将开始', '服务中');
             } catch (e: any) {
                 console.error('[notify][mini-order-progress][accept-dispatch] failed', e?.message || e);
             }
@@ -7897,13 +8429,7 @@ export class OrdersService {
      * mode: 'WORKBENCH' -> 工作台：只看当前轮 + 自己是有效参与者
      * mode: 'HISTORY'   -> 接单记录：包含拒单/被替换等历史（只要参与过即可）
      * -----------------------------*/
-    async listMyDispatches(params: {
-        userId: number;
-        page: number;
-        limit: number;
-        status?: string;
-        mode?: 'WORKBENCH' | 'HISTORY';
-    }) {
+    async listMyDispatches(params: {userId: number; page: number; limit: number; status?: string; mode?: 'WORKBENCH' | 'HISTORY'}) {
         const userId = Number(params.userId);
         const page = Math.max(1, Number(params.page ?? 1));
         const limit = Math.min(100, Math.max(1, Number(params.limit ?? 20)));
@@ -7964,12 +8490,16 @@ export class OrdersService {
                     participants:
                         mode === 'WORKBENCH'
                             ? {
-                                where: {isActive: true, rejectedAt: null},
-                                include: {user: {select: {id: true, name: true, phone: true}}},
-                            }
+                                  where: {isActive: true, rejectedAt: null},
+                                  include: {
+                                      user: {select: {id: true, name: true, phone: true}},
+                                  },
+                              }
                             : {
-                                include: {user: {select: {id: true, name: true, phone: true}}},
-                            },
+                                  include: {
+                                      user: {select: {id: true, name: true, phone: true}},
+                                  },
+                              },
                 },
             }),
             this.prisma.orderDispatch.count({where}),
@@ -8004,28 +8534,33 @@ export class OrdersService {
             },
         };
 
-        const [todayArchiveCount, todayCompleteCount, monthRankingRecords] =
-            await Promise.all([
-                this.prisma.orderDispatch.count({
-                    where: {...dispatchParticipantWhere, archivedAt: {gte: startToday, lte: endToday}},
-                }),
-                this.prisma.orderDispatch.count({
-                    where: {...dispatchParticipantWhere, completedAt: {gte: startToday, lte: endToday}},
-                }),
-                this.prisma.performanceRecord.findMany({
-                    where: {
-                        statsDate: {gte: startMonth, lte: endMonth},
-                        status: 'EFFECTIVE',
-                        ownerRoleType: 'PLAYER',
-                        isCompleted: true,
-                    },
-                    select: {
-                        ownerUserId: true,
-                        orderId: true,
-                        grossPerformanceAmount: true,
-                    },
-                }),
-            ]);
+        const [todayArchiveCount, todayCompleteCount, monthRankingRecords] = await Promise.all([
+            this.prisma.orderDispatch.count({
+                where: {
+                    ...dispatchParticipantWhere,
+                    archivedAt: {gte: startToday, lte: endToday},
+                },
+            }),
+            this.prisma.orderDispatch.count({
+                where: {
+                    ...dispatchParticipantWhere,
+                    completedAt: {gte: startToday, lte: endToday},
+                },
+            }),
+            this.prisma.performanceRecord.findMany({
+                where: {
+                    statsDate: {gte: startMonth, lte: endMonth},
+                    status: 'EFFECTIVE',
+                    ownerRoleType: 'PLAYER',
+                    isCompleted: true,
+                },
+                select: {
+                    ownerUserId: true,
+                    orderId: true,
+                    grossPerformanceAmount: true,
+                },
+            }),
+        ]);
 
         const todayCount = Number(todayArchiveCount) + Number(todayCompleteCount);
         // 本月接单及排名与“接单榜”保持同一口径：已结算业绩记录中的订单去重数。
@@ -8042,23 +8577,16 @@ export class OrdersService {
             item.grossPerformanceAmount += Number(record.grossPerformanceAmount || 0);
             monthPlayerMap.set(ownerUserId, item);
         }
-        if (!monthPlayerMap.has(userId)) {
-            monthPlayerMap.set(userId, {userId, orderIds: new Set<number>(), grossPerformanceAmount: 0});
-        }
         const monthOrderRanking = [...monthPlayerMap.values()]
-            .map(item => ({
+            .map((item) => ({
                 userId: item.userId,
                 completedOrders: item.orderIds.size,
                 grossPerformanceAmount: item.grossPerformanceAmount,
             }))
-            .sort((a, b) =>
-                b.completedOrders - a.completedOrders
-                || b.grossPerformanceAmount - a.grossPerformanceAmount
-                || a.userId - b.userId,
-            );
-        const monthRankIndex = monthOrderRanking.findIndex(item => item.userId === userId);
-        const monthRank = monthRankIndex + 1;
-        const monthCount = monthOrderRanking[monthRankIndex]?.completedOrders || 0;
+            .sort((a, b) => b.completedOrders - a.completedOrders || b.grossPerformanceAmount - a.grossPerformanceAmount || a.userId - b.userId);
+        const monthRankIndex = monthOrderRanking.findIndex((item) => item.userId === userId);
+        const monthRank = monthRankIndex >= 0 ? monthRankIndex + 1 : 0;
+        const monthCount = monthRankIndex >= 0 ? monthOrderRanking[monthRankIndex]?.completedOrders || 0 : 0;
         const previousCount = monthRankIndex > 0 ? monthOrderRanking[monthRankIndex - 1].completedOrders : monthCount;
         const gapToPreviousOrders = monthRankIndex > 0 ? Math.max(0, previousCount - monthCount) : 0;
         const ordersToOvertake = monthRankIndex > 0 ? gapToPreviousOrders + 1 : 0;
@@ -8068,11 +8596,11 @@ export class OrdersService {
         // - 正收益：direction=IN（通常 FROZEN/AVAILABLE 都算）
         // - 炸单负收益：你钱包实现会写 direction=OUT（AVAILABLE），这里会被抵扣
         const incomeBizTypes = [
-            'SETTLEMENT_EARNING',       // 兼容旧
-            'SETTLEMENT_EARNING_BASE',  // 基础收益
+            'SETTLEMENT_EARNING', // 兼容旧
+            'SETTLEMENT_EARNING_BASE', // 基础收益
             'SETTLEMENT_EARNING_CARRY', // 补偿收益
-            'SETTLEMENT_EARNING_CS',    // 客服分红
-            'SETTLEMENT_BOMB_LOSS',     // 炸单损耗（OUT）
+            'SETTLEMENT_EARNING_CS', // 客服分红
+            'SETTLEMENT_BOMB_LOSS', // 炸单损耗（OUT）
         ];
 
         const baseWhere: any = {
@@ -8141,9 +8669,9 @@ export class OrdersService {
     private async applyPaidAmountUpdateInTx(tx: any, order: any, paidAmount: number, operatorId: number, remark?: string, confirmPaid?: any) {
         // 不使用调用前的快照判断差额，锁定后读取最新累计实收，防止并发重复补收。
         await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', order.id);
-        const locked = await tx.order.findUnique({ where: { id: order.id } });
+        const locked = await tx.order.findUnique({where: {id: order.id}});
         if (!locked) throw new NotFoundException('订单不存在');
-        order = { ...order, ...locked };
+        order = {...order, ...locked};
         if (!Number.isFinite(paidAmount) || paidAmount < 0) {
             throw new BadRequestException('paidAmount 非法');
         }
@@ -8193,7 +8721,7 @@ export class OrdersService {
                 oldData: {
                     paidAmount: old,
                     isPaid: (order as any).isPaid ?? null,
-                    paymentTime: order.paymentTime ?? null
+                    paymentTime: order.paymentTime ?? null,
                 } as any,
                 newData: {paidAmount: old, isPaid: true, paymentTime: now} as any,
                 remark: remark || `确认结单时确认收款（金额未变）：${old}`,
@@ -8219,7 +8747,7 @@ export class OrdersService {
             oldData: {
                 paidAmount: old,
                 isPaid: (order as any).isPaid ?? false,
-                paymentTime: order.paymentTime ?? null
+                paymentTime: order.paymentTime ?? null,
             } as any,
             newData: {
                 paidAmount,
@@ -8230,7 +8758,6 @@ export class OrdersService {
 
         return {changed: true};
     }
-
 
     /** -----------------------------
      * 生成订单序列号：YYYYMMDD-0001 Todo 订单编号得改，这个规则有点丑
@@ -8257,32 +8784,24 @@ export class OrdersService {
         // 4) 可选：做一次轻量去重（极小概率撞号时重试）
         //    如果你有 autoSerial 唯一索引，下面逻辑更保险（没有也能用）
         const exists = await this.prisma.order.findFirst({
-            where: { autoSerial: candidate },
-            select: { id: true },
+            where: {autoSerial: candidate},
+            select: {id: true},
         });
 
         if (!exists) return candidate;
 
-    // 极小概率：再来一次（不搞循环，保持简单；你也可以 while 重试 3 次）
-    const len2 = randomInt(4, 7);
-    const max2 = 36 ** len2;
-    const rand2 = randomInt(0, max2);
-    const randPart2 = rand2.toString(36).toUpperCase().padStart(len2, '0');
-    return `${VERSION}${timePart}${randPart2}`;
+        // 极小概率：再来一次（不搞循环，保持简单；你也可以 while 重试 3 次）
+        const len2 = randomInt(4, 7);
+        const max2 = 36 ** len2;
+        const rand2 = randomInt(0, max2);
+        const randPart2 = rand2.toString(36).toUpperCase().padStart(len2, '0');
+        return `${VERSION}${timePart}${randPart2}`;
     }
 
-
-/** -----------------------------
+    /** -----------------------------
      * 审计日志（UserLog）
      * -----------------------------*/
-    private async logOrderAction(
-        operatorId: number,
-        orderId: number,
-        action: string,
-        newData: any,
-        tx?: any,
-        remark?: string,
-    ) {
+    private async logOrderAction(operatorId: number, orderId: number, action: string, newData: any, tx?: any, remark?: string) {
         const uid = Number(operatorId);
         if (!uid) {
             throw new BadRequestException('缺少操作人身份（operatorId），请重新登录后重试');
@@ -8345,9 +8864,7 @@ export class OrdersService {
         const locked = await tx.orderDispatch.updateMany({
             where: {
                 id: dispatchId,
-                status: allowWaitAccept
-                    ? { in: [DispatchStatus.WAIT_ACCEPT, DispatchStatus.ACCEPTED] }
-                    : DispatchStatus.ACCEPTED,
+                status: allowWaitAccept ? {in: [DispatchStatus.WAIT_ACCEPT, DispatchStatus.ACCEPTED]} : DispatchStatus.ACCEPTED,
             },
             data: {status: DispatchStatus.SETTLING},
         });
@@ -8356,7 +8873,6 @@ export class OrdersService {
             // ✅ 抢占失败：要么已结算/已存单，要么正在处理中
             throw new BadRequestException('该派单正在结算中或已处理，请刷新后重试');
         }
-
     }
 
     /** -----------------------------
@@ -8366,7 +8882,10 @@ export class OrdersService {
     private async applyProgressAndDeduct(
         tx: any,
         dispatch: any,
-        dto: { progresses?: Array<{ userId: number; progressBaseWan?: number }>; deductMinutesOption?: string },
+        dto: {
+            progresses?: Array<{userId: number; progressBaseWan?: number}>;
+            deductMinutesOption?: string;
+        },
     ) {
         // ✅ 只处理 progress（保底单）；小时单扣时由 computeAndPersistBillingHours 统一计算并落库
         const progresses = Array.isArray(dto?.progresses) ? dto.progresses : [];
@@ -8428,19 +8947,12 @@ export class OrdersService {
         }
     }
 
-
     /** -----------------------------
      * 小时单：计算并落库 billableMinutes / billableHours
      * - 计时：acceptedAllAt -> archivedAt / completedAt（以 action 来决定终点）
      * - 扣时：deductMinutesValue（10/20/.../60）
      * -----------------------------*/
-    private async computeAndPersistBillingHours(
-        tx: any,
-        dispatch: any,
-        action: 'ARCHIVE' | 'COMPLETE',
-        endTime: Date,
-        deductMinutesOption?: string,
-    ) {
+    private async computeAndPersistBillingHours(tx: any, dispatch: any, action: 'ARCHIVE' | 'COMPLETE', endTime: Date, deductMinutesOption?: string) {
         const billingMode = dispatch?.order?.project?.billingMode;
         if (billingMode !== BillingMode.HOURLY) return null;
 
@@ -8449,10 +8961,7 @@ export class OrdersService {
         }
 
         const deductValue = this.mapDeductMinutesValue(deductMinutesOption);
-        const rawMinutes = Math.max(
-            0,
-            Math.floor((endTime.getTime() - dispatch.acceptedAllAt.getTime()) / 60000),
-        );
+        const rawMinutes = Math.max(0, Math.floor((endTime.getTime() - dispatch.acceptedAllAt.getTime()) / 60000));
 
         const effectiveMinutes = Math.max(0, rawMinutes - deductValue);
         const billableHours = this.minutesToBillableHours(effectiveMinutes);
@@ -8510,7 +9019,6 @@ export class OrdersService {
         const {orderId, dispatchId, mode, settlementBatchId} = params;
         const allowWalletSync = params.allowWalletSync !== false; // 默认 true
 
-
         // ===========================
         // 客服分红比例（不落库，纯规则）
         // ===========================
@@ -8565,9 +9073,7 @@ export class OrdersService {
         //      避免把“从未接单、后续被客服换人”的历史参与者误计入结算
         const dispatchStatus: any = (dispatch as any).status;
 
-        const isFinalized =
-            dispatchStatus === (DispatchStatus as any).COMPLETED ||
-            dispatchStatus === (DispatchStatus as any).ARCHIVED;
+        const isFinalized = dispatchStatus === (DispatchStatus as any).COMPLETED || dispatchStatus === (DispatchStatus as any).ARCHIVED;
 
         const participants = (dispatch.participants || []).filter((p: any) => {
             if (p?.rejectedAt) return false;
@@ -8579,29 +9085,33 @@ export class OrdersService {
         // 3️⃣ 本轮基础结算类型（体验单 / 正价单）
         const baseSettlementType = order.type === OrderType.EXPERIENCE ? 'EXPERIENCE' : 'REGULAR';
 
-        const settlementUserIds = Array.from(new Set([
-            ...participants.map((p: any) => Number(p.userId || 0)),
-            Number(order?.dispatcherId || 0),
-            Number(order?.initialDispatcherId || 0),
-        ].filter((id) => id > 0)));
+        const settlementUserIds = Array.from(
+            new Set(
+                [...participants.map((p: any) => Number(p.userId || 0)), Number(order?.dispatcherId || 0), Number(order?.initialDispatcherId || 0)].filter(
+                    (id) => id > 0,
+                ),
+            ),
+        );
         const settlementFreezeInfoByUser = await this.buildSettlementFreezeInfoByUserTx(
             tx,
             {
                 ...order,
-                projectSnapshot: { type: order.type },
-                dispatches: [{ status: 'COMPLETED', completedAt: new Date() }],
+                projectSnapshot: {type: order.type},
+                dispatches: [{status: 'COMPLETED', completedAt: new Date()}],
             },
             settlementUserIds,
         );
-        const getUnlockAt = (userId: number) => (
-            settlementFreezeInfoByUser.get(Number(userId)) || computeSettlementFreezeTime({
-                order: {
-                    ...order,
-                    projectSnapshot: { type: order.type },
-                    dispatches: [{ status: 'COMPLETED', completedAt: new Date() }],
-                },
-            })
-        ).freezeEndAt;
+        const getUnlockAt = (userId: number) =>
+            (
+                settlementFreezeInfoByUser.get(Number(userId)) ||
+                computeSettlementFreezeTime({
+                    order: {
+                        ...order,
+                        projectSnapshot: {type: order.type},
+                        dispatches: [{status: 'COMPLETED', completedAt: new Date()}],
+                    },
+                })
+            ).freezeEndAt;
 
         // 4️⃣ 分摊规则（原有逻辑兼容）
         const ratioMap = this.buildProgressRatioMap(participants);
@@ -8614,11 +9124,7 @@ export class OrdersService {
         const orderCutRaw = isSet(order.customClubRate) ? order.customClubRate : null;
 
         const snap: any = order.projectSnapshot || {};
-        const projectCutRaw = isSet(snap.clubRate)
-            ? snap.clubRate
-            : isSet(order.project?.clubRate)
-                ? order.project.clubRate
-                : null;
+        const projectCutRaw = isSet(snap.clubRate) ? snap.clubRate : isSet(order.project?.clubRate) ? order.project.clubRate : null;
 
         // ---------- 4.2) 员工评级抽成快照（仅当订单/项目都未设置抽成时才需要） ----------
         let staffCutMap: Map<number, number> | undefined;
@@ -8636,17 +9142,12 @@ export class OrdersService {
             }
         }
 
-        const multiplierPriority = isSet(orderCutRaw)
-            ? 'ORDER_CUT'
-            : isSet(projectCutRaw)
-                ? 'PROJECT_CUT'
-                : 'PLAYER_CUT';
+        const multiplierPriority = isSet(orderCutRaw) ? 'ORDER_CUT' : isSet(projectCutRaw) ? 'PROJECT_CUT' : 'PLAYER_CUT';
 
         // ===========================
         // ✅ 4.3 HOURLY 不走保底口径；GUARANTEED 才走 progress→gross/carry
         // ===========================
-        const billingMode =
-            (order.projectSnapshot as any)?.billingMode ?? (order.project as any)?.billingMode;
+        const billingMode = (order.projectSnapshot as any)?.billingMode ?? (order.project as any)?.billingMode;
 
         const isHourly = billingMode === BillingMode.HOURLY;
 
@@ -8895,10 +9396,7 @@ export class OrdersService {
                             finalEarnings: settlementFinal,
                             unlockAt: getUnlockAt(userId),
                             sourceType: 'ORDER_SETTLEMENT',
-                            bizType:
-                                grossRmb !== null && grossRmb < 0
-                                    ? WalletBizType.SETTLEMENT_BOMB_LOSS
-                                    : WalletBizType.SETTLEMENT_EARNING_BASE,
+                            bizType: grossRmb !== null && grossRmb < 0 ? WalletBizType.SETTLEMENT_BOMB_LOSS : WalletBizType.SETTLEMENT_EARNING_BASE,
                             sourceId: settlementId,
                             orderId,
                             dispatchId,
@@ -8925,7 +9423,7 @@ export class OrdersService {
                 },
                 select: {id: true, userId: true},
             });
-            const compMap = new Map<number, { id: number }>();
+            const compMap = new Map<number, {id: number}>();
             for (const e of existingComp) compMap.set(e.userId, e);
 
             for (let idx = 0; idx < n; idx++) {
@@ -9015,17 +9513,16 @@ export class OrdersService {
         // 6️⃣ 客服分红（仅 COMPLETE 写入）
         // ✅ 规则修复：体验单/福袋单不参与客服抽成y
         const orderTypeForCs: any = ((order as any).projectSnapshot as any)?.type ?? ((order as any).project as any)?.type;
-        const isCsExcluded =
-            orderTypeForCs === OrderType.EXPERIENCE || orderTypeForCs === (OrderType as any).LUCKY_BAG;
+        const isCsExcluded = orderTypeForCs === OrderType.EXPERIENCE || orderTypeForCs === (OrderType as any).LUCKY_BAG;
         const initialDispatcher = this.resolveInitialDispatcher(order);
 
         // ===========================
         if (
-            !isCsExcluded
-            && mode === 'COMPLETE'
-            && CUSTOMER_SERVICE_SHARE_RATE > 0
-            && initialDispatcher.userId
-            && String(initialDispatcher.user?.userType || '') === 'CUSTOMER_SERVICE'
+            !isCsExcluded &&
+            mode === 'COMPLETE' &&
+            CUSTOMER_SERVICE_SHARE_RATE > 0 &&
+            initialDispatcher.userId &&
+            String(initialDispatcher.user?.userType || '') === 'CUSTOMER_SERVICE'
         ) {
             const csAmount = roundMix1(settlementBaseAmount * CUSTOMER_SERVICE_SHARE_RATE);
             if (csAmount > 0) {
@@ -9182,11 +9679,7 @@ export class OrdersService {
      * 订单结算中（存在 SETTLING 轮次）禁止某些操作（补收/重算/钱包对齐）
      * - 只负责抛错，不做状态修改
      * -----------------------------*/
-    private async assertOrderNotSettlingOrThrow(
-        tx: any,
-        orderId: number,
-        message = '订单正在结算处理中，请稍后再试',
-    ) {
+    private async assertOrderNotSettlingOrThrow(tx: any, orderId: number, message = '订单正在结算处理中，请稍后再试') {
         const settlingCount = await tx.orderDispatch.count({
             where: {orderId, status: DispatchStatus.SETTLING as any},
         });
@@ -9207,7 +9700,7 @@ export class OrdersService {
     /** -----------------------------
      *  便捷函数 Todo 确认其功能并补充注释
      * -----------------------------*/
-    private ensureDispatchStatus(dispatch: { status: DispatchStatus }, allowed: DispatchStatus[], message: string) {
+    private ensureDispatchStatus(dispatch: {status: DispatchStatus}, allowed: DispatchStatus[], message: string) {
         const allow = new Set<DispatchStatus>(allowed);
         if (!allow.has(dispatch.status)) throw new BadRequestException(message);
     }
@@ -9219,12 +9712,13 @@ export class OrdersService {
         return this.prisma.orderDispatch.findUnique({
             where: {id: dispatchId},
             include: {
-                participants: {include: {user: {select: {id: true, name: true, phone: true}}}},
+                participants: {
+                    include: {user: {select: {id: true, name: true, phone: true}}},
+                },
                 order: {select: {id: true, autoSerial: true, status: true}},
             },
         });
     }
-
 
     async rollbackWrongSettlementReversals(orderId: number) {
         const oid = Number(orderId);
@@ -9240,13 +9734,9 @@ export class OrdersService {
         });
     }
 
-
     //反修复流水冲正方法(一次性 3-16)
-    async rollbackWrongSettlementReversalsByOrderId(params: {
-        tx: any;
-        orderId: number;
-    }) {
-        const { tx, orderId } = params;
+    async rollbackWrongSettlementReversalsByOrderId(params: {tx: any; orderId: number}) {
+        const {tx, orderId} = params;
 
         const oid = Number(orderId);
         if (!oid) {
@@ -9268,10 +9758,7 @@ export class OrdersService {
                     {
                         bizType: 'SETTLEMENT_REVERSAL',
                         sourceType: {
-                            in: [
-                                'ORDER_SETTLEMENT_REVERSAL',
-                                'WALLET_HOLD_RELEASE_REVERSAL',
-                            ],
+                            in: ['ORDER_SETTLEMENT_REVERSAL', 'WALLET_HOLD_RELEASE_REVERSAL'],
                         },
                     },
                     {
@@ -9292,7 +9779,7 @@ export class OrdersService {
                 sourceId: true,
                 bizType: true,
             },
-            orderBy: { id: 'asc' },
+            orderBy: {id: 'asc'},
         });
 
         if (!wrongTxs.length) {
@@ -9340,14 +9827,14 @@ export class OrdersService {
                         sourceId: txId,
                     },
                 },
-                select: { id: true },
+                select: {id: true},
             });
             if (existedRollbackTx?.id) {
                 continue;
             }
 
             const account = await tx.walletAccount.findUnique({
-                where: { userId },
+                where: {userId},
                 select: {
                     id: true,
                     availableBalance: true,
@@ -9367,15 +9854,9 @@ export class OrdersService {
 
             // ✅ 跟着原错误流水所影响的余额侧反向抵消
             if (String(t.status) === 'FROZEN') {
-                newFrozen =
-                    reverseDirection === 'IN'
-                        ? round2(newFrozen + amount)
-                        : round2(newFrozen - amount);
+                newFrozen = reverseDirection === 'IN' ? round2(newFrozen + amount) : round2(newFrozen - amount);
             } else {
-                newAvailable =
-                    reverseDirection === 'IN'
-                        ? round2(newAvailable + amount)
-                        : round2(newAvailable - amount);
+                newAvailable = reverseDirection === 'IN' ? round2(newAvailable + amount) : round2(newAvailable - amount);
             }
 
             // if (newAvailable < 0 || newFrozen < 0) {
@@ -9386,7 +9867,7 @@ export class OrdersService {
 
             // 1) 更新账户余额
             await tx.walletAccount.update({
-                where: { userId },
+                where: {userId},
                 data: {
                     availableBalance: newAvailable,
                     frozenBalance: newFrozen,
@@ -9414,7 +9895,7 @@ export class OrdersService {
 
                     reversalOfTxId: txId,
                 },
-                select: { id: true },
+                select: {id: true},
             });
 
             createdIds.push(Number(created.id));
@@ -9445,10 +9926,15 @@ export class OrdersService {
      * - 这里先提供最小实现，让编译通过，并保持“可替换点集中”
      */
     private calcPlayerEarning(params: {
-        order: { paidAmount: number; settlementBaseAmount?: number; receivableAmount?: number; originalAmount?: number };
+        order: {
+            paidAmount: number;
+            settlementBaseAmount?: number;
+            receivableAmount?: number;
+            originalAmount?: number;
+        };
         participantsCount: number;
         ratio?: number;
-        _dbg?: { orderId?: number; dispatchId?: number; userId?: number };
+        _dbg?: {orderId?: number; dispatchId?: number; userId?: number};
     }) {
         const {order, participantsCount, ratio, _dbg} = params;
 
@@ -9487,11 +9973,11 @@ export class OrdersService {
      */
     private resolveMultiplier(
         order: any,
-        participant: { userId: number },
+        participant: {userId: number},
         snapshot: {
             // ✅ 结算瞬间快照
-            orderCutRaw: any | null;     // order.customClubRate（可为 0）
-            projectCutRaw: any | null;   // snapshot.clubRate 或 project.clubRate（可为 0）
+            orderCutRaw: any | null; // order.customClubRate（可为 0）
+            projectCutRaw: any | null; // snapshot.clubRate 或 project.clubRate（可为 0）
             staffCutMap?: Map<number, number>; // staffRating.rate（抽成比例），仅当需要走员工评级时才会传
         },
     ): number {
@@ -9592,7 +10078,7 @@ export class OrdersService {
      * - key: participant.id
      * - value: ratio（0~1）
      */
-    private buildProgressRatioMap(participants: Array<{ id: number; progress?: number | null }>) {
+    private buildProgressRatioMap(participants: Array<{id: number; progress?: number | null}>) {
         const weightMap = new Map<number, number>();
 
         // 1) 取权重：progress 有值则用 progress，否则用 1
@@ -9620,7 +10106,6 @@ export class OrdersService {
         }
         return ratioMap;
     }
-
 
     /**
      * 业绩板块方法
@@ -9712,9 +10197,7 @@ export class OrdersService {
             bombCompensationAllowance,
             customerServiceAllowance,
             renewalBonusAllowance,
-            effectiveSettlementBaseAmount: this.toDecimal2(
-                settlementBaseAmount + bombCompensationAllowance + customerServiceAllowance + renewalBonusAllowance,
-            ),
+            effectiveSettlementBaseAmount: this.toDecimal2(settlementBaseAmount + bombCompensationAllowance + customerServiceAllowance + renewalBonusAllowance),
         };
     }
 
@@ -9725,15 +10208,10 @@ export class OrdersService {
         extraPositivePayoutAmount?: number;
         extraAllowanceAmount?: number;
     }) {
-        const { order, settlements, context } = params;
+        const {order, settlements, context} = params;
         const orderId = Number(order?.id || 0);
-        const {
-            settlementBaseAmount,
-            bombCompensationAllowance,
-            customerServiceAllowance,
-            renewalBonusAllowance,
-            effectiveSettlementBaseAmount,
-        } = this.getOrderSettlementSafetyBudget(order, settlements, params.extraAllowanceAmount);
+        const {settlementBaseAmount, bombCompensationAllowance, customerServiceAllowance, renewalBonusAllowance, effectiveSettlementBaseAmount} =
+            this.getOrderSettlementSafetyBudget(order, settlements, params.extraAllowanceAmount);
         if (!orderId) {
             throw new BadRequestException('订单结算安全校验失败：缺少订单ID');
         }
@@ -9756,11 +10234,11 @@ export class OrdersService {
         extraPositivePayoutAmount?: number;
         extraAllowanceAmount?: number;
     }) {
-        const { tx, order, context } = params;
+        const {tx, order, context} = params;
         const orderId = Number(order?.id || 0);
         const settlements = await tx.orderSettlement.findMany({
-            where: { orderId },
-            select: { id: true, finalEarnings: true, settlementType: true },
+            where: {orderId},
+            select: {id: true, finalEarnings: true, settlementType: true},
         });
         this.assertOrderSettlementPayoutWithinBase({
             order,
@@ -9771,33 +10249,22 @@ export class OrdersService {
         });
     }
 
-    private normalizeSettlementBaseMode(
-        mode?: string | null,
-    ): 'PAID_AMOUNT' | 'SETTLEMENT_BASE_AMOUNT' {
-        const normalized = String(mode ?? '').trim().toUpperCase();
+    private normalizeSettlementBaseMode(mode?: string | null): 'PAID_AMOUNT' | 'SETTLEMENT_BASE_AMOUNT' {
+        const normalized = String(mode ?? '')
+            .trim()
+            .toUpperCase();
         if (normalized === 'PAID_AMOUNT' || normalized === 'PAID') {
             return 'PAID_AMOUNT';
         }
-        if (
-            normalized === 'SETTLEMENT_BASE_AMOUNT' ||
-            normalized === 'SETTLEMENT_BASE' ||
-            normalized === 'ORDER_BASE'
-        ) {
+        if (normalized === 'SETTLEMENT_BASE_AMOUNT' || normalized === 'SETTLEMENT_BASE' || normalized === 'ORDER_BASE') {
             return 'SETTLEMENT_BASE_AMOUNT';
         }
         return 'SETTLEMENT_BASE_AMOUNT';
     }
 
-    private getSettlementBaseAmountForConfirmation(
-        order: any,
-        mode: 'PAID_AMOUNT' | 'SETTLEMENT_BASE_AMOUNT',
-    ): number {
+    private getSettlementBaseAmountForConfirmation(order: any, mode: 'PAID_AMOUNT' | 'SETTLEMENT_BASE_AMOUNT'): number {
         if (mode === 'PAID_AMOUNT') {
-            const paidAmount = Number(
-                (order as any)?.isGifted === true
-                    ? (order as any)?.receivableAmount ?? 0
-                    : (order as any)?.paidAmount ?? 0,
-            );
+            const paidAmount = Number((order as any)?.isGifted === true ? ((order as any)?.receivableAmount ?? 0) : ((order as any)?.paidAmount ?? 0));
             return this.toDecimal2(Math.max(0, paidAmount));
         }
 
@@ -9823,18 +10290,10 @@ export class OrdersService {
     /**
      * 生成业绩记录（先删后插，保证同一订单幂等重建）
      */
-    private async rebuildPerformanceRecordsForOrder(params: {
-        tx: any;
-        order: any;
-        settlements: any[];
-    }) {
-        const { tx, order, settlements } = params;
+    private async rebuildPerformanceRecordsForOrder(params: {tx: any; order: any; settlements: any[]}) {
+        const {tx, order, settlements} = params;
 
-        const statsBaseDate =
-            order?.paymentTime ||
-            order?.updatedAt ||
-            order?.createdAt ||
-            new Date();
+        const statsBaseDate = order?.paymentTime || order?.updatedAt || order?.createdAt || new Date();
 
         const statsDate = new Date(this.toYmd(statsBaseDate));
         const statsMonth = this.toYm(statsBaseDate);
@@ -9844,45 +10303,22 @@ export class OrdersService {
         const bizLine = this.getBizLineFromOrder(order);
 
         const completedDispatchIds = new Set(
-            (order?.dispatches ?? [])
-                .filter((d: any) => d?.status === DispatchStatus.COMPLETED)
-                .map((d: any) => Number(d.id)),
+            (order?.dispatches ?? []).filter((d: any) => d?.status === DispatchStatus.COMPLETED).map((d: any) => Number(d.id)),
         );
 
-        const archivedDispatchIds = new Set(
-            (order?.dispatches ?? [])
-                .filter((d: any) => d?.status === DispatchStatus.ARCHIVED)
-                .map((d: any) => Number(d.id)),
-        );
+        const archivedDispatchIds = new Set((order?.dispatches ?? []).filter((d: any) => d?.status === DispatchStatus.ARCHIVED).map((d: any) => Number(d.id)));
 
         const rows = (settlements || []).map((s: any) => {
             const settlementType = String(s?.settlementType || '');
             const isCs = settlementType === 'CUSTOMER_SERVICE';
 
-            const orderGrossAmount = this.toDecimal2(
-                this.getSettlementBaseAmountFromOrder(order),
-            );
+            const orderGrossAmount = this.toDecimal2(this.getSettlementBaseAmountFromOrder(order));
 
             const gross = this.toDecimal2(
-                Number(
-                    isCs
-                        ? orderGrossAmount
-                        : (
-                            s?.grossPerformanceAmount ??
-                            s?.contributionBaseAmount ??
-                            s?.calculatedEarnings ??
-                            0
-                        )
-                ),
+                Number(isCs ? orderGrossAmount : (s?.grossPerformanceAmount ?? s?.contributionBaseAmount ?? s?.calculatedEarnings ?? 0)),
             );
 
-            const net = this.toDecimal2(
-                Number(
-                    s?.netIncomeAmount ??
-                    s?.finalEarnings ??
-                    0
-                ),
-            );
+            const net = this.toDecimal2(Number(s?.netIncomeAmount ?? s?.finalEarnings ?? 0));
 
             const negative = net < 0 ? Math.abs(net) : 0;
 
@@ -9909,9 +10345,7 @@ export class OrdersService {
                 netIncomeAmount: net,
                 negativeIncomeAmount: negative,
 
-                contributionBaseAmount: this.toDecimal2(
-                    Number(s?.contributionBaseAmount ?? gross)
-                ),
+                contributionBaseAmount: this.toDecimal2(Number(s?.contributionBaseAmount ?? gross)),
                 commissionRate: s?.commissionRate == null ? null : this.toDecimal2(Number(s.commissionRate)),
 
                 isAccepted: true,
@@ -9931,7 +10365,7 @@ export class OrdersService {
         });
 
         await tx.performanceRecord.deleteMany({
-            where: { orderId: Number(order.id) },
+            where: {orderId: Number(order.id)},
         });
 
         if (rows.length) {
@@ -9940,7 +10374,7 @@ export class OrdersService {
             });
         }
 
-        return { count: rows.length };
+        return {count: rows.length};
     }
 
     /**
@@ -9955,12 +10389,8 @@ export class OrdersService {
      * 3. 允许确认结单 / 重算修复后反复覆盖，确保最终结果一致
      * 4. 当前投诉 / 售后 / 优惠券先预留字段，后续真实业务接入后再替换默认值
      */
-    private async upsertOrderFinanceRecordForOrder(params: {
-        tx: any;
-        order: any;
-        settlements: any[];
-    }) {
-        const { tx, order, settlements } = params;
+    private async upsertOrderFinanceRecordForOrder(params: {tx: any; order: any; settlements: any[]}) {
+        const {tx, order, settlements} = params;
 
         /**
          * 统计归属时间：
@@ -9969,11 +10399,7 @@ export class OrdersService {
          * - 已付款订单按付款时间归属更合理
          * - 若没有 paymentTime，则至少保证落到某一天
          */
-        const statsBaseDate =
-            order?.paymentTime ||
-            order?.updatedAt ||
-            order?.createdAt ||
-            new Date();
+        const statsBaseDate = order?.paymentTime || order?.updatedAt || order?.createdAt || new Date();
 
         const statsDate = new Date(this.toYmd(statsBaseDate));
         const statsMonth = this.toYm(statsBaseDate);
@@ -10027,7 +10453,7 @@ export class OrdersService {
 
         const renewalBonusCostAmount = (Array.isArray(order?.renewalGroups) ? order.renewalGroups : [])
             .filter((group: any) => String(group?.status || '') === 'SETTLED')
-            .flatMap((group: any) => Array.isArray(group?.bonuses) ? group.bonuses : [])
+            .flatMap((group: any) => (Array.isArray(group?.bonuses) ? group.bonuses : []))
             .filter((bonus: any) => String(bonus?.status || '') === 'PAID')
             .reduce((sum: number, bonus: any) => sum + this.toDecimal2(Number(bonus?.bonusShareAmount ?? 0)), 0);
         playerCostAmount += renewalBonusCostAmount;
@@ -10048,7 +10474,7 @@ export class OrdersService {
          *   （如果你后续希望“平台实收=0，赠送成本单独体现”，可以再拆）
          */
         const receivableAmount = this.toDecimal2(Number(order?.receivableAmount ?? 0));
-        const paidAmount = this.toDecimal2(Number(order?.isGifted ? 0 : order?.paidAmount ?? 0));
+        const paidAmount = this.toDecimal2(Number(order?.isGifted ? 0 : (order?.paidAmount ?? 0)));
         const settlementBaseAmount = this.toDecimal2(this.getSettlementBaseAmountFromOrder(order));
 
         /**
@@ -10081,13 +10507,7 @@ export class OrdersService {
          * 560 - 420 - 5.6 = 134.4
          */
         const grossProfitAmount = this.toDecimal2(
-            paidAmount
-            - playerCostAmount
-            - csCostAmount
-            - operationCostAmount
-            - channelCostAmount
-            - complaintPenaltyAmount
-            - afterSaleCostAmount,
+            paidAmount - playerCostAmount - csCostAmount - operationCostAmount - channelCostAmount - complaintPenaltyAmount - afterSaleCostAmount,
         );
 
         /**
@@ -10133,7 +10553,7 @@ export class OrdersService {
          * - 后续重算修复：update 覆盖
          */
         await tx.orderFinanceRecord.upsert({
-            where: { orderId: Number(order.id) },
+            where: {orderId: Number(order.id)},
             create: {
                 orderId: Number(order.id),
                 ...data,
@@ -10153,15 +10573,11 @@ export class OrdersService {
         };
     }
 
-    private async rebuildPerformanceAndFinanceByOrderId(params: {
-        tx: any;
-        orderId: number;
-        settlements?: any[];
-    }) {
-        const { tx, orderId, settlements } = params;
+    private async rebuildPerformanceAndFinanceByOrderId(params: {tx: any; orderId: number; settlements?: any[]}) {
+        const {tx, orderId, settlements} = params;
 
         const order = await tx.order.findUnique({
-            where: { id: Number(orderId) },
+            where: {id: Number(orderId)},
             select: {
                 id: true,
                 receivableAmount: true,
@@ -10214,8 +10630,8 @@ export class OrdersService {
                     },
                 },
                 settlements: {
-                    where: { orderId: Number(orderId) },
-                    orderBy: { id: 'asc' },
+                    where: {orderId: Number(orderId)},
+                    orderBy: {id: 'asc'},
                     select: {
                         id: true,
                         orderId: true,

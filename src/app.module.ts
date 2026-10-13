@@ -13,6 +13,7 @@ import {RoleModule} from './role/role.module';
 import {GameProjectModule} from './game-project/game-project.module';
 import {MetaModule} from './meta/meta.module';
 import {ScheduleModule} from '@nestjs/schedule';
+import { ShouqianbaModule } from './shouqianba/shouqianba.module';
 import {WalletModule} from './wallet/wallet.module';
 import {DashboardModule} from "./dashboard/dashboard.module";
 import {UserLogsModule} from './user-logs/user-logs.module';
@@ -52,6 +53,7 @@ import { MiniFeatureGuard } from './mini/mini-feature.guard';
         RoleModule,
         GameProjectModule,
         ScheduleModule.forRoot(),
+        ShouqianbaModule,
         WalletModule,
         DashboardModule,
         UserLogsModule,

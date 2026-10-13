@@ -12,7 +12,8 @@ function parseCorsWhitelist(env?: string): string[] {
 }
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // 收钱吧回调 RSA 验签必须使用未经二次序列化的原始请求体。
+  const app = await NestFactory.create(AppModule, { rawBody: true });
 
   const nodeEnv = process.env.NODE_ENV || 'development';
   const isProd = nodeEnv === 'production';

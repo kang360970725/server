@@ -8,6 +8,7 @@ import { PenaltiesModule } from '../penalties/penalties.module';
 import { SystemConfigModule } from '../system-config/system-config.module';
 import { WechatPayService } from '../mini/wechat-pay.service';
 import { StaffActivityModule } from '../staff-activity/staff-activity.module';
+import { ShouqianbaModule } from '../shouqianba/shouqianba.module';
 
 /**
  * OrdersModule
@@ -15,7 +16,7 @@ import { StaffActivityModule } from '../staff-activity/staff-activity.module';
  * - 仅新增 imports，不影响既有 controller/provider 行为
  */
 @Module({
-    imports: [WalletModule, NotificationsModule, PenaltiesModule, SystemConfigModule, StaffActivityModule],
+    imports: [WalletModule, NotificationsModule, PenaltiesModule, SystemConfigModule, StaffActivityModule, ShouqianbaModule],
     controllers: [OrdersController],
     providers: [OrdersService, PrismaService, WechatPayService],
     exports: [OrdersService],

@@ -147,6 +147,13 @@ export class CreateOrderDto {
     @IsInt()
     userCouponId?: number;
 
+    /** 收钱吧订单可预选服务者，但付款成功前不会实际派单。 */
+    @IsOptional()
+    @IsArray()
+    @Type(() => Number)
+    @IsInt({ each: true })
+    playerIds?: number[];
+
     /**
      * 是否续单：
      * - 只能在创建订单并首轮派单时设置

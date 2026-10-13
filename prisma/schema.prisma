@@ -1319,6 +1319,16 @@ model Order {
   discountType               String?                 @db.VarChar(20)
   appliedUserCoupon          UserCoupon?             @relation("OrderAppliedUserCoupon")
   latestPaymentId            Int?
+  /// 收钱吧订单付款前预选的服务者；仅在支付成功且全部仍为空闲时自动生成首轮派单。
+  preselectedPlayerIds       Json?
+  preselectedAttributionIds  Json?
+  preselectedAttributionType String?                 @db.VarChar(20)
+  /// 未收款派单责任：首次允许欠款派单的客服及计时信息。
+  unpaidResponsibleUserId    Int?
+  unpaidSince                DateTime?
+  unpaidLastReminderAt       DateTime?
+  unpaidAutoDeductedAt       DateTime?
+  unpaidAutoDeductedAmount   Decimal                 @default(0.00) @db.Decimal(12, 2)
   /// 储值结算 V2：RESERVE_CAPTURE。为空表示历史订单继续使用旧链路。
   balanceSettlementMode      String?                 @db.VarChar(32)
   balanceReservationStatus   String?                 @db.VarChar(24)
@@ -1353,6 +1363,8 @@ model Order {
   @@index([customerIdentifierType], map: "idx_order_customer_identifier_type")
   @@index([currentDispatchId], map: "Order_currentDispatchId_fkey")
   @@index([latestPaymentId], map: "Order_latestPaymentId_fkey")
+  @@index([isPaid, unpaidSince], map: "idx_order_unpaid_deadline")
+  @@index([unpaidResponsibleUserId], map: "idx_order_unpaid_responsible")
 }
 
 // 收款统计快照：与支付/退款交易解耦，避免累计实收被补收改写后回补旧日。
@@ -1382,13 +1394,30 @@ model OrderPayment {
   id             Int            @id @default(autoincrement())
   orderId        Int
   paymentNo      String         @unique @db.VarChar(64)
-  channel        String         @db.VarChar(32) // MINIAPP_WECHAT/BALANCE/MANUAL_SHOUQIANBA/TUTU_PLATFORM/THIRD_PARTY_CHANNEL
+  /// 收钱吧 client_sn。每次支付/补收尝试都必须唯一，不能复用订单号。
+  clientSn       String?        @unique @db.VarChar(32)
+  purpose        String         @default("ORDER") @db.VarChar(24)
+  attemptNo      Int            @default(1)
+  channel        String         @db.VarChar(32) // SHOUQIANBA_WAP/MANUAL_CONFIRMED/CUSTOMER_SERVICE_BALANCE/MINIAPP_WECHAT/BALANCE/...
   status         OrderPayStatus @default(PENDING)
   amount         Decimal        @db.Decimal(10, 2)
   isTestPayment  Boolean        @default(false)
   currency       String         @default("CNY") @db.VarChar(8)
   prepayId       String?        @db.VarChar(128)
   transactionId  String?        @db.VarChar(128)
+  providerSn     String?        @unique @db.VarChar(32)
+  providerOrderStatus String?    @db.VarChar(32)
+  payway         String?        @db.VarChar(16)
+  subPayway      String?        @db.VarChar(16)
+  netAmount      Decimal?       @db.Decimal(10, 2)
+  settlementAmount Decimal?     @db.Decimal(10, 2)
+  expiresAt      DateTime?
+  verifiedAt     DateTime?
+  verificationSource String?    @db.VarChar(24)
+  lastQueriedAt  DateTime?
+  queryAttempts  Int            @default(0)
+  qrCode         String?        @db.Text
+  qrCodeImageUrl String?        @db.Text
   payerOpenid    String?        @db.VarChar(64)
   notifyRaw      Json?
   paidAt         DateTime?
@@ -1400,7 +1429,28 @@ model OrderPayment {
 
   @@index([orderId, status, createdAt], map: "idx_order_payment_order_status_time")
   @@index([transactionId], map: "idx_order_payment_txn")
+  @@index([orderId, purpose, attemptNo], map: "idx_order_payment_attempt")
   @@map("order_payments")
+}
+
+/// 收钱吧终端凭证。terminal_key 使用 AES-256-GCM 加密，禁止明文落库。
+model ShouqianbaTerminal {
+  id                Int      @id @default(autoincrement())
+  appId             String   @db.VarChar(32)
+  deviceId          String   @unique @db.VarChar(64)
+  terminalSn        String   @unique @db.VarChar(32)
+  terminalKeyCipher String   @db.Text
+  terminalKeyIv     String   @db.VarChar(32)
+  terminalKeyTag    String   @db.VarChar(32)
+  name              String?  @db.VarChar(100)
+  status            String   @default("ACTIVE") @db.VarChar(20)
+  activatedAt       DateTime @default(now())
+  lastCheckedInAt   DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([status])
+  @@map("shouqianba_terminals")
 }
 
 model OrderRefund {
@@ -2181,6 +2231,10 @@ enum RechargeStatus {
 /// 订单总状态（用于列表筛选与业务流转）
 /// 说明：我们把“每次派单”的细节放在 DispatchStatus，OrderStatus 体现订单整体所处阶段
 enum OrderStatus {
+  /// 已保存业务草稿，但支付凭证尚未成功创建；不可派单、不计入经营收入
+  DRAFT
+  /// 在线支付请求已创建，等待支付成功回调；不可手工确认收款或派单
+  WAIT_PAYMENT
   WAIT_ASSIGN
   WAIT_ACCEPT
   ACCEPTED
@@ -2219,8 +2273,10 @@ enum PaymentStatus {
 
 enum OrderPayStatus {
   PENDING
+  PROCESSING
   SUCCESS
   FAILED
+  UNKNOWN
   CLOSED
 }
 
@@ -2297,6 +2353,8 @@ enum WalletBizType {
   STAFF_EXIT_RELEASE
   STAFF_EXIT_CLEAR
   STAFF_ACTIVITY_PENALTY
+  ORDER_UNPAID_CS_LIABILITY
+  ORDER_UNPAID_CS_LIABILITY_REVERSAL
 }
 
 enum WithdrawalStatus {
@@ -2429,6 +2487,8 @@ enum NotificationType {
   DISPATCH_ARCHIVED
   DISPATCH_COMPLETED
   CS_DUTY_SUBSTITUTION
+  ORDER_UNPAID_REMINDER
+  ORDER_UNPAID_AUTO_DEDUCTED
 }
 
 enum AnnouncementAudience {
