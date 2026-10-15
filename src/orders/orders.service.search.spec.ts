@@ -53,4 +53,17 @@ describe('OrdersService customer identifier search', () => {
       { customerGameId: { contains: '房间888' } },
     ]));
   });
+
+  it('excludes draft and cancelled orders from the normal order list', async () => {
+    const { service, prisma } = createService();
+
+    await service.listOrders({});
+
+    expect(prisma.order.findMany.mock.calls[0][0].where.status).toEqual({
+      notIn: ['DRAFT', 'CANCELLED'],
+    });
+    expect(prisma.order.count.mock.calls[0][0].where.status).toEqual({
+      notIn: ['DRAFT', 'CANCELLED'],
+    });
+  });
 });

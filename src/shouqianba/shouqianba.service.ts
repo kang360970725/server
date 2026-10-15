@@ -744,6 +744,42 @@ export class ShouqianbaService {
     }
   }
 
+  /** 二维码到期后持续向渠道确认终态；只有渠道确认失败/关闭后才取消整笔订单。 */
+  @Cron('20 * * * * *')
+  async reconcileExpiredOnlineOrders() {
+    const cutoff = new Date(Date.now() - 60_000);
+    const candidates = await this.prisma.orderPayment.findMany({
+      where: {
+        channel: 'SHOUQIANBA_WAP',
+        purpose: 'ORDER',
+        expiresAt: { lte: cutoff },
+        status: {
+          in: [
+            OrderPayStatus.PENDING,
+            OrderPayStatus.PROCESSING,
+            OrderPayStatus.UNKNOWN,
+          ],
+        },
+        order: {
+          isPaid: false,
+          status: OrderStatus.WAIT_PAYMENT,
+        },
+      },
+      select: { id: true },
+      orderBy: { expiresAt: 'asc' },
+      take: 100,
+    });
+    for (const payment of candidates) {
+      try {
+        await this.queryPayment(payment.id);
+      } catch (error: any) {
+        this.logger.warn(
+          `expired payment confirmation failed id=${payment.id}: ${error?.message || error}`,
+        );
+      }
+    }
+  }
+
   private normalizeIdList(value: any) {
     const list = Array.isArray(value) ? value : [];
     return [
@@ -1071,13 +1107,34 @@ export class ShouqianbaService {
           !order.isPaid &&
           paymentOnlyOrder
         ) {
+          await tx.userCoupon.updateMany({
+            where: { orderId: order.id, status: UserCouponStatus.UNUSED },
+            data: { orderId: null },
+          });
           await tx.order.update({
             where: { id: order.id },
             data: {
-              status: OrderStatus.DRAFT,
+              status: OrderStatus.CANCELLED,
               payStatus: OrderPayStatus.FAILED,
             },
           });
+          if (order.dispatcherId) {
+            await tx.userLog.create({
+              data: {
+                userId: order.dispatcherId,
+                action: 'AUTO_CANCEL_UNPAID_ORDER',
+                targetType: 'ORDER',
+                targetId: order.id,
+                oldData: { status: order.status } as any,
+                newData: {
+                  status: OrderStatus.CANCELLED,
+                  payStatus: OrderPayStatus.FAILED,
+                  providerOrderStatus,
+                } as any,
+                remark: '在线支付超时，渠道确认未支付后自动取消整笔订单',
+              },
+            });
+          }
         }
         return null;
       }

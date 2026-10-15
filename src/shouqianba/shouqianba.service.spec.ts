@@ -148,6 +148,81 @@ describe('ShouqianbaService', () => {
     expect(querySpy).toHaveBeenCalledWith(1);
   });
 
+  it('rechecks expired online payments so orders can converge to cancelled', async () => {
+    const prisma = {
+      orderPayment: {
+        findMany: jest.fn().mockResolvedValue([{ id: 31 }, { id: 32 }]),
+      },
+    };
+    const service = new ShouqianbaService(prisma as any, {} as any);
+    const querySpy = jest.spyOn(service, 'queryPayment').mockResolvedValue({} as any);
+
+    await service.reconcileExpiredOnlineOrders();
+
+    expect(querySpy.mock.calls.map(([id]) => id)).toEqual([31, 32]);
+    expect(prisma.orderPayment.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          purpose: 'ORDER',
+          expiresAt: expect.objectContaining({ lte: expect.any(Date) }),
+          order: expect.objectContaining({ status: 'WAIT_PAYMENT', isPaid: false }),
+        }),
+      }),
+    );
+  });
+
+  it('cancels an unpaid order and releases its coupon after provider confirms expiry', async () => {
+    const tx = {
+      $queryRawUnsafe: jest.fn().mockResolvedValue([]),
+      orderPayment: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 41,
+          orderId: 51,
+          clientSn: 'BC51',
+          status: 'PENDING',
+        }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      order: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 51,
+          autoSerial: 'VTEST51',
+          status: 'WAIT_PAYMENT',
+          isPaid: false,
+          latestPaymentId: 41,
+          currentDispatchId: null,
+          dispatcherId: 7,
+        }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      userCoupon: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      userLog: { create: jest.fn().mockResolvedValue({}) },
+    };
+    const prisma = {
+      $transaction: jest.fn(async (handler: any) => handler(tx)),
+    };
+    const service = new ShouqianbaService(prisma as any, {} as any);
+
+    await (service as any).applyProviderResult(
+      { client_sn: 'BC51', status: 'FAIL', order_status: 'EXPIRED' },
+      'QUERY',
+    );
+
+    expect(tx.userCoupon.updateMany).toHaveBeenCalledWith({
+      where: { orderId: 51, status: 'UNUSED' },
+      data: { orderId: null },
+    });
+    expect(tx.order.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 51 },
+        data: expect.objectContaining({ status: 'CANCELLED', payStatus: 'FAILED' }),
+      }),
+    );
+    expect(tx.userLog.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ action: 'AUTO_CANCEL_UNPAID_ORDER' }) }),
+    );
+  });
+
   it('uses five-second polling for the first two minutes, ten seconds afterwards, and stops after six minutes', async () => {
     const now = Date.now();
     const prisma = {

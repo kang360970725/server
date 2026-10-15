@@ -3146,7 +3146,12 @@ export class OrdersService {
         // 你原来的精确/单字段筛选保留
         if (query.serial) where.autoSerial = {contains: query.serial};
         if (query.projectId) where.projectId = query.projectId;
-        if (query.status) where.status = query.status as any;
+        // 草稿和已取消订单不进入日常订单列表；取消记录仍可通过订单号直达详情审计。
+        if (query.status && String(query.status) !== OrderStatus.CANCELLED) {
+            where.status = query.status as any;
+        } else {
+            where.status = {notIn: [OrderStatus.DRAFT, OrderStatus.CANCELLED]};
+        }
         if (query.dispatcherId) where.dispatcherId = query.dispatcherId;
         if (query.customerGameId) {
             const customerIdentifier = String(query.customerGameId).trim();
@@ -3260,7 +3265,7 @@ export class OrdersService {
                 // 草稿尚未形成有效交易，不进入经营金额汇总。
                 where: {
                     ...where,
-                    status: query.status ? where.status : {not: OrderStatus.DRAFT},
+                    status: where.status,
                 },
                 _sum: {
                     receivableAmount: true,
