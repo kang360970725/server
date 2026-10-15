@@ -836,10 +836,14 @@ export class OrdersService {
     }
 
     private async resolveRenewalBonusRule(order: any) {
-        const fallbackBaseAmount = this.resolveRenewalBonusBaseAmount(order, 'paidAmount');
+        const hasSuccessfulRefund = (order?.refunds || []).some(
+            (item: any) => ['SUCCESS', 'MANUAL_REQUIRED', undefined].includes(item?.status),
+        );
+        const requiredBaseAmountField = hasSuccessfulRefund ? 'settlementBaseAmount' : 'paidAmount';
+        const fallbackBaseAmount = this.resolveRenewalBonusBaseAmount(order, requiredBaseAmountField);
         const fallbackRate = fallbackBaseAmount <= 300 ? 0.01 : 0.02;
         const fallback = {
-            baseAmountField: 'paidAmount',
+            baseAmountField: requiredBaseAmountField,
             baseAmount: fallbackBaseAmount,
             rate: fallbackRate,
             source: 'FALLBACK',
@@ -848,7 +852,8 @@ export class OrdersService {
         const config = await this.systemConfigService.getJson<any>(SystemConfigService.KEYS.ORDER_RENEWAL_BONUS_RULES, null as any);
         if (!config || config.enabled === false) return fallback;
 
-        const baseAmount = this.resolveRenewalBonusBaseAmount(order, config.baseAmountField);
+        const configuredBaseAmountField = hasSuccessfulRefund ? 'settlementBaseAmount' : config.baseAmountField;
+        const baseAmount = this.resolveRenewalBonusBaseAmount(order, configuredBaseAmountField);
         if (!Number.isFinite(baseAmount) || baseAmount <= 0) return fallback;
 
         const tiers = Array.isArray(config.tiers) ? config.tiers : [];
@@ -861,7 +866,7 @@ export class OrdersService {
             }
             if (baseAmount >= min && (max === null || baseAmount <= max)) {
                 return {
-                    baseAmountField: String(config.baseAmountField || 'paidAmount'),
+                    baseAmountField: String(configuredBaseAmountField || 'paidAmount'),
                     baseAmount,
                     rate,
                     source: 'CONFIG',
@@ -3385,6 +3390,22 @@ export class OrdersService {
                     },
                     orderBy: {id: 'desc'},
                 },
+                refunds: {
+                    where: {status: {in: ['SUCCESS', 'MANUAL_REQUIRED']}},
+                    select: {
+                        id: true,
+                        refundNo: true,
+                        refundType: true,
+                        staffLiable: true,
+                        liableUserIds: true,
+                        amount: true,
+                        remainingAmount: true,
+                        reason: true,
+                        refundedAt: true,
+                        createdAt: true,
+                    },
+                    orderBy: {id: 'desc'},
+                },
             },
         } as any);
 
@@ -5224,7 +5245,8 @@ export class OrdersService {
         operatorId = Number(operatorId);
         if (!orderId) throw new BadRequestException('orderId 必填');
         if (!operatorId) throw new BadRequestException('未登录或无权限操作');
-        const staffLiable = Boolean(options?.staffLiable);
+        const staffLiableSelection = options?.staffLiable;
+        const staffLiable = staffLiableSelection === true;
         const hasCompensation = Boolean(options?.hasCompensation);
 
         const order: any = await this.prisma.order.findUnique({
@@ -5323,17 +5345,34 @@ export class OrdersService {
         }
         const requestedRefundAmount =
             options?.refundAmount === undefined || options?.refundAmount === null ? null : this.toAmount2(Number(options.refundAmount));
+        const refundedAggregate = await this.prisma.orderRefund.aggregate({
+            where: {
+                orderId,
+                status: {in: ['SUCCESS', 'MANUAL_REQUIRED']},
+            },
+            _sum: {amount: true},
+        });
+        const previouslyRefundedAmount = this.toAmount2(Number(refundedAggregate?._sum?.amount || 0));
+        const remainingRefundableAmount = this.toAmount2(Math.max(0, paidTotalForRefund - previouslyRefundedAmount));
+        if (remainingRefundableAmount <= 0) {
+            throw new BadRequestException('订单可退款金额已为0，禁止重复退款');
+        }
         if (requestedRefundAmount !== null && !(requestedRefundAmount > 0)) {
             throw new BadRequestException('退款金额必须大于 0');
         }
-        if (requestedRefundAmount !== null && requestedRefundAmount > this.toAmount2(Number(latestPaymentAmountFen / 100))) {
-            throw new BadRequestException('退款金额不能超过订单实付金额');
+        if (requestedRefundAmount !== null && requestedRefundAmount > remainingRefundableAmount) {
+            throw new BadRequestException('退款金额不能超过订单剩余可退款金额');
         }
         if (isHeldReservedBalanceOrder && requestedRefundAmount !== null && requestedRefundAmount !== heldReservedAmount) {
             throw new BadRequestException('未扣款的储值预占订单仅支持全额释放');
         }
-        const refundAmountFen = requestedRefundAmount === null ? latestPaymentAmountFen : this.toAmountFen(requestedRefundAmount);
+        const refundAmountFen = this.toAmountFen(requestedRefundAmount === null ? remainingRefundableAmount : requestedRefundAmount);
         const refundAmount = this.toAmount2(Number(refundAmountFen / 100));
+        const remainingAmount = this.toAmount2(Math.max(0, remainingRefundableAmount - refundAmount));
+        const isPartialRefund = remainingAmount > 0;
+        if (isPartialRefund && typeof staffLiableSelection !== 'boolean') {
+            throw new BadRequestException('部分退款必须明确选择打手有责或无责');
+        }
         const refundReason = remark ? String(remark).trim().slice(0, 80) : '订单退款';
         const refundNo = this.buildRefundNo(latestPaymentChannel, orderId);
 
@@ -5404,6 +5443,7 @@ export class OrdersService {
         const now = new Date();
         let liabilityPenaltyResult: any = null;
         let compensationPenaltyResult: any = null;
+        let partialSettlementResult: any = null;
         const penaltyWarnings: string[] = [];
 
         await this.prisma.$transaction(async (tx) => {
@@ -5419,6 +5459,10 @@ export class OrdersService {
                     channel: latestPaymentChannel || this.resolvePaymentChannelByOrderSource((orderWithPayment as any)?.orderSource),
                     status: isHeldReservedBalanceOrder ? 'SUCCESS' : manualRefundRequired ? 'MANUAL_REQUIRED' : 'SUCCESS',
                     amount: refundAmount,
+                    refundType: isPartialRefund ? 'PARTIAL' : 'FULL',
+                    staffLiable: isPartialRefund ? staffLiable : null,
+                    liableUserIds: isPartialRefund && staffLiable ? (liableUserIds as any) : null,
+                    remainingAmount,
                     currency: 'CNY',
                     reason: refundReason,
                     externalRefundId: String(autoRefundTrace?.refundId || '').trim() || null,
@@ -5445,6 +5489,108 @@ export class OrdersService {
                     },
                     tx as any,
                 );
+            }
+
+            if (isPartialRefund) {
+                await tx.order.update({
+                    where: {id: orderId},
+                    data: {settlementBaseAmount: remainingAmount},
+                });
+
+                if ((order.settlements || []).length > 0) {
+                    const recalculationOrder = await this.loadOrderForSettlementTx({
+                        tx,
+                        orderId,
+                        scope: 'COMPLETED_AND_ARCHIVED',
+                    });
+                    (recalculationOrder as any).settlementBaseAmount = remainingAmount;
+                    const rebuiltPlan = await this.buildSettlementPlanFromOrder({
+                        order: recalculationOrder,
+                        playerEvaluations: recalculationOrder?.playerEvaluations || [],
+                        defaultToGood: true,
+                    });
+                    const settlementsToCreate = this.applyPartialRefundLiabilityToSettlements(
+                        rebuiltPlan.settlementsToCreate,
+                        staffLiable,
+                        liableUserIds,
+                        remark ? `PARTIAL_REFUND_LIABLE:${remark}` : 'PARTIAL_REFUND_LIABLE',
+                    );
+                    const rebuilt = await this.applySettlementPlanTx({
+                        tx,
+                        order: recalculationOrder,
+                        operatorId,
+                        settlementsToCreate,
+                        mode: 'REPAIR_REBUILD',
+                        reason: remark || '部分退款后按剩余金额重算',
+                    });
+
+                    const renewalGroup = await tx.orderRenewalGroup.findUnique({
+                        where: {orderId},
+                        select: {id: true, status: true},
+                    });
+                    let renewalResult: any = null;
+                    if (String(renewalGroup?.status || '') === 'SETTLED') {
+                        await this.reverseRenewalBonusesTx({
+                            tx,
+                            orderId,
+                            operatorId,
+                            reason: remark || '部分退款后按剩余金额重算分红',
+                            groupStatusAfter: 'REVERSED',
+                        });
+                        await tx.orderRenewalGroup.update({
+                            where: {id: Number(renewalGroup?.id)},
+                            data: {
+                                status: 'PENDING',
+                                invalidatedBy: null,
+                                invalidatedAt: null,
+                                invalidateReason: null,
+                            },
+                        });
+                        renewalResult = await this.processRenewalAtConfirmTx({
+                            tx,
+                            order: recalculationOrder,
+                            settlementBatchId: rebuilt.settlementBatchId,
+                            operatorId,
+                            mode: 'SETTLE',
+                        });
+                    }
+
+                    await this.afterSettlementAppliedTx({
+                        tx,
+                        orderId,
+                        operatorId,
+                        settlements: rebuilt.settlements || [],
+                        action: 'PARTIAL_REFUND_RECALCULATE',
+                        remark: remark || '部分退款后按剩余金额重算',
+                        logExtra: {
+                            refundAmount,
+                            remainingAmount,
+                            staffLiable,
+                            liableUserIds: staffLiable ? liableUserIds : [],
+                            renewalResult,
+                        },
+                    });
+                    partialSettlementResult = {
+                        settlementBatchId: rebuilt.settlementBatchId,
+                        rebuiltSettlementCount: rebuilt.rebuiltSettlementCount,
+                        renewalResult,
+                    };
+                }
+
+                await this.rollbackOrderMemberBenefitsTx(tx, orderWithPayment, refundAmount);
+                if (isReservedBalanceOrder) {
+                    let remainingBalanceRefund = refundAmount;
+                    for (const payment of reservedBalancePayments) {
+                        if (remainingBalanceRefund <= 0) break;
+                        const paymentRefund = Math.min(remainingBalanceRefund, this.toAmount2(Number(payment.amount || 0)));
+                        await this.reverseMemberBalanceLotsTx(tx, Number(payment.id), paymentRefund);
+                        remainingBalanceRefund = this.toAmount2(remainingBalanceRefund - paymentRefund);
+                    }
+                } else {
+                    await this.reverseMemberBalanceLotsTx(tx, (orderWithPayment as any)?.latestPaymentId, refundAmount);
+                }
+                await this.rebuildPerformanceAndFinanceByOrderId({tx, orderId});
+                return;
             }
 
             // 1) 订单状态置 REFUNDED（要“结单状态并标记退款”：这里用 REFUNDED 即“已结单且已退款”）
@@ -5602,6 +5748,10 @@ export class OrdersService {
             compensationPenaltyTicketIds: Array.isArray(compensationPenaltyResult?.ticketIds) ? compensationPenaltyResult.ticketIds : [],
             compensationPendingCount: Number(compensationPenaltyResult?.pendingCount || 0),
             penaltyWarnings,
+            refundType: isPartialRefund ? 'PARTIAL' : 'FULL',
+            previouslyRefundedAmount,
+            remainingAmount,
+            partialSettlementResult,
         });
 
         try {
@@ -6437,6 +6587,11 @@ export class OrdersService {
                 balanceReservedAmount: true,
                 balanceCapturedAmount: true,
                 balancePendingSupplementAmount: true,
+                refunds: {
+                    where: {status: {in: ['SUCCESS', 'MANUAL_REQUIRED']}},
+                    select: {amount: true, refundType: true, staffLiable: true, liableUserIds: true},
+                    orderBy: {id: 'asc'},
+                },
                 appliedUserCoupon: {
                     select: {
                         id: true,
@@ -8056,7 +8211,25 @@ export class OrdersService {
                 scope,
             });
 
-            const resolvedRepairSettlementBaseAmount = explicitSettlementBaseAmount ?? this.toDecimal2(this.getSettlementBaseAmountFromOrder(order));
+            const successfulRefundTotal = this.toDecimal2(
+                (order?.refunds || []).reduce((sum: number, item: any) => sum + Number(item?.amount || 0), 0),
+            );
+            const refundAdjustedSettlementBaseAmount = this.toDecimal2(
+                Math.max(0, Number(order?.paidAmount || 0) - successfulRefundTotal),
+            );
+            if (
+                successfulRefundTotal > 0 &&
+                explicitSettlementBaseAmount !== null &&
+                Math.abs(Number(explicitSettlementBaseAmount) - refundAdjustedSettlementBaseAmount) > 0.009
+            ) {
+                throw new BadRequestException(
+                    `订单已发生退款，重算结算金额必须等于剩余实收 ¥${refundAdjustedSettlementBaseAmount.toFixed(2)}`,
+                );
+            }
+            const resolvedRepairSettlementBaseAmount =
+                successfulRefundTotal > 0
+                    ? refundAdjustedSettlementBaseAmount
+                    : explicitSettlementBaseAmount ?? this.toDecimal2(this.getSettlementBaseAmountFromOrder(order));
 
             const repairOrder = {
                 ...order,
@@ -8066,13 +8239,25 @@ export class OrdersService {
             /**
              * Step 2：dryRun / applyRepair 共用 settlement 计划
              */
-            const {billingMode, settlementsToCreate} = await this.buildSettlementPlanFromOrder({
+            const builtPlan = await this.buildSettlementPlanFromOrder({
                 order: repairOrder,
                 modePlayAllocList,
                 playerEvaluations,
                 orderTipEnabled,
                 orderTipUserIds,
             });
+            const liableAfterPartialRefund = new Set<number>(
+                (order?.refunds || [])
+                    .filter((item: any) => String(item?.refundType) === 'PARTIAL' && item?.staffLiable === true)
+                    .flatMap((item: any) => this.normalizeIdArray(item?.liableUserIds)),
+            );
+            const billingMode = builtPlan.billingMode;
+            const settlementsToCreate = this.applyPartialRefundLiabilityToSettlements(
+                builtPlan.settlementsToCreate,
+                liableAfterPartialRefund.size > 0,
+                Array.from(liableAfterPartialRefund),
+                'PARTIAL_REFUND_LIABLE_RECALC',
+            );
 
             /**
              * Step 3：dryRun
@@ -10129,6 +10314,27 @@ export class OrdersService {
         const n = Number(v ?? 0);
         if (!Number.isFinite(n)) return 0;
         return Math.round(n * 100) / 100;
+    }
+
+    private applyPartialRefundLiabilityToSettlements(
+        settlements: any[],
+        staffLiable: boolean,
+        liableUserIds: number[],
+        adjustRemark: string,
+    ) {
+        if (!staffLiable) return settlements;
+        const liableSet = new Set(this.normalizeIdArray(liableUserIds));
+        return (settlements || []).map((item: any) => {
+            if (!liableSet.has(Number(item.userId)) || String(item.settlementType) === 'CUSTOMER_SERVICE') {
+                return item;
+            }
+            return {
+                ...item,
+                finalEarnings: 0,
+                manualAdjustment: 0 - Number(item.calculatedEarnings || 0),
+                adjustRemark,
+            };
+        });
     }
 
     private getOrderTypeFromOrder(order: any): any {

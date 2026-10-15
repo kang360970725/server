@@ -391,7 +391,7 @@ export class OrdersController {
         this.assertButtonPermission(req?.user, 'orders:detail:refund:button', '当前角色无权退款');
         const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
         return this.ordersService.refundOrder(Number(body.id), operatorId, body.remark, {
-            staffLiable: Boolean(body?.staffLiable),
+            staffLiable: body?.staffLiable === undefined || body?.staffLiable === null ? undefined : Boolean(body.staffLiable),
             liableUserIds: Array.isArray(body?.liableUserIds)
                 ? body.liableUserIds.map((x: any) => Number(x)).filter((n: number) => Number.isFinite(n) && n > 0)
                 : undefined,

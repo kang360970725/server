@@ -1453,6 +1453,29 @@ model ShouqianbaTerminal {
   @@map("shouqianba_terminals")
 }
 
+/// 收钱吧接口审计日志。请求和响应入库前必须脱敏，禁止保存任何签名密钥。
+model ShouqianbaApiLog {
+  id              Int      @id @default(autoincrement())
+  endpoint        String   @db.VarChar(100)
+  direction       String   @default("OUTBOUND") @db.VarChar(16)
+  clientSn        String?  @db.VarChar(32)
+  providerSn      String?  @db.VarChar(32)
+  requestPayload  Json?
+  responsePayload Json?
+  httpStatus      Int?
+  resultCode      String?  @db.VarChar(40)
+  bizResultCode   String?  @db.VarChar(40)
+  success         Boolean  @default(false)
+  durationMs      Int?
+  errorMessage    String?  @db.VarChar(500)
+  createdAt       DateTime @default(now())
+
+  @@index([endpoint, createdAt], map: "idx_sqb_api_log_endpoint_time")
+  @@index([clientSn, createdAt], map: "idx_sqb_api_log_client_time")
+  @@index([success, createdAt], map: "idx_sqb_api_log_success_time")
+  @@map("shouqianba_api_logs")
+}
+
 model OrderRefund {
   id               Int           @id @default(autoincrement())
   orderId          Int
@@ -1461,6 +1484,10 @@ model OrderRefund {
   channel          String        @db.VarChar(32) // MINIAPP_WECHAT/BALANCE/MANUAL_SHOUQIANBA/TUTU_PLATFORM/THIRD_PARTY_CHANNEL
   status           String        @db.VarChar(24) // SUCCESS/MANUAL_REQUIRED/FAILED
   amount           Decimal       @db.Decimal(10, 2)
+  refundType       String        @default("FULL") @db.VarChar(16) // FULL/PARTIAL
+  staffLiable      Boolean?
+  liableUserIds    Json?
+  remainingAmount  Decimal       @default(0.00) @db.Decimal(10, 2)
   currency         String        @default("CNY") @db.VarChar(8)
   reason           String?       @db.VarChar(128)
   externalRefundId String?       @db.VarChar(128)
@@ -1475,6 +1502,7 @@ model OrderRefund {
   @@index([orderId, createdAt], map: "idx_order_refunds_order_time")
   @@index([paymentId], map: "idx_order_refunds_payment")
   @@index([channel, status, refundedAt], map: "idx_order_refunds_channel_status_time")
+  @@index([refundType, createdAt], map: "idx_order_refunds_type_time")
   @@map("order_refunds")
 }
 

@@ -76,6 +76,7 @@ describe('ShouqianbaService', () => {
             terminalSn: 'terminal',
             terminalKeyIv: '00',
             terminalKeyTag: '00',
+            lastCheckedInAt: new Date(),
           }),
       },
     };
@@ -145,6 +146,238 @@ describe('ShouqianbaService', () => {
 
     expect(querySpy).toHaveBeenCalledTimes(1);
     expect(querySpy).toHaveBeenCalledWith(1);
+  });
+
+  it('uses five-second polling for the first two minutes, ten seconds afterwards, and stops after six minutes', async () => {
+    const now = Date.now();
+    const prisma = {
+      orderPayment: {
+        findMany: jest.fn().mockResolvedValue([
+          { id: 1, createdAt: new Date(now - 60_000), lastQueriedAt: new Date(now - 6_000) },
+          { id: 2, createdAt: new Date(now - 180_000), lastQueriedAt: new Date(now - 9_000) },
+          { id: 3, createdAt: new Date(now - 180_000), lastQueriedAt: new Date(now - 11_000) },
+          { id: 4, createdAt: new Date(now - 361_000), lastQueriedAt: null },
+        ]),
+      },
+    };
+    const service = new ShouqianbaService(prisma as any, {} as any);
+    const querySpy = jest.spyOn(service, 'queryPayment').mockResolvedValue({} as any);
+
+    await service.reconcilePendingPayments();
+
+    expect(querySpy.mock.calls.map(([id]) => id)).toEqual([1, 3]);
+    expect(prisma.orderPayment.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          createdAt: expect.objectContaining({ gte: expect.any(Date) }),
+        }),
+      }),
+    );
+  });
+
+  it('checks in automatically before the first business request of the day', async () => {
+    const staleTerminal = {
+      id: 1,
+      terminalSn: 'terminal-old',
+      terminalKeyIv: '00',
+      terminalKeyTag: '00',
+      lastCheckedInAt: null,
+    };
+    const freshTerminal = {
+      ...staleTerminal,
+      terminalSn: 'terminal-new',
+      lastCheckedInAt: new Date(),
+    };
+    const prisma = {
+      orderPayment: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 9,
+          clientSn: 'BC9',
+          providerSn: null,
+        }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      shouqianbaTerminal: {
+        findUnique: jest.fn().mockResolvedValueOnce(staleTerminal).mockResolvedValue(freshTerminal),
+      },
+    };
+    const service = new ShouqianbaService(prisma as any, {} as any);
+    const checkinSpy = jest.spyOn(service, 'checkin').mockResolvedValue(freshTerminal as any);
+    jest.spyOn(service as any, 'decrypt').mockReturnValue('terminal-key');
+    jest.spyOn(service as any, 'post').mockResolvedValue({
+      result_code: '200',
+      biz_response: {
+        result_code: 'SUCCESS',
+        data: { client_sn: 'BC9', status: 'SUCCESS', order_status: 'PAID' },
+      },
+    });
+    jest.spyOn(service as any, 'applyProviderResult').mockResolvedValue({ paidOrderId: 1 });
+
+    await service.queryPayment(9);
+
+    expect(checkinSpy).toHaveBeenCalledTimes(1);
+    expect((service as any).post).toHaveBeenCalledWith(
+      '/upay/v2/query',
+      expect.objectContaining({ terminal_sn: 'terminal-new' }),
+      'terminal-new',
+      'terminal-key',
+    );
+  });
+
+  it('coalesces concurrent first requests into a single daily check-in', async () => {
+    const staleTerminal = { lastCheckedInAt: null };
+    const freshTerminal = { lastCheckedInAt: new Date() };
+    const prisma = {
+      shouqianbaTerminal: {
+        findUnique: jest.fn().mockResolvedValue(freshTerminal),
+      },
+    };
+    const service = new ShouqianbaService(prisma as any, {} as any);
+    let finishCheckin: (value: any) => void = () => undefined;
+    const checkinPending = new Promise((resolve) => {
+      finishCheckin = resolve;
+    });
+    const checkinSpy = jest
+      .spyOn(service, 'checkin')
+      .mockReturnValue(checkinPending as any);
+
+    const first = (service as any).ensureDailyCheckin(staleTerminal);
+    const second = (service as any).ensureDailyCheckin(staleTerminal);
+    finishCheckin(freshTerminal);
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      freshTerminal,
+      freshTerminal,
+    ]);
+    expect(checkinSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a query when the communication layer succeeds but the business layer fails', async () => {
+    const prisma = {
+      orderPayment: {
+        findUnique: jest.fn().mockResolvedValue({ id: 9, clientSn: 'BC9', providerSn: null }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      shouqianbaTerminal: {
+        findUnique: jest.fn().mockResolvedValue({
+          terminalSn: 'terminal',
+          terminalKeyIv: '00',
+          terminalKeyTag: '00',
+          lastCheckedInAt: new Date(),
+        }),
+      },
+    };
+    const service = new ShouqianbaService(prisma as any, {} as any);
+    jest.spyOn(service as any, 'decrypt').mockReturnValue('terminal-key');
+    jest.spyOn(service as any, 'post').mockResolvedValue({
+      result_code: '200',
+      biz_response: { result_code: 'FAIL', error_message: '订单不存在' },
+    });
+
+    await expect(service.queryPayment(9)).rejects.toThrow('订单不存在');
+  });
+
+  it('writes a redacted audit log without terminal keys or activation codes', async () => {
+    const create = jest.fn().mockResolvedValue({});
+    const service = new ShouqianbaService(
+      { shouqianbaApiLog: { create } } as any,
+      {} as any,
+    );
+
+    await (service as any).recordApiLog({
+      endpoint: '/terminal/activate',
+      requestPayload: { code: '12345678', app_id: 'app-id' },
+      responsePayload: {
+        result_code: '200',
+        biz_response: {
+          terminal_key: 'secret',
+          terminalKey: 'also-secret',
+          terminal_sn: 'terminal',
+        },
+      },
+      success: true,
+    });
+
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          requestPayload: expect.objectContaining({ code: '[REDACTED]' }),
+          responsePayload: expect.objectContaining({
+            biz_response: expect.objectContaining({
+              terminal_key: '[REDACTED]',
+              terminalKey: '[REDACTED]',
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('confirms a final callback once more through the query interface before acknowledging it', async () => {
+    const prisma = {
+      orderPayment: { findUnique: jest.fn().mockResolvedValue({ id: 9, clientSn: 'BC9' }) },
+    };
+    const service = new ShouqianbaService(prisma as any, {} as any);
+    jest.spyOn(service, 'verifyCallback').mockReturnValue(true);
+    jest.spyOn(service as any, 'applyProviderResult').mockResolvedValue({ paidOrderId: 1 });
+    const querySpy = jest.spyOn(service, 'queryPayment').mockResolvedValue({} as any);
+
+    await expect(
+      service.handleCallback(
+        Buffer.from('{}'),
+        'signature',
+        { client_sn: 'BC9', status: 'SUCCESS', order_status: 'PAID' },
+      ),
+    ).resolves.toBe('success');
+    expect(querySpy).toHaveBeenCalledWith(9);
+  });
+
+  it.each([
+    { amountFen: 100, orderStatus: 'REFUNDED' },
+    { amountFen: 40, orderStatus: 'PARTIAL_REFUNDED' },
+  ])('accepts final full and partial refund results: $orderStatus', async ({ amountFen, orderStatus }) => {
+    const prisma = {
+      orderPayment: {
+        findUnique: jest.fn().mockResolvedValue({ id: 9, clientSn: 'BC9', providerSn: 'SQB9' }),
+      },
+      shouqianbaTerminal: {
+        findUnique: jest.fn().mockResolvedValue({
+          terminalSn: 'terminal',
+          terminalKeyIv: '00',
+          terminalKeyTag: '00',
+          lastCheckedInAt: new Date(),
+        }),
+      },
+    };
+    const service = new ShouqianbaService(prisma as any, {} as any);
+    jest.spyOn(service as any, 'decrypt').mockReturnValue('terminal-key');
+    const postSpy = jest.spyOn(service as any, 'post').mockResolvedValue({
+      result_code: '200',
+      biz_response: {
+        result_code: 'REFUND_SUCCESS',
+        data: {
+          client_tsn: `RF${amountFen}`,
+          status: 'SUCCESS',
+          order_status: orderStatus,
+        },
+      },
+    });
+
+    await expect(
+      service.refundPayment({
+        paymentId: 9,
+        refundRequestNo: `RF${amountFen}`,
+        amountFen,
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({ status: 'SUCCESS', orderStatus }),
+    );
+    expect(postSpy).toHaveBeenCalledWith(
+      '/upay/v2/refund',
+      expect.objectContaining({ refund_amount: String(amountFen), sn: 'SQB9' }),
+      'terminal',
+      'terminal-key',
+    );
   });
 
   it('keeps the order waiting when any preselected player is not idle', async () => {

@@ -34,6 +34,7 @@ import {
 export class ShouqianbaService {
   private readonly logger = new Logger(ShouqianbaService.name);
   private reconciling = false;
+  private dailyCheckinPromise: Promise<any> | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -120,36 +121,173 @@ export class ShouqianbaService {
       .digest('hex');
   }
 
+  private sanitizeAuditPayload(value: any): any {
+    if (value === null || value === undefined) return value;
+    if (Array.isArray(value))
+      return value.slice(0, 100).map((item) => this.sanitizeAuditPayload(item));
+    if (typeof value !== 'object') {
+      if (typeof value === 'string' && value.length > 2000)
+        return `${value.slice(0, 2000)}...[truncated]`;
+      return value;
+    }
+    const sensitiveKeys = new Set([
+      'authorization',
+      'signature',
+      'sign',
+      'vendorkey',
+      'terminalkey',
+      'credentialencryptionkey',
+      'code',
+      'qrcode',
+      'qrcodeimageurl',
+      'dynamicid',
+      'payerlogin',
+      'payeruid',
+    ]);
+    return Object.fromEntries(
+      Object.entries(value).map(([name, item]) => [
+        name,
+        sensitiveKeys.has(name.toLowerCase().replace(/[_-]/g, ''))
+          ? '[REDACTED]'
+          : this.sanitizeAuditPayload(item),
+      ]),
+    );
+  }
+
+  private async recordApiLog(input: {
+    endpoint: string;
+    direction?: 'OUTBOUND' | 'INBOUND';
+    requestPayload?: any;
+    responsePayload?: any;
+    httpStatus?: number;
+    durationMs?: number;
+    success: boolean;
+    errorMessage?: string;
+  }) {
+    try {
+      const requestPayload = this.sanitizeAuditPayload(input.requestPayload);
+      const responsePayload = this.sanitizeAuditPayload(input.responsePayload);
+      const response: any = input.responsePayload || {};
+      const result: any = response?.biz_response?.data || response;
+      const delegate = (this.prisma as any).shouqianbaApiLog;
+      if (!delegate?.create) return;
+      await delegate.create({
+        data: {
+          endpoint: input.endpoint,
+          direction: input.direction || 'OUTBOUND',
+          clientSn: String(
+            input.requestPayload?.client_sn || result?.client_sn || '',
+          ).slice(0, 32) || null,
+          providerSn: String(result?.sn || '').slice(0, 32) || null,
+          requestPayload: requestPayload as Prisma.InputJsonValue,
+          responsePayload: responsePayload as Prisma.InputJsonValue,
+          httpStatus: input.httpStatus,
+          resultCode: String(response?.result_code || '').slice(0, 40) || null,
+          bizResultCode:
+            String(response?.biz_response?.result_code || '').slice(0, 40) ||
+            null,
+          success: input.success,
+          durationMs: input.durationMs,
+          errorMessage:
+            String(input.errorMessage || '').slice(0, 500) || null,
+        },
+      });
+    } catch (error: any) {
+      this.logger.warn(
+        `shouqianba audit log failed endpoint=${input.endpoint}: ${error?.message || error}`,
+      );
+    }
+  }
+
+  private requireBusinessEnvelope(
+    data: any,
+    operation: string,
+    acceptedBizCodes: string[],
+  ) {
+    if (String(data?.result_code) !== '200') {
+      throw new BadGatewayException(
+        data?.error_message || `${operation}通讯失败`,
+      );
+    }
+    const biz = data?.biz_response;
+    if (!biz || !acceptedBizCodes.includes(String(biz?.result_code || ''))) {
+      throw new BadGatewayException(
+        biz?.error_message || `${operation}业务处理失败`,
+      );
+    }
+    return biz;
+  }
+
   private async post(
     path: string,
     payload: Record<string, any>,
     sn: string,
     key: string,
   ) {
+    const startedAt = Date.now();
     const body = JSON.stringify(payload);
-    const response = await fetch(`${this.config().apiBase}${path}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `${sn} ${this.sign(body, key)}`,
-      },
-      body,
-      signal: AbortSignal.timeout(15000),
-    }).catch((error: any) => {
+    try {
+      const response = await fetch(`${this.config().apiBase}${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `${sn} ${this.sign(body, key)}`,
+        },
+        body,
+        signal: AbortSignal.timeout(15000),
+      });
+      const text = await response.text();
+      let data: any;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        await this.recordApiLog({
+          endpoint: path,
+          requestPayload: payload,
+          responsePayload: { invalidJson: true },
+          httpStatus: response.status,
+          durationMs: Date.now() - startedAt,
+          success: false,
+          errorMessage: '收钱吧响应不是有效JSON',
+        });
+        throw new BadGatewayException('收钱吧响应不是有效JSON');
+      }
+      const communicationSuccess =
+        response.ok && String(data?.result_code) === '200';
+      const bizResultCode = String(data?.biz_response?.result_code || '');
+      const businessSuccess =
+        communicationSuccess &&
+        !data?.biz_response?.error_code &&
+        !['FAIL', 'ERROR'].includes(bizResultCode.toUpperCase());
+      await this.recordApiLog({
+        endpoint: path,
+        requestPayload: payload,
+        responsePayload: data,
+        httpStatus: response.status,
+        durationMs: Date.now() - startedAt,
+        success: businessSuccess,
+        errorMessage: businessSuccess
+          ? undefined
+          : data?.error_message || data?.biz_response?.error_message,
+      });
+      if (!response.ok)
+        throw new BadGatewayException(
+          `收钱吧HTTP请求失败：${response.status}`,
+        );
+      return data;
+    } catch (error: any) {
+      if (error instanceof BadGatewayException) throw error;
+      await this.recordApiLog({
+        endpoint: path,
+        requestPayload: payload,
+        durationMs: Date.now() - startedAt,
+        success: false,
+        errorMessage: error?.message || 'network error',
+      });
       throw new BadGatewayException(
         `收钱吧接口连接失败：${error?.message || 'network error'}`,
       );
-    });
-    const text = await response.text();
-    let data: any;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      throw new BadGatewayException('收钱吧响应不是有效JSON');
     }
-    if (!response.ok)
-      throw new BadGatewayException(`收钱吧HTTP请求失败：${response.status}`);
-    return data;
   }
 
   async terminalStatus() {
@@ -170,6 +308,40 @@ export class ShouqianbaService {
     return { ...this.getConfigurationStatus(), terminal };
   }
 
+  private shanghaiDayKey(value: Date) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(value);
+    const pick = (type: string) =>
+      parts.find((part) => part.type === type)?.value || '';
+    return `${pick('year')}-${pick('month')}-${pick('day')}`;
+  }
+
+  private async ensureDailyCheckin(terminal: any) {
+    if (
+      terminal?.lastCheckedInAt &&
+      this.shanghaiDayKey(new Date(terminal.lastCheckedInAt)) ===
+        this.shanghaiDayKey(new Date())
+    ) {
+      return terminal;
+    }
+    if (!this.dailyCheckinPromise) {
+      this.dailyCheckinPromise = this.checkin().finally(() => {
+        this.dailyCheckinPromise = null;
+      });
+    }
+    await this.dailyCheckinPromise;
+    const refreshed = await this.prisma.shouqianbaTerminal.findUnique({
+      where: { deviceId: this.config().deviceId },
+    });
+    if (!refreshed)
+      throw new ServiceUnavailableException('收钱吧终端签到后不存在');
+    return refreshed;
+  }
+
   /** 激活会消耗激活码次数，只允许显式调用，且同一device_id已有终端时拒绝再次激活。 */
   async activate(codeInput: string, confirm: boolean) {
     if (!confirm) throw new BadRequestException('激活会消耗次数，必须显式确认');
@@ -185,7 +357,7 @@ export class ShouqianbaService {
       );
     const code = String(codeInput || '').trim();
     if (!/^\d{8}$/.test(code))
-      throw new BadRequestException('测试激活码格式错误');
+      throw new BadRequestException('激活码格式错误');
     const data = await this.post(
       '/terminal/activate',
       {
@@ -295,6 +467,7 @@ export class ShouqianbaService {
         integrationStatus: 'WAITING_FOR_TERMINAL_ACTIVATION',
         clientSn: payment.clientSn,
       };
+    const readyTerminal = await this.ensureDailyCheckin(terminal);
     const amountFen = Math.round(Number(payment.amount) * 100);
     const payload: any = {
       client_sn: payment.clientSn,
@@ -302,33 +475,31 @@ export class ShouqianbaService {
       subject: String(
         payment.order?.project?.name || payment.order?.autoSerial || '订单支付',
       ).slice(0, 64),
-      terminal_sn: terminal.terminalSn,
+      terminal_sn: readyTerminal.terminalSn,
       total_amount: String(amountFen),
     };
     if (c.notifyUrl) payload.notify_url = c.notifyUrl;
     const data = await this.post(
       '/upay/support/precreateQrcode',
       payload,
-      terminal.terminalSn,
-      this.decrypt(terminal),
+      readyTerminal.terminalSn,
+      this.decrypt(readyTerminal),
     );
-    if (
-      String(data?.result_code) !== '200' ||
-      String(data?.biz_response?.result_code) !== 'PRECREATE_SUCCESS'
-    ) {
+    let biz: any;
+    try {
+      biz = this.requireBusinessEnvelope(data, '预下单', [
+        'PRECREATE_SUCCESS',
+      ]);
+    } catch (error) {
       await this.prisma.orderPayment.update({
         where: { id: payment.id },
         data: { status: OrderPayStatus.UNKNOWN, notifyRaw: data },
       });
-      throw new BadGatewayException(
-        data?.biz_response?.error_message ||
-          data?.error_message ||
-          '收钱吧二维码生成失败',
-      );
+      throw error;
     }
-    const qrCode = String(data.biz_response.data?.qr_code || '');
+    const qrCode = String(biz.data?.qr_code || '');
     const qrCodeImageUrl = String(
-      data.biz_response.data?.qr_code_image_url || '',
+      biz.data?.qr_code_image_url || '',
     );
     await this.prisma.orderPayment.update({
       where: { id: payment.id },
@@ -360,8 +531,9 @@ export class ShouqianbaService {
     ]);
     if (!payment) throw new BadRequestException('支付尝试不存在');
     if (!terminal) throw new ServiceUnavailableException('收钱吧终端尚未激活');
+    const readyTerminal = await this.ensureDailyCheckin(terminal);
     const payload: any = {
-      terminal_sn: terminal.terminalSn,
+      terminal_sn: readyTerminal.terminalSn,
       operator: String(operator || 'BlueCat').slice(0, 64),
     };
     if (payment.providerSn) payload.sn = payment.providerSn;
@@ -369,14 +541,14 @@ export class ShouqianbaService {
     const data = await this.post(
       '/upay/v2/cancel',
       payload,
-      terminal.terminalSn,
-      this.decrypt(terminal),
+      readyTerminal.terminalSn,
+      this.decrypt(readyTerminal),
     );
-    const biz = data?.biz_response;
+    const biz = this.requireBusinessEnvelope(data, '撤销', [
+      'CANCEL_SUCCESS',
+    ]);
     const result = biz?.data;
     const succeeded =
-      String(data?.result_code) === '200' &&
-      String(biz?.result_code) === 'CANCEL_SUCCESS' &&
       String(result?.status) === 'SUCCESS';
     if (!succeeded) {
       throw new BadGatewayException(
@@ -414,8 +586,9 @@ export class ShouqianbaService {
     ]);
     if (!payment) throw new BadRequestException('原支付流水不存在');
     if (!terminal) throw new ServiceUnavailableException('收钱吧终端尚未激活');
+    const readyTerminal = await this.ensureDailyCheckin(terminal);
     const payload: any = {
-      terminal_sn: terminal.terminalSn,
+      terminal_sn: readyTerminal.terminalSn,
       refund_request_no: String(input.refundRequestNo || '').slice(0, 20),
       operator: String(input.operator || 'BlueCat').slice(0, 64),
       refund_amount: String(Math.round(Number(input.amountFen))),
@@ -425,14 +598,14 @@ export class ShouqianbaService {
     const data = await this.post(
       '/upay/v2/refund',
       payload,
-      terminal.terminalSn,
-      this.decrypt(terminal),
+      readyTerminal.terminalSn,
+      this.decrypt(readyTerminal),
     );
-    const biz = data?.biz_response;
+    const biz = this.requireBusinessEnvelope(data, '退款', [
+      'REFUND_SUCCESS',
+    ]);
     const result = biz?.data;
     const finalSuccess =
-      String(data?.result_code) === '200' &&
-      String(biz?.result_code) === 'REFUND_SUCCESS' &&
       String(result?.status) === 'SUCCESS' &&
       ['REFUNDED', 'PARTIAL_REFUNDED'].includes(String(result?.order_status));
     if (!finalSuccess) {
@@ -465,15 +638,16 @@ export class ShouqianbaService {
     ]);
     if (!payment) throw new BadRequestException('支付尝试不存在');
     if (!terminal) throw new ServiceUnavailableException('收钱吧终端尚未激活');
-    const payload: any = { terminal_sn: terminal.terminalSn };
+    const readyTerminal = await this.ensureDailyCheckin(terminal);
+    const payload: any = { terminal_sn: readyTerminal.terminalSn };
     if (payment.providerSn) payload.sn = payment.providerSn;
     else payload.client_sn = payment.clientSn;
 
     const data = await this.post(
       '/upay/v2/query',
       payload,
-      terminal.terminalSn,
-      this.decrypt(terminal),
+      readyTerminal.terminalSn,
+      this.decrypt(readyTerminal),
     );
     await this.prisma.orderPayment.update({
       where: { id: payment.id },
@@ -483,7 +657,6 @@ export class ShouqianbaService {
         notifyRaw: data,
       },
     });
-    const result = data?.biz_response?.data;
     const providerErrorCode = String(data?.biz_response?.error_code || '');
     const expiredWithoutProviderOrder = Boolean(
       providerErrorCode === 'UPAY_ORDER_NOT_EXISTS' &&
@@ -508,13 +681,10 @@ export class ShouqianbaService {
         clientSn: String(payment.clientSn || ''),
       };
     }
-    if (String(data?.result_code) !== '200' || !result?.client_sn) {
-      throw new BadGatewayException(
-        data?.biz_response?.error_message ||
-          data?.error_message ||
-          '收钱吧查单失败',
-      );
-    }
+    const biz = this.requireBusinessEnvelope(data, '查单', ['SUCCESS']);
+    const result = biz?.data;
+    if (!result?.client_sn)
+      throw new BadGatewayException('收钱吧查单结果缺少client_sn');
     await this.applyProviderResult(result, 'QUERY');
     return {
       paymentId: payment.id,
@@ -541,13 +711,7 @@ export class ShouqianbaService {
               OrderPayStatus.UNKNOWN,
             ],
           },
-          OR: [
-            { createdAt: { gte: new Date(now - 7 * 60_000) } },
-            {
-              expiresAt: { lt: new Date(now - 2 * 60_000) },
-              lastQueriedAt: null,
-            },
-          ],
+          createdAt: { gte: new Date(now - 6 * 60_000) },
         },
         select: { id: true, createdAt: true, lastQueriedAt: true },
         orderBy: { createdAt: 'asc' },
@@ -559,17 +723,11 @@ export class ShouqianbaService {
           const sinceLast = payment.lastQueriedAt
             ? now - payment.lastQueriedAt.getTime()
             : Number.POSITIVE_INFINITY;
-          const interval =
-            age < 60_000
-              ? 10_000
-              : age < 120_000
-                ? 20_000
-                : age < 240_000
-                  ? 30_000
-                  : 120_000;
+          if (age < 0 || age > 6 * 60_000) return false;
+          const interval = age < 2 * 60_000 ? 5_000 : 10_000;
           return sinceLast >= interval;
         })
-        .slice(0, 10);
+        .slice(0, 20);
       await Promise.all(
         due.map(async (payment) => {
           try {
@@ -795,9 +953,48 @@ export class ShouqianbaService {
   }
 
   async handleCallback(rawBody: Buffer, authorization: string, payload: any) {
-    if (!this.verifyCallback(rawBody, authorization))
+    if (!this.verifyCallback(rawBody, authorization)) {
+      await this.recordApiLog({
+        endpoint: '/shouqianba/notify',
+        direction: 'INBOUND',
+        requestPayload: payload,
+        success: false,
+        errorMessage: '收钱吧回调验签失败',
+      });
       throw new BadRequestException('收钱吧回调验签失败');
+    }
+    const clientSn = String(payload?.client_sn || '').trim();
+    const payment = clientSn
+      ? await this.prisma.orderPayment.findUnique({ where: { clientSn } })
+      : null;
     await this.applyProviderResult(payload, 'CALLBACK');
+    await this.recordApiLog({
+      endpoint: '/shouqianba/notify',
+      direction: 'INBOUND',
+      requestPayload: payload,
+      responsePayload: { acknowledgement: 'success' },
+      success: true,
+    });
+    const finalStatus = String(payload?.order_status || '').toUpperCase();
+    if (
+      payment?.id &&
+      [
+        'PAID',
+        'REFUNDED',
+        'PARTIAL_REFUNDED',
+        'CANCELED',
+        'CANCELLED',
+        'EXPIRED',
+      ].includes(finalStatus)
+    ) {
+      try {
+        await this.queryPayment(Number(payment.id));
+      } catch (error: any) {
+        this.logger.warn(
+          `callback final-state confirmation query failed payment=${payment.id}: ${error?.message || error}`,
+        );
+      }
+    }
     return 'success';
   }
 
