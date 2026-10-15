@@ -28,15 +28,21 @@ describe('收款日统计', () => {
       receipt({ orderId: 1, paidAmount: 200, orderSource: 'THIRD_PARTY_CHANNEL' }),
       receipt({ orderId: 2, paidAmount: 100, channel: 'BALANCE' }),
       receipt({ orderId: 3, paidAmount: 30, orderSource: 'MINIAPP_SELF_SERVICE', channel: 'MINIAPP_WECHAT' }),
+      receipt({ orderId: 4, paidAmount: 20, orderSource: 'THIRD_PARTY_CHANNEL', channel: 'THIRD_PARTY_CHANNEL' }),
       receipt({ kind: 'RECHARGE', orderId: undefined, paidAmount: 50, channel: 'MANUAL' }),
       receipt({ kind: 'RECHARGE', orderId: undefined, paidAmount: 70, channel: 'WECHAT' }),
     ]);
-    expect(result.summary).toMatchObject({ allOrderCount: 3, allPaidAmountTotal: 350, orderCashAmountTotal: 230,
-      orderPaidAmountTotal: 330, memberBalanceAmountTotal: 100, rechargeAmountTotal: 120, rechargeCount: 2,
-      manualReceiptAmountTotal: 250, manualReceiptOrderCount: 1 });
+    expect(result.summary).toMatchObject({ allOrderCount: 4, allPaidAmountTotal: 370, orderCashAmountTotal: 250,
+      orderPaidAmountTotal: 350, memberBalanceAmountTotal: 100, rechargeAmountTotal: 120, rechargeCount: 2,
+      manualReceiptAmountTotal: 270, manualReceiptOrderCount: 2,
+      offlineReceiptAmountTotal: 200, offlineReceiptOrderCount: 1,
+      onlineReceiptAmountTotal: 30, onlineReceiptOrderCount: 1 });
     expect(result.rows[0].allPaidAmountTotal).toBe(result.summary.allPaidAmountTotal);
-    expect(result.rows[0].detailRows).toHaveLength(5);
-    expect(result.rows[0].dispatcherItems[0].paidAmountTotal).toBe(200);
+    expect(result.rows[0].detailRows).toHaveLength(6);
+    expect(result.rows[0].dispatcherItems[0].paidAmountTotal).toBe(220);
+    expect(result.rows[0].offlineDispatcherItems[0].paidAmountTotal).toBe(200);
+    expect(result.rows[0].detailRows.find(r => r.orderId === 1).reconciliationLabel).toBe('线下待人工核对');
+    expect(result.rows[0].detailRows.find(r => r.orderId === 4).reconciliationLabel).toBe('其他');
     expect(result.rows[0].detailRows.find(r => r.channel === 'BALANCE').cashAmount).toBe(0);
   });
   it('充值独立成日，分单位聚合避免浮点误差', () => {
