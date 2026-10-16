@@ -7,12 +7,21 @@ import { dateOnly, money, settleAmounts, shanghaiDay, startDateFor, textField, t
 
 class RentalSerialCollision extends Error {}
 
+const DUPLICATE_ACCOUNT_SOURCE_MESSAGE = '该号源编号已存在订单数据，无法再次创建';
+
 @Injectable()
 export class RentalOrdersService {
   constructor(private readonly prisma: PrismaService, private readonly wallet: WalletService) {}
 
   private generateSerialNo() {
     return `LMSH${randomInt(10000000, 100000000)}`;
+  }
+
+  private uniqueConstraintIncludes(error: any, field: string) {
+    if (error?.code !== 'P2002') return false;
+    const target = error?.meta?.target;
+    const values = Array.isArray(target) ? target : [target, error?.meta?.modelName];
+    return values.filter(Boolean).some((value) => String(value).toLowerCase().includes(field.toLowerCase()));
   }
 
   private id(value: any) {
@@ -22,6 +31,9 @@ export class RentalOrdersService {
   }
   private async lockWallet(tx: any, userId: number) {
     await tx.$queryRawUnsafe('SELECT userId FROM wallet_accounts WHERE userId = ? FOR UPDATE', userId);
+  }
+  private async lockStaff(tx: any, userId: number) {
+    await tx.$queryRawUnsafe('SELECT id FROM users WHERE id = ? FOR UPDATE', userId);
   }
   private async lockOrder(tx: any, id: number) {
     await tx.$queryRawUnsafe('SELECT id FROM rental_orders WHERE id = ? FOR UPDATE', id);
@@ -68,11 +80,19 @@ export class RentalOrdersService {
     const depositAmount = money(input.depositAmount ?? 0, '租号押金');
     const accountSourceNo = textField(input.accountSourceNo, '号源编号', true, 100);
     const forcedSettlementDate = dateOnly(input.forcedSettlementDate, '强制结算日期');
-    // 唯一索引最终排重；只对订单编号碰撞重试整个事务，不重试资金流水冲突。
+    // 只对流水号碰撞重试整个事务，不重试资金流水冲突。
     for (let attempt = 0; attempt < 5; attempt++) {
       const serialNo = this.generateSerialNo();
       try {
       return await this.prisma.$transaction(async (tx) => {
+        // 同一服务者的快速连点或网络重试串行化，加锁后再查重。
+        await this.lockStaff(tx, userId);
+        // 仅限制新建订单，不改写或约束已存在的历史重复数据。
+        const existingOrder = await tx.rentalOrder.findFirst({
+          where: { accountSourceNo },
+          select: { id: true },
+        });
+        if (existingOrder) throw new ConflictException(DUPLICATE_ACCOUNT_SOURCE_MESSAGE);
         await this.lockWallet(tx, userId);
         const user = await tx.user.findUnique({ where: { id: userId } });
         if (!user || user.userType !== 'STAFF' || user.status === 'DISABLED' ||
@@ -96,7 +116,7 @@ export class RentalOrdersService {
           accountSourceId: null, accountSourceNo, sourceChannel: 'ADMIN', prepaidAmount, depositAmount,
           startDate, forcedSettlementDate, createdBy: operatorId, createdAt: now,
         } }).catch((error) => {
-          if (error?.code === 'P2002') throw new RentalSerialCollision();
+          if (this.uniqueConstraintIncludes(error, 'serialNo')) throw new RentalSerialCollision();
           throw error;
         });
         await this.post(tx, order, prepaidAmount, 'RENTAL_ORDER_PREPAY', 'OUT', '预扣租金');

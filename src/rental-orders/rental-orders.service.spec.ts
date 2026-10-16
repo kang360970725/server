@@ -12,9 +12,14 @@ function fixture(availableBalance = 500) {
     walletWithdrawalRequest: { findMany: jest.fn(async () => []) },
     rentalOrder: {
       create: jest.fn(async ({ data }) => {
-        if (state.orders.some((o: any) => o.serialNo === data.serialNo)) throw { code: 'P2002' };
+        if (state.orders.some((o: any) => o.serialNo === data.serialNo)) throw { code: 'P2002', meta: { target: 'serialNo' } };
+        if (state.orders.some((o: any) => o.accountSourceNo.toLowerCase() === data.accountSourceNo.toLowerCase())) {
+          throw { code: 'P2002', meta: { target: 'accountSourceNo' } };
+        }
         const order = { id: state.orders.length + 1, status: 'RUNNING', version: 0, ...data }; state.orders.push(order); return order;
       }),
+      findFirst: jest.fn(async ({ where }) => state.orders.find((o: any) =>
+        o.accountSourceNo.toLowerCase() === where.accountSourceNo.toLowerCase())),
       findUnique: jest.fn(async ({ where }) => state.orders.find((o: any) => o.id === where.id)),
       update: jest.fn(async ({ where, data }) => {
         const order = state.orders.find((o: any) => o.id === where.id);
@@ -74,15 +79,38 @@ describe('RentalOrdersService', () => {
     const f = fixture(); await expect(f.service.create(createInput(v), 3)).rejects.toThrow(); expect(f.state().orders).toHaveLength(0);
   });
   it('concurrent requests cannot overspend assets', async () => {
-    const f = fixture(); const input = createInput({ prepaidAmount: 300, depositAmount: 200 });
-    const results = await Promise.allSettled([f.service.create(input, 3), f.service.create(input, 3)]);
+    const f = fixture();
+    const results = await Promise.allSettled([
+      f.service.create(createInput({ prepaidAmount: 300, depositAmount: 200, accountSourceNo: 'SOURCE-1' }), 3),
+      f.service.create(createInput({ prepaidAmount: 300, depositAmount: 200, accountSourceNo: 'SOURCE-2' }), 3),
+    ]);
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
     expect(f.state().orders).toHaveLength(1); expect(f.state().transactions).toHaveLength(2);
+  });
+  it('allows only one order when the same source is submitted concurrently', async () => {
+    const f = fixture(2000);
+    const input = createInput({ prepaidAmount: 100, depositAmount: 0 });
+    const results = await Promise.allSettled([f.service.create(input, 3), f.service.create(input, 3)]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    const rejected = results.find((result) => result.status === 'rejected') as PromiseRejectedResult;
+    expect(rejected.reason.message).toBe('该号源编号已存在订单数据，无法再次创建');
+    expect(f.state().orders).toHaveLength(1);
+    expect(f.state().transactions).toHaveLength(1);
+  });
+  it('rejects an existing account source number even when its previous order was voided', async () => {
+    const f = fixture(2000);
+    const order = await f.service.create(createInput({ prepaidAmount: 100, depositAmount: 0 }), 3);
+    await f.service.void(order.id, { version: 0, reason: '废除' }, 3);
+    await expect(f.service.create(createInput({ accountSourceNo: 'source-1', prepaidAmount: 100, depositAmount: 0 }), 3))
+      .rejects.toThrow('该号源编号已存在订单数据，无法再次创建');
+    expect(f.state().orders).toHaveLength(1);
+    expect(f.state().account.availableBalance).toBe(2000);
   });
   it('retries a generated serial collision without duplicate charge', async () => {
     const f = fixture(); const input = createInput({ prepaidAmount: 100, depositAmount: 0 });
     jest.spyOn(f.service as any, 'generateSerialNo').mockReturnValueOnce('LMSH12345678').mockReturnValueOnce('LMSH12345678').mockReturnValue('LMSH87654321');
-    await f.service.create(input, 3); const second = await f.service.create(input, 3);
+    await f.service.create(input, 3);
+    const second = await f.service.create({ ...input, accountSourceNo: 'SOURCE-2' }, 3);
     expect(second.serialNo).toBe('LMSH87654321');
     expect(f.state().account.availableBalance).toBe(300);
     expect(f.state().orders).toHaveLength(2); expect(f.state().transactions).toHaveLength(2);
@@ -91,7 +119,7 @@ describe('RentalOrdersService', () => {
     const f = fixture(); const input = createInput({ prepaidAmount: 100, depositAmount: 0 });
     const generator = jest.spyOn(f.service as any, 'generateSerialNo').mockReturnValue('LMSH12345678');
     await f.service.create(input, 3);
-    await expect(f.service.create(input, 3)).rejects.toThrow('生成繁忙');
+    await expect(f.service.create({ ...input, accountSourceNo: 'SOURCE-2' }, 3)).rejects.toThrow('生成繁忙');
     expect(generator).toHaveBeenCalledTimes(6);
     expect(f.state().account.availableBalance).toBe(400);
     expect(f.state().orders).toHaveLength(1); expect(f.state().transactions).toHaveLength(1);
