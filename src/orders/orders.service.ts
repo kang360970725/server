@@ -3787,10 +3787,11 @@ export class OrdersService {
         const paymentChannelLabelMap: Record<string, string> = {
             BALANCE: '会员储值',
             MANUAL_SHOUQIANBA: '线下收款',
+            MANUAL_CONFIRMED: '人工确认收款',
             SHOUQIANBA_WAP: '收钱吧在线收款',
             MINIAPP_WECHAT: '微信支付',
             WECHAT: '微信支付',
-            TUTU_PLATFORM: '兔兔平台',
+            TUTU_PLATFORM: '突突平台',
             THIRD_PARTY_CHANNEL: '第三方渠道',
         };
 
