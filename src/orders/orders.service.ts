@@ -1420,6 +1420,98 @@ export class OrdersService {
         };
     }
 
+    private async adjustRenewalAttributionTx(params: {
+        tx: any;
+        order: any;
+        settlementBatchId: string;
+        operatorId: number;
+        attributionType: string;
+        memberUserIds: any[];
+        reason: string;
+    }) {
+        const {tx, order, settlementBatchId, operatorId} = params;
+        const orderId = Number(order.id);
+        const group = await tx.orderRenewalGroup.findUnique({where: {orderId}});
+        if (!group) throw new BadRequestException('当前订单没有可调整的分红归因记录');
+        const reason = this.getRenewalInvalidateReason(params.reason, '调整分红归因需填写原因');
+        const memberUserIds = this.normalizeIdArray(params.memberUserIds).sort((a, b) => a - b);
+        if (!memberUserIds.length) throw new BadRequestException('调整分红归因至少选择一名服务者');
+
+        const participantIds = new Set<number>();
+        for (const dispatch of order.dispatches || []) {
+            for (const participant of dispatch.participants || []) {
+                const userId = Number(participant?.userId || 0);
+                if (userId > 0 && !participant?.rejectedAt) participantIds.add(userId);
+            }
+        }
+        const invalidIds = memberUserIds.filter((id) => !participantIds.has(id));
+        if (invalidIds.length) throw new BadRequestException('分红归因人员必须是本订单实际派单参与者');
+
+        const users = await tx.user.findMany({
+            where: {id: {in: memberUserIds}},
+            select: {id: true, name: true, phone: true},
+        });
+        if (users.length !== memberUserIds.length) throw new BadRequestException('分红归因人员不存在或已不可用');
+        const userMap = new Map<number, any>(users.map((user: any) => [Number(user.id), user]));
+        const attributionType = String(params.attributionType || 'RENEWAL').toUpperCase() === 'DESIGNATED' ? 'DESIGNATED' : 'RENEWAL';
+        const eligibility =
+            attributionType === 'DESIGNATED'
+                ? {
+                      eligibleUserIds: memberUserIds,
+                      snapshot: memberUserIds.map((id) => ({
+                          userId: id,
+                          name: userMap.get(id)?.name || `#${id}`,
+                          eligible: true,
+                          source: 'DESIGNATED_ALL_STAFF',
+                      })),
+                  }
+                : await this.buildRenewalBonusEligibilitySnapshotTx(tx, memberUserIds, userMap);
+
+        const reversal = await this.reverseRenewalBonusesTx({
+            tx,
+            orderId,
+            operatorId,
+            reason,
+            groupStatusAfter: 'REVERSED',
+        });
+        await tx.orderRenewalGroup.update({
+            where: {id: group.id},
+            data: {
+                groupKey: memberUserIds.join(','),
+                attributionType,
+                memberUserIds: memberUserIds as any,
+                memberNamesSnapshot: memberUserIds.map((id) => ({
+                    id,
+                    name: userMap.get(id)?.name || `#${id}`,
+                    phone: userMap.get(id)?.phone || null,
+                })) as any,
+                bonusEligibleUserIds: eligibility.eligibleUserIds as any,
+                bonusEligibleSnapshot: eligibility.snapshot as any,
+                status: 'PENDING',
+                renewalOrderCount: 0,
+                renewalAmount: 0,
+                bonusBaseAmount: 0,
+                bonusRate: 0,
+                bonusTotalAmount: 0,
+                settlementBatchId: null,
+                settledBy: null,
+                settledAt: null,
+                invalidatedBy: null,
+                invalidatedAt: null,
+                invalidateReason: null,
+            },
+        });
+        const settlement = await this.processRenewalAtConfirmTx({
+            tx,
+            order,
+            settlementBatchId,
+            operatorId,
+            mode: 'SETTLE',
+            invalidateReason: reason,
+        });
+        return {action: 'ATTRIBUTION_ADJUSTED', reason, attributionType, memberUserIds, reversal, settlement};
+    }
+
     private async applyPlayerEvaluationAdjustmentsToSettlements(params: {
         order: any;
         settlementsToCreate: any[];
@@ -4234,6 +4326,18 @@ export class OrdersService {
             await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
             const order = await tx.order.findUnique({where: {id: orderId}});
             if (!order) throw new NotFoundException('订单不存在');
+            return this.payMemberBalanceSupplementTx(tx, order, operatorId, idempotencyKey);
+        });
+    }
+
+    /** 调用方必须持有订单行锁；用于独立补款入口和确认结单的一步式补款。 */
+    private async payMemberBalanceSupplementTx(
+        tx: any,
+        order: any,
+        operatorId: number,
+        idempotencyKey: string,
+    ) {
+        const orderId = Number(order.id);
             if ((order as any).balanceSettlementMode !== 'RESERVE_CAPTURE') {
                 throw new BadRequestException('该订单不是储值预占订单');
             }
@@ -4365,7 +4469,6 @@ export class OrdersService {
                 status: 'SUCCESS',
                 idempotent: false,
             };
-        });
     }
 
     /*** -----------------------------
@@ -7432,6 +7535,28 @@ export class OrdersService {
         if (this.getBillingModeFromOrder(order) !== BillingMode.HOURLY) {
             throw new BadRequestException('仅小时储值订单支持按时长自动计算');
         }
+        if ((order as any).balanceReservationStatus !== 'HELD') {
+            const unitPrice = Number((order as any)?.projectSnapshot?.price ?? (order as any)?.project?.price ?? 0);
+            const originalAmount = this.toAmount2(Number((order as any).originalAmount ?? order.receivableAmount ?? 0));
+            const persistedHours = unitPrice > 0 ? this.toAmount2(originalAmount / unitPrice) : Number(order.orderQuantity || actualHoursInput);
+            const pendingSupplementAmount = this.toAmount2(Number((order as any).balancePendingSupplementAmount ?? 0));
+            return {
+                actualHours: persistedHours,
+                unitPrice: this.toAmount2(unitPrice),
+                originalAmount,
+                memberDiscountAmount: this.toAmount2(Number((order as any).memberDiscountAmount ?? 0)),
+                couponDiscountAmount: this.toAmount2(Number((order as any).couponDiscountAmount ?? 0)),
+                activityDiscountAmount: this.toAmount2(Number((order as any).activityDiscountAmount ?? 0)),
+                manualAdjustAmount: this.toAmount2(Number((order as any).manualAdjustAmount ?? 0)),
+                discountAmount: this.toAmount2(Number((order as any).discountAmount ?? 0)),
+                finalPayableAmount: this.toAmount2(Number((order as any).finalPayableAmount ?? order.paidAmount ?? 0)),
+                reservedAmount: this.toAmount2(Number((order as any).balanceReservedAmount ?? 0)),
+                differenceAmount:
+                    (order as any).balanceReservationStatus === 'SUPPLEMENT_PENDING' ? pendingSupplementAmount : 0,
+                pendingSupplementAmount,
+                pricingLocked: true,
+            };
+        }
         return this.calculateReservedHourlyFinalAmount(order, actualHoursInput);
     }
 
@@ -7504,6 +7629,8 @@ export class OrdersService {
             const newPaidAmount = dto?.paidAmount === undefined || dto?.paidAmount === null ? undefined : Number(dto.paidAmount);
 
             const isReservedBalanceOrder = (order as any).balanceSettlementMode === 'RESERVE_CAPTURE';
+            let memberBalanceSupplementAmount = 0;
+            let memberBalancePricingChanged = false;
             if (isReservedBalanceOrder) {
                 let pricing: any = null;
                 let actualAmount = this.toAmount2(Number((order as any).finalPayableAmount ?? order.paidAmount ?? 0));
@@ -7516,9 +7643,13 @@ export class OrdersService {
                               ? fallbackHours
                               : Number(order.orderQuantity || 0);
                     pricing = this.calculateReservedHourlyFinalAmount(order, actualHours);
+                    memberBalancePricingChanged =
+                        Math.abs(Number(order.orderQuantity || 0) - pricing.actualHours) > 1e-9 ||
+                        Math.abs(Number((order as any).finalPayableAmount || 0) - pricing.finalPayableAmount) >= 0.01;
                     await tx.order.update({
                         where: {id: orderId},
                         data: {
+                            orderQuantity: pricing.actualHours,
                             receivableAmount: pricing.originalAmount,
                             originalAmount: pricing.originalAmount,
                             memberDiscountAmount: pricing.memberDiscountAmount,
@@ -7538,6 +7669,11 @@ export class OrdersService {
                         data: {amount: pricing.couponDiscountAmount},
                     });
                     actualAmount = pricing.finalPayableAmount;
+                } else if (billingMode === BillingMode.HOURLY && dto?.actualHours != null) {
+                    await tx.order.update({
+                        where: {id: orderId},
+                        data: {orderQuantity: Number(dto.actualHours)},
+                    });
                 }
                 const captureResult = await this.captureMemberBalanceReservationTx(tx, order, actualAmount);
                 if (captureResult.pendingSupplementAmount > 0) {
@@ -7550,17 +7686,15 @@ export class OrdersService {
                             reservedAmount: Number((order as any).balanceReservedAmount || 0),
                         } as any,
                         newData: captureResult as any,
-                        remark: remark || '实际消费超过预占金额，等待补款',
+                        remark: remark || '实际消费超过预占金额，确认结单时自动补款',
                     });
-                    return {
-                        supplementRequired: true,
-                        orderId,
-                        status: order.status,
-                        capturedAmount: captureResult.capturedAmount,
-                        pendingSupplementAmount: captureResult.pendingSupplementAmount,
-                        ...(pricing ? {pricing} : {}),
-                        message: `尚需补款 ¥${captureResult.pendingSupplementAmount.toFixed(2)}，补款完成后方可最终结单`,
-                    };
+                    const supplementResult = await this.payMemberBalanceSupplementTx(
+                        tx,
+                        order,
+                        operatorId,
+                        `CONFIRM-${orderId}-${Math.round(actualAmount * 100)}`,
+                    );
+                    memberBalanceSupplementAmount = this.toAmount2(Number(supplementResult.amount || 0));
                 }
             }
 
@@ -7732,6 +7866,8 @@ export class OrdersService {
                 return {
                     orderId,
                     status: OrderStatus.COMPLETED,
+                    memberBalanceSupplementAmount,
+                    receiptRefreshRequired: memberBalancePricingChanged || memberBalanceSupplementAmount > 0,
                     settlementBatchId: result.settlementBatchId,
                     rebuiltSettlementCount: result.rebuiltSettlementCount,
                     freezeDays: result.freezeDays,
@@ -8157,6 +8293,10 @@ export class OrdersService {
         orderTipUserIds?: any[];
         invalidateRenewal?: boolean;
         renewalInvalidateReason?: string;
+        renewalAttributionAction?: string;
+        renewalAttributionType?: string;
+        renewalAttributionUserIds?: any[];
+        renewalAttributionReason?: string;
     }) {
         const {
             orderId,
@@ -8172,7 +8312,14 @@ export class OrdersService {
             orderTipUserIds,
             invalidateRenewal,
             renewalInvalidateReason,
+            renewalAttributionAction,
+            renewalAttributionType,
+            renewalAttributionUserIds,
+            renewalAttributionReason,
         } = params;
+        const normalizedRenewalAttributionAction = String(
+            renewalAttributionAction || (invalidateRenewal ? 'INVALIDATE' : 'KEEP'),
+        ).toUpperCase();
         const parsedSettlementBaseAmount = Number(settlementBaseAmount ?? 0);
         const hasExplicitSettlementBaseAmount = Number.isFinite(parsedSettlementBaseAmount) && parsedSettlementBaseAmount > 0;
         const explicitSettlementBaseAmount = hasExplicitSettlementBaseAmount ? this.toDecimal2(parsedSettlementBaseAmount) : null;
@@ -8247,9 +8394,10 @@ export class OrdersService {
             const builtPlan = await this.buildSettlementPlanFromOrder({
                 order: repairOrder,
                 modePlayAllocList,
-                playerEvaluations,
-                orderTipEnabled,
-                orderTipUserIds,
+                playerEvaluations: [],
+                orderTipEnabled: false,
+                orderTipUserIds: [],
+                defaultToGood: true,
             });
             const liableAfterPartialRefund = new Set<number>(
                 (order?.refunds || [])
@@ -8280,9 +8428,12 @@ export class OrdersService {
                         status: order.status,
                         dispatchCount: Number(order.dispatches?.length ?? 0),
                         modePlayAllocList: normalizeModePlayAlloc(modePlayAllocList),
-                        playerEvaluations: normalizePlayerEvaluations(playerEvaluations),
-                        orderTipEnabled: Boolean(orderTipEnabled),
-                        orderTipUserIds: this.normalizeIdArray(orderTipUserIds),
+                        playerEvaluations: [],
+                        orderTipEnabled: false,
+                        orderTipUserIds: [],
+                        renewalAttributionAction: normalizedRenewalAttributionAction,
+                        renewalAttributionType: String(renewalAttributionType || 'RENEWAL').toUpperCase(),
+                        renewalAttributionUserIds: this.normalizeIdArray(renewalAttributionUserIds),
                     } as any,
                 });
 
@@ -8334,6 +8485,9 @@ export class OrdersService {
                           playerEvaluations?: any[];
                           orderTipEnabled?: boolean;
                           orderTipUserIds?: number[];
+                          renewalAttributionAction?: string;
+                          renewalAttributionType?: string;
+                          renewalAttributionUserIds?: number[];
                       }
                     | undefined = cached.snapshot;
 
@@ -8349,9 +8503,12 @@ export class OrdersService {
                     Number(snap?.dispatchCount ?? 0) !== Number(order.dispatches?.length ?? 0) ||
                     currentUpdatedAt !== cachedUpdatedAt ||
                     JSON.stringify(snap?.modePlayAllocList ?? []) !== JSON.stringify(normalizeModePlayAlloc(modePlayAllocList)) ||
-                    JSON.stringify(snap?.playerEvaluations ?? []) !== JSON.stringify(normalizePlayerEvaluations(playerEvaluations)) ||
-                    Boolean(snap?.orderTipEnabled ?? false) !== Boolean(orderTipEnabled) ||
-                    JSON.stringify(snap?.orderTipUserIds ?? []) !== JSON.stringify(this.normalizeIdArray(orderTipUserIds))
+                    JSON.stringify(snap?.playerEvaluations ?? []) !== JSON.stringify([]) ||
+                    Boolean(snap?.orderTipEnabled ?? false) !== false ||
+                    JSON.stringify(snap?.orderTipUserIds ?? []) !== JSON.stringify([]) ||
+                    String(snap?.renewalAttributionAction || 'KEEP') !== normalizedRenewalAttributionAction ||
+                    String(snap?.renewalAttributionType || 'RENEWAL') !== String(renewalAttributionType || 'RENEWAL').toUpperCase() ||
+                    JSON.stringify(snap?.renewalAttributionUserIds ?? []) !== JSON.stringify(this.normalizeIdArray(renewalAttributionUserIds))
                 ) {
                     throw new BadRequestException('预览结果已失效，请重新 dryRun 后再 applyRepair');
                 }
@@ -8378,7 +8535,7 @@ export class OrdersService {
                 reason,
             });
 
-            const renewalRepairResult = invalidateRenewal
+            const renewalRepairResult = normalizedRenewalAttributionAction === 'INVALIDATE'
                 ? await this.reverseRenewalBonusesTx({
                       tx,
                       orderId,
@@ -8386,7 +8543,17 @@ export class OrdersService {
                       reason: renewalInvalidateReason || reason || 'RENEWAL_INVALIDATED_BY_RECALCULATION',
                       groupStatusAfter: 'INVALIDATED',
                   })
-                : null;
+                : normalizedRenewalAttributionAction === 'ADJUST'
+                  ? await this.adjustRenewalAttributionTx({
+                        tx,
+                        order: repairOrder,
+                        settlementBatchId: result.settlementBatchId,
+                        operatorId,
+                        attributionType: renewalAttributionType || 'RENEWAL',
+                        memberUserIds: renewalAttributionUserIds || [],
+                        reason: renewalAttributionReason || reason || '',
+                    })
+                  : null;
 
             /**
              * Step 6：后置同步

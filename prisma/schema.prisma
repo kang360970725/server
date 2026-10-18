@@ -1774,7 +1774,7 @@ model OrderRenewalBonus {
   renewalGroup                OrderRenewalGroup @relation(fields: [renewalGroupId], references: [id], onDelete: Cascade)
   user                        User              @relation(fields: [userId], references: [id])
 
-  @@unique([renewalGroupId, userId], map: "uniq_order_renewal_bonus_group_user")
+  @@index([renewalGroupId, userId], map: "idx_order_renewal_bonus_group_user")
   @@index([orderId], map: "idx_order_renewal_bonus_order")
   @@index([userId, createdAt], map: "idx_order_renewal_bonus_user_time")
   @@index([status], map: "idx_order_renewal_bonus_status")

@@ -564,6 +564,10 @@ export class OrdersController {
             orderTipUserIds?: any;
             invalidateRenewal?: boolean;
             renewalInvalidateReason?: string;
+            renewalAttributionAction?: string;
+            renewalAttributionType?: string;
+            renewalAttributionUserIds?: number[];
+            renewalAttributionReason?: string;
         },
         @Req() req: any,
     ) {
@@ -587,6 +591,10 @@ export class OrdersController {
             orderTipUserIds: body?.orderTipUserIds,
             invalidateRenewal: body?.invalidateRenewal,
             renewalInvalidateReason: body?.renewalInvalidateReason,
+            renewalAttributionAction: body?.renewalAttributionAction,
+            renewalAttributionType: body?.renewalAttributionType,
+            renewalAttributionUserIds: body?.renewalAttributionUserIds,
+            renewalAttributionReason: body?.renewalAttributionReason,
         } as any);
     }
 
