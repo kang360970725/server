@@ -1243,7 +1243,7 @@ model Order {
   /// 小时单“总小时”不再需要手填：
   /// 因为你要求用 接单时间 -> 存/结单时间 自动计算 billableHours
   /// 所以小时单的小时数最终落在 OrderDispatch.billableHours 上
-  orderQuantity              Int                     @default(1)
+  orderQuantity              Float                   @default(1)
   /// 关联项目：仍用 GameProject（必选）
   projectId                  Int
   /// 项目快照：记录当时项目配置（项目可能随时调整）

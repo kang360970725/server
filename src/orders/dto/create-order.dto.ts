@@ -39,7 +39,7 @@ export class CreateOrderDto {
     settlementBaseAmount?: number;
 
     @IsNumber()
-    @Min(1)
+    @Min(0.5)
     orderQuantity: number;
 
     @IsOptional()

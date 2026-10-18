@@ -409,7 +409,7 @@ export class MiniOrdersController {
         projectId: { type: 'number', example: 1 },
         paidAmount: { type: 'number', example: 128 },
         receivableAmount: { type: 'number', example: 128 },
-        orderQuantity: { type: 'number', example: 1 },
+        orderQuantity: { type: 'number', example: 1.5, minimum: 0.5, multipleOf: 0.5 },
         customerGameId: { type: 'string', example: '猫猫玩家' },
         inviter: { type: 'string', example: '邀请码' },
         customClubRate: { type: 'number', example: 0.1 },
@@ -430,7 +430,10 @@ export class MiniOrdersController {
     await this.memberService.assertMiniPhoneBound(uid);
     const playerIds = await this.resolveMiniOrderPlayerIds(body);
     const projectId = Number(body?.projectId);
-    const orderQuantity = Math.max(1, Math.floor(Number(body?.orderQuantity ?? 1)));
+    const orderQuantity = Number(body?.orderQuantity ?? 1);
+    if (!Number.isFinite(orderQuantity) || orderQuantity < 0.5 || Math.round(orderQuantity * 2) !== orderQuantity * 2) {
+      throw new BadRequestException('下单小时必须为不小于 0.5 的半小时倍数');
+    }
     const customerGameId = await this.memberService.assertMiniGameCardForOrder(uid, projectId, body?.customerGameId);
     const project = await this.prisma.gameProject.findUnique({
       where: { id: projectId },
