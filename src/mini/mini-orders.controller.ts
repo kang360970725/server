@@ -107,8 +107,6 @@ export class MiniOrdersController {
         userType: UserType.STAFF,
         staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
         workStatus: PlayerWorkStatus.IDLE,
-        workMode: 'ONLINE',
-        workOnlineExpiresAt: { gt: new Date() },
       },
       select: { id: true },
     });
