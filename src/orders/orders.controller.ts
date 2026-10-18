@@ -86,6 +86,7 @@ export class OrdersController {
             dispatcherId: body.dispatcherId != null ? Number(body.dispatcherId) : undefined,
             playerId: body.playerId != null ? Number(body.playerId) : undefined,
             orderSource: body.orderSource ? String(body.orderSource).trim() : undefined,
+            paymentChannel: body.paymentChannel ? String(body.paymentChannel).trim().toUpperCase() : undefined,
             isPaid,
         });
     }

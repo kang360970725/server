@@ -3286,6 +3286,11 @@ export class OrdersService {
             }
         }
         if (query.orderSource) where.orderSource = String(query.orderSource).trim();
+        if (query.paymentChannel) {
+            where.latestPayment = {
+                channel: String(query.paymentChannel).trim().toUpperCase(),
+            };
+        }
         if (query.playerId) {
             where.dispatches = {
                 some: {participants: {some: {userId: query.playerId}}},
@@ -3385,10 +3390,23 @@ export class OrdersService {
 
         const optionList = await this.getOrderSourceOptions();
         const sourceLabelMap = new Map(optionList.map((item) => [item.value, item.label]));
+        const paymentChannelLabelMap: Record<string, string> = {
+            BALANCE: '会员储值',
+            MANUAL: '人工线下收款',
+            MANUAL_SHOUQIANBA: '线下收款',
+            MANUAL_CONFIRMED: '人工确认收款',
+            SHOUQIANBA_WAP: '收钱吧在线收款',
+            MINIAPP_WECHAT: '小程序微信支付',
+            WECHAT: '微信支付',
+            TUTU_PLATFORM: '突突平台',
+            THIRD_PARTY_CHANNEL: '第三方渠道',
+        };
         const data = rows.map((row: any) => ({
             ...row,
             orderSource: String(row?.orderSource || '').trim() || 'CUSTOMER_SERVICE_MANUAL',
             orderSourceLabel: sourceLabelMap.get(String(row?.orderSource || '').trim() || 'CUSTOMER_SERVICE_MANUAL') || '客服手动派单',
+            paymentChannel: String(row?.latestPayment?.channel || '').trim().toUpperCase() || null,
+            paymentChannelLabel: paymentChannelLabelMap[String(row?.latestPayment?.channel || '').trim().toUpperCase()] || null,
         }));
 
         return {
