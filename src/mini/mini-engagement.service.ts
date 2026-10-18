@@ -3,6 +3,7 @@ import {PrismaService} from '../prisma/prisma.service';
 import {MemberPointBizType} from '@prisma/client';
 import {MemberService} from '../member/member.service';
 import {SystemConfigService} from '../system-config/system-config.service';
+import {buildStaffResponseStats} from '../common/utils/staff-response-time.util';
 
 const achievements = [
   {code: 'WELCOME', name: '初来乍到', description: '完成会员登录', rarity: 'COMMON', target: 1, icon: '👋'},
@@ -184,7 +185,14 @@ export class MiniEngagementService {
     const data={displayName,avatarUrl:text(body?.avatarUrl,500),slogan:text(body?.slogan,30),bio:text(body?.bio,500),imageUrls:urls(body?.imageUrls,3),audioUrl:text(body?.audioUrl,500),videoUrl:text(body?.videoUrl,500),gameTags:Array.isArray(body?.gameTags)?body.gameTags:[],skillTags:Array.isArray(body?.skillTags)?body.skillTags:[],serviceYears:Math.max(0,Math.min(50,Number(body?.serviceYears||0))),assessmentAt:body?.assessmentAt?new Date(body.assessmentAt):null,antiCheatImages:urls(body?.antiCheatImages,1),resultImages:urls(body?.resultImages,3),status:submit?'PENDING':'DRAFT',submittedAt:submit?new Date():null,reviewRemark:null};
     return this.prisma.staffPublicCard.upsert({where:{userId},update:data,create:{userId,...data}});
   }
-  async approvedStaffCards(){return this.prisma.staffPublicCard.findMany({where:{status:'APPROVED',publicVisible:true},orderBy:{reviewedAt:'desc'},take:50});}
+  private async withResponseStats(cards:any[]){
+    const stats=await buildStaffResponseStats(this.prisma,cards.map((card:any)=>Number(card.userId)));
+    return cards.map((card:any)=>({...card,...(stats.get(Number(card.userId))||{})}));
+  }
+  async approvedStaffCards(){
+    const cards=await this.prisma.staffPublicCard.findMany({where:{status:'APPROVED',publicVisible:true},orderBy:{reviewedAt:'desc'},take:50});
+    return this.withResponseStats(cards);
+  }
   async approvedStaffCard(userId:number){
     const card=await this.prisma.staffPublicCard.findFirst({where:{userId,status:'APPROVED',publicVisible:true}});
     if(!card)throw new NotFoundException('服务者主页不存在或尚未通过审核');
@@ -193,7 +201,8 @@ export class MiniEngagementService {
       _avg:{score:true,technicalScore:true,serviceScore:true,comprehensiveScore:true},
       _count:{id:true},
     });
-    return {...card,ratings:{overall:Number(aggregate._avg.score||0),technical:Number(aggregate._avg.technicalScore||0),service:Number(aggregate._avg.serviceScore||0),comprehensive:Number(aggregate._avg.comprehensiveScore||0),count:aggregate._count.id}};
+    const [enriched]=await this.withResponseStats([card]);
+    return {...enriched,ratings:{overall:Number(aggregate._avg.score||0),technical:Number(aggregate._avg.technicalScore||0),service:Number(aggregate._avg.serviceScore||0),comprehensive:Number(aggregate._avg.comprehensiveScore||0),count:aggregate._count.id}};
   }
   async storeBlacklist(){
     const maskPhone=(value:any)=>{const text=String(value||'').trim();return text.length>=7?`${text.slice(0,3)}****${text.slice(-4)}`:'***';};
@@ -215,7 +224,10 @@ export class MiniEngagementService {
       reason:String(item.staffBlacklistReason||'违反本店服务规范'),
     }));
   }
-  async adminStaffCards(status?:string){return this.prisma.staffPublicCard.findMany({where:status?{status}:undefined,include:{user:{select:{id:true,name:true,phone:true,userType:true}}},orderBy:{updatedAt:'desc'}});}
+  async adminStaffCards(status?:string){
+    const cards=await this.prisma.staffPublicCard.findMany({where:status?{status}:undefined,include:{user:{select:{id:true,name:true,phone:true,userType:true}}},orderBy:{updatedAt:'desc'}});
+    return this.withResponseStats(cards);
+  }
   async setStaffCardVisibility(id:number,publicVisible:boolean){
     const card=await this.prisma.staffPublicCard.findUnique({where:{id},select:{id:true,status:true}});
     if(!card)throw new NotFoundException('服务者名片不存在');

@@ -287,18 +287,17 @@ export class AuthService {
     const isStaff = isStaffUser(user);
     const isActiveStaff = isStaff && String(user?.staffEmploymentStatus || StaffEmploymentStatus.ACTIVE) === StaffEmploymentStatus.ACTIVE;
     if (isActiveStaff) {
-      const leaseExpiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
       await this.prisma.user.update({
         where: { id: user.id },
         data: {
           lastLoginAt: new Date(),
           workMode: 'ONLINE',
-          workOnlineExpiresAt: user.workStatus === PlayerWorkStatus.RESTING ? null : leaseExpiresAt,
+          workOnlineExpiresAt: null,
           offlineJoinedAt: null,
         },
       });
       user.workMode = 'ONLINE';
-      user.workOnlineExpiresAt = user.workStatus === PlayerWorkStatus.RESTING ? null : leaseExpiresAt;
+      user.workOnlineExpiresAt = null;
       user.offlineJoinedAt = null;
     }
     if (!isActiveStaff) {

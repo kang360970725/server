@@ -2,14 +2,12 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
 import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
-import { PlayerWorkStatus, StaffEmploymentStatus, UserStatus } from '@prisma/client';
+import {PlayerWorkStatus, StaffEmploymentStatus, UserStatus} from '@prisma/client';
 import { isDispatchMonitoredStaff, isStaffUser } from '../common/utils/staff-role-scope.util';
 import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
-  // 临时策略：仅保留手动离线/登录上线，不再因租约过期自动离线。
-  private readonly autoOfflineDisabled = true;
   private readonly staffExitDisableAfterMs = 72 * 60 * 60 * 1000;
 
   constructor(
@@ -190,58 +188,17 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
     const permissions = user.Role?.permissions?.map((p) => p.key) || [];
     const roleName = String(user.Role?.name || '').trim();
-    const leaseNow = new Date();
-    const leaseExpiresAt = user.workOnlineExpiresAt ? new Date(user.workOnlineExpiresAt) : null;
     const isStaff = isStaffUser(user);
     const isActiveStaff = isStaff && String(user?.staffEmploymentStatus || StaffEmploymentStatus.ACTIVE) === StaffEmploymentStatus.ACTIVE;
-    const isOnline = String(user.workMode || '').toUpperCase() === 'ONLINE';
 
-    if (isActiveStaff && isOnline && user.workStatus !== PlayerWorkStatus.RESTING) {
-      if (this.autoOfflineDisabled) {
-        if (leaseExpiresAt && leaseExpiresAt > leaseNow) {
-          const nextExpiresAt = new Date(leaseNow.getTime() + 2 * 60 * 60 * 1000);
-          await this.prisma.user.updateMany({
-            where: {
-              id: user.id,
-              userType: 'STAFF',
-              workMode: 'ONLINE',
-              workOnlineExpiresAt: { gt: leaseNow },
-            },
-            data: {
-              workOnlineExpiresAt: nextExpiresAt,
-            },
-          });
-          user.workOnlineExpiresAt = nextExpiresAt;
-        }
-      } else if (leaseExpiresAt && leaseExpiresAt > leaseNow) {
-        const nextExpiresAt = new Date(leaseNow.getTime() + 2 * 60 * 60 * 1000);
-        await this.prisma.user.updateMany({
-          where: {
-            id: user.id,
-            userType: 'STAFF',
-            workMode: 'ONLINE',
-            workOnlineExpiresAt: { gt: leaseNow },
-          },
-          data: {
-            workOnlineExpiresAt: nextExpiresAt,
-          },
-        });
-        user.workOnlineExpiresAt = nextExpiresAt;
-      } else {
-        await this.prisma.user.updateMany({
-          where: {
-            id: user.id,
-            userType: 'STAFF',
-            workMode: 'ONLINE',
-          },
-          data: {
-            workStatus: 'IDLE',
-            workOnlineExpiresAt: null,
-          },
-        });
-        user.workStatus = 'IDLE';
-        user.workOnlineExpiresAt = null;
-      }
+    if (isActiveStaff && (user.workMode !== 'ONLINE' || user.workOnlineExpiresAt || user.offlineJoinedAt)) {
+      await this.prisma.user.update({
+        where: {id: user.id},
+        data: {workMode: 'ONLINE', workOnlineExpiresAt: null, offlineJoinedAt: null},
+      });
+      user.workMode = 'ONLINE';
+      user.workOnlineExpiresAt = null;
+      user.offlineJoinedAt = null;
     }
 
     return {

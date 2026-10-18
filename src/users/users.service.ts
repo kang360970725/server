@@ -13,18 +13,16 @@ import { StaffRuleEngineService } from '../system-config/staff-rule-engine.servi
 import { isDispatchMonitoredStaff } from '../common/utils/staff-role-scope.util';
 import { OfflineFeeService } from '../offline-fee/offline-fee.service';
 import { EquipmentRentalFeeService } from '../equipment-rental-fee/equipment-rental-fee.service';
+import {buildStaffResponseStats} from '../common/utils/staff-response-time.util';
 
 @Injectable()
 export class UsersService {
-  // 临时屏蔽自动离线，仅保留手动离线/登录上线。
+  // 服务者不再使用在线租约和手动上下线；正常在职账号始终视为在线。
   private static readonly defaultStaffRoleId = 3;
   private static readonly defaultStaffRoleName = '陪玩';
-  private readonly autoOfflineDisabled = true;
   private readonly staffExitCooldownDays = 180;
   private readonly staffExitDepositRefundMinAcceptedOrders = 50;
   private readonly logger = new Logger(UsersService.name);
-
-  static readonly PLAYER_ONLINE_LEASE_MS = 2 * 60 * 60 * 1000;
 
   constructor(
     private prisma: PrismaService,
@@ -33,10 +31,6 @@ export class UsersService {
     private readonly offlineFeeService: OfflineFeeService,
     private readonly equipmentRentalFeeService: EquipmentRentalFeeService,
   ) {}
-
-  private buildPlayerOnlineLeaseExpiresAt(base: Date = new Date()) {
-    return new Date(base.getTime() + UsersService.PLAYER_ONLINE_LEASE_MS);
-  }
 
   private getStaffDormantFreezeAt(baseDate?: Date | string | null, dormantFreezeDays = 7) {
     if (!baseDate) return null;
@@ -374,18 +368,10 @@ export class UsersService {
   }
 
   private normalizeWorkModePayload(input: { workMode?: 'ONLINE' | 'OFFLINE'; offlineJoinedAt?: string | Date | null }) {
-    const workMode = (input.workMode ?? 'ONLINE') as 'ONLINE' | 'OFFLINE';
-    const offlineJoinedAtRaw = input.offlineJoinedAt ?? null;
-    const offlineJoinedAt = offlineJoinedAtRaw ? new Date(offlineJoinedAtRaw as any) : null;
-
-    if (workMode === 'OFFLINE' && !offlineJoinedAt) {
-      throw new BadRequestException('线下员工必须填写转线下(入职)时间');
-    }
-
     return {
-      workMode,
-      offlineJoinedAt: workMode === 'OFFLINE' ? offlineJoinedAt : null,
-      workOnlineExpiresAt: workMode === 'ONLINE' ? this.buildPlayerOnlineLeaseExpiresAt() : null,
+      workMode: 'ONLINE' as const,
+      offlineJoinedAt: null,
+      workOnlineExpiresAt: null,
     };
   }
 
@@ -2526,7 +2512,7 @@ export class UsersService {
         ...(nextWorkStatus === PlayerWorkStatus.IDLE
           ? {
             workMode: 'ONLINE',
-            workOnlineExpiresAt: this.buildPlayerOnlineLeaseExpiresAt(),
+            workOnlineExpiresAt: null,
             offlineJoinedAt: null,
           }
           : nextWorkStatus === PlayerWorkStatus.RESTING
@@ -2542,11 +2528,12 @@ export class UsersService {
       where: {
         id,
         userType: UserType.STAFF,
-        workMode: 'ONLINE',
-        workStatus: { not: PlayerWorkStatus.RESTING },
+        staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
       },
       data: {
-        workOnlineExpiresAt: this.buildPlayerOnlineLeaseExpiresAt(),
+        workMode: 'ONLINE',
+        workOnlineExpiresAt: null,
+        offlineJoinedAt: null,
       },
     });
   }
@@ -2568,14 +2555,9 @@ export class UsersService {
       }
       throw new BadRequestException('当前员工已退店或已加入黑名单，无法切换工作模式');
     }
-    const payload = this.normalizeWorkModePayload({
-      workMode,
-      offlineJoinedAt: workMode === 'OFFLINE' ? new Date() : null,
-    });
-
     return this.prisma.user.update({
       where: { id },
-      data: payload,
+      data: {workMode: 'ONLINE', workOnlineExpiresAt: null, offlineJoinedAt: null},
       select: {
         id: true,
         name: true,
@@ -2598,24 +2580,7 @@ export class UsersService {
     includeFrozen?: boolean;
   }) {
     const { keyword, onlyIdle = true, limit, page, paginate, onlyOnline = false, includeFrozen = false } = params || {};
-    const leaseNow = new Date();
     await this.autoFreezeDormantStaffUsers();
-    if (!this.autoOfflineDisabled) {
-      await this.prisma.user.updateMany({
-        where: {
-          userType: UserType.STAFF,
-          workMode: 'ONLINE',
-          OR: [
-            { workOnlineExpiresAt: null },
-            { workOnlineExpiresAt: { lte: leaseNow } },
-          ],
-        },
-        data: {
-          workStatus: PlayerWorkStatus.IDLE,
-          workOnlineExpiresAt: null,
-        },
-      });
-    }
 
     const where: any = {
       userType: UserType.STAFF,
@@ -2625,8 +2590,6 @@ export class UsersService {
     };
     if (onlyIdle) where.workStatus = PlayerWorkStatus.IDLE;
     if (onlyOnline) {
-      where.workMode = 'ONLINE';
-      where.workOnlineExpiresAt = { gt: leaseNow };
       where.workStatus = onlyIdle ? PlayerWorkStatus.IDLE : { not: PlayerWorkStatus.RESTING };
     }
 
@@ -2665,6 +2628,7 @@ export class UsersService {
     const end = new Date(dayNow.getFullYear(), dayNow.getMonth(), dayNow.getDate(), 23, 59, 59, 999);
 
     const ids = allUsers.map((u) => u.id);
+    const responseStats = await buildStaffResponseStats(this.prisma, ids);
     let countMap: Record<number, number> = {};
     if (ids.length) {
       const grouped = await this.prisma.orderParticipant.groupBy({
@@ -2691,9 +2655,14 @@ export class UsersService {
 
     const rows = allUsers
         .map((u) => ({ ...u,
+          workMode: 'ONLINE' as const,
+          workOnlineExpiresAt: null,
+          offlineJoinedAt: null,
           displayName: String(u?.name || '').trim() || `#${u.id}`,
           ratingName: u?.staffRating?.name ?? '-',   // ✅ 等级名称
-          todayHandledCount: countMap[Number(u.id)] ?? 0}))
+          todayHandledCount: countMap[Number(u.id)] ?? 0,
+          ...(responseStats.get(Number(u.id)) || {}),
+        }))
         .sort((a, b) => {
           const ca = Number(a.todayHandledCount ?? 0);
           const cb = Number(b.todayHandledCount ?? 0);

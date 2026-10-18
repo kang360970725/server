@@ -28,6 +28,7 @@ import {randomInt, randomUUID} from 'crypto';
 import {groupByUserId, round2, roundMix1, toNum} from '../utils/money/format';
 import {computeBillingGuaranteed, computeBillingHours, computeBillingMODEPLAY, resolveGuaranteedSettlementPolicy} from '../utils/orderDispatches/revenueInit';
 import {compareSettlementsToPlan} from '../utils/finance/generateRepairPlan';
+import {buildStaffResponseStats, formatEstimatedWaitTime} from '../common/utils/staff-response-time.util';
 import {computeSettlementFreezeTime} from '../utils/orderDispatches/settlement-freeze.rule';
 import {NotificationsService} from '../notifications/notifications.service';
 import {MiniSubscribeMessageService} from '../notifications/mini-subscribe-message.service';
@@ -3564,6 +3565,22 @@ export class OrdersService {
                 };
             }
         }
+
+        const participantUsers = (Array.isArray(order?.dispatches) ? order.dispatches : [])
+            .flatMap((dispatch: any) => (Array.isArray(dispatch?.participants) ? dispatch.participants : []))
+            .map((participant: any) => participant?.user)
+            .filter((user: any) => Number(user?.id) > 0);
+        const responseStats = await buildStaffResponseStats(
+            this.prisma,
+            participantUsers.map((user: any) => Number(user.id)),
+        );
+        for (const user of participantUsers) Object.assign(user, responseStats.get(Number(user.id)) || {});
+        const currentResponseSeconds = (Array.isArray(order?.currentDispatch?.participants) ? order.currentDispatch.participants : [])
+            .filter((participant: any) => participant?.isActive !== false && !participant?.rejectedAt)
+            .map((participant: any) => responseStats.get(Number(participant?.userId))?.averageResponseSeconds)
+            .filter((seconds: any) => Number.isFinite(Number(seconds)))
+            .map(Number);
+        order.estimatedWaitTimeText = formatEstimatedWaitTime(currentResponseSeconds.length ? Math.max(...currentResponseSeconds) : null);
 
         const activeRenewalBonuses = (Array.isArray(order?.renewalGroups) ? order.renewalGroups : [])
             .filter((group: any) => String(group?.status || '') === 'SETTLED')
