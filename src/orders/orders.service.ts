@@ -2287,7 +2287,7 @@ export class OrdersService {
                 },
             });
         }
-        await tx.walletAccount.update({
+        const accountAfter = await tx.walletAccount.update({
             where: {userId: input.userId},
             data: {
                 availableBalance: {decrement: amount},
@@ -2304,7 +2304,10 @@ export class OrdersService {
                 balancePendingSupplementAmount: 0,
             },
         });
-        return reservation;
+        return {
+            ...reservation,
+            balanceAfter: this.toAmount2(Number(accountAfter.availableBalance)),
+        };
     }
 
     /** 将预占按实际金额入账；超出部分只生成待补款，不会透支或静默记账。 */
@@ -3129,10 +3132,23 @@ export class OrdersService {
                         },
                         select: {id: true},
                     });
-                    await this.reserveMemberBalanceForOrderTx(tx, {
+                    const reservation = await this.reserveMemberBalanceForOrderTx(tx, {
                         orderId: Number(createdOrder.id),
                         userId: Number(customerUserId),
                         amount: consumeAmount,
+                    });
+                    await tx.orderPayment.update({
+                        where: {id: payment.id},
+                        data: {
+                            notifyRaw: {
+                                settlementMode: 'RESERVE_CAPTURE',
+                                reservedAmount: consumeAmount,
+                                receiptMeta: {
+                                    memberBalanceReserved: consumeAmount,
+                                    memberBalanceAfter: Number(reservation.balanceAfter),
+                                },
+                            } as any,
+                        },
                     });
                 } else {
                     payment = await tx.orderPayment.create({
