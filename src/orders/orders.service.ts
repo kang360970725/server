@@ -5399,6 +5399,8 @@ export class OrdersService {
             compensationAmount?: number;
             refundAmount?: number;
             strictOriginalReturn?: boolean;
+            /** 客户款项已由财务线下退回：跳过第三方原路退款，仅完成系统内退款结案与收益冲正。 */
+            manualOfflineRefundCompleted?: boolean;
         },
     ) {
         orderId = Number(orderId);
@@ -5408,6 +5410,10 @@ export class OrdersService {
         const staffLiableSelection = options?.staffLiable;
         const staffLiable = staffLiableSelection === true;
         const hasCompensation = Boolean(options?.hasCompensation);
+        const manualOfflineRefundCompleted = Boolean(options?.manualOfflineRefundCompleted);
+        if (manualOfflineRefundCompleted && !String(remark || '').trim()) {
+            throw new BadRequestException('已线下退款必须填写退款凭证或备注');
+        }
 
         const order: any = await this.prisma.order.findUnique({
             where: {id: orderId},
@@ -5482,10 +5488,10 @@ export class OrdersService {
             throw new BadRequestException('订单未支付完成，无法退款');
         }
 
-        const shouldAutoRefund = this.shouldAutoRefundWithWechat(orderWithPayment as any);
-        const shouldRefundBalance = latestPaymentChannel === 'BALANCE';
-        const shouldRefundShouqianba = latestPaymentChannel === 'SHOUQIANBA_WAP';
-        const manualRefundRequired = !shouldAutoRefund && !shouldRefundBalance && !shouldRefundShouqianba;
+        const shouldAutoRefund = !manualOfflineRefundCompleted && this.shouldAutoRefundWithWechat(orderWithPayment as any);
+        const shouldRefundBalance = !manualOfflineRefundCompleted && latestPaymentChannel === 'BALANCE';
+        const shouldRefundShouqianba = !manualOfflineRefundCompleted && latestPaymentChannel === 'SHOUQIANBA_WAP';
+        const manualRefundRequired = !manualOfflineRefundCompleted && !shouldAutoRefund && !shouldRefundBalance && !shouldRefundShouqianba;
         if (Boolean(options?.strictOriginalReturn) && manualRefundRequired) {
             throw new BadRequestException(this.getComplaintRefundUnsupportedReason(latestPaymentChannel) || '当前支付渠道不支持原路退款');
         }
@@ -5616,7 +5622,9 @@ export class OrdersService {
                           ? null
                           : Number((orderWithPayment as any)?.latestPayment?.id || 0) || null,
                     refundNo,
-                    channel: latestPaymentChannel || this.resolvePaymentChannelByOrderSource((orderWithPayment as any)?.orderSource),
+                    channel: manualOfflineRefundCompleted
+                        ? 'MANUAL_OFFLINE'
+                        : latestPaymentChannel || this.resolvePaymentChannelByOrderSource((orderWithPayment as any)?.orderSource),
                     status: isHeldReservedBalanceOrder ? 'SUCCESS' : manualRefundRequired ? 'MANUAL_REQUIRED' : 'SUCCESS',
                     amount: refundAmount,
                     refundType: isPartialRefund ? 'PARTIAL' : 'FULL',
@@ -5627,7 +5635,11 @@ export class OrdersService {
                     reason: refundReason,
                     externalRefundId: String(autoRefundTrace?.refundId || '').trim() || null,
                     operatorId,
-                    raw: autoRefundTrace ? (autoRefundTrace as any) : null,
+                    raw: manualOfflineRefundCompleted
+                        ? ({manualOfflineRefundCompleted: true, originalPaymentChannel: latestPaymentChannel} as any)
+                        : autoRefundTrace
+                          ? (autoRefundTrace as any)
+                          : null,
                     refundedAt: now,
                 },
             });
@@ -5885,6 +5897,7 @@ export class OrdersService {
             remark: remark ?? null,
             autoRefundTriggered: shouldAutoRefund,
             manualRefundRequired,
+            manualOfflineRefundCompleted,
             refundNo,
             refundChannel: latestPaymentChannel || null,
             autoRefundResult: autoRefundTrace

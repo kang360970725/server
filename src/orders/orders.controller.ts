@@ -386,6 +386,7 @@ export class OrdersController {
             hasCompensation?: boolean;
             compensationAmount?: number;
             refundAmount?: number;
+            manualOfflineRefundCompleted?: boolean;
         },
         @Req() req: any,
     ) {
@@ -405,6 +406,7 @@ export class OrdersController {
                 body?.refundAmount === undefined || body?.refundAmount === null
                     ? undefined
                     : Number(body.refundAmount),
+            manualOfflineRefundCompleted: Boolean(body?.manualOfflineRefundCompleted),
         });
     }
 
