@@ -462,6 +462,7 @@ export class SystemConfigService implements OnModuleInit {
           { value: 'THIRD_PARTY_TRANSFER', label: '第三方转单', enabled: true },
           { value: 'MINIAPP_SELF_SERVICE', label: '小程序自助下单', enabled: true },
           { value: 'CUSTOMER_SERVICE_MANUAL', label: '客服手动派单', enabled: true },
+          { value: 'LIVE_LUCKY_BAG_GIFT', label: '直播间福袋赠送', enabled: true },
           { value: 'OFFICIAL_ACCOUNT', label: '公众号下单', enabled: true },
         ], null, 2),
         valueType: 'JSON',
@@ -859,17 +860,22 @@ export class SystemConfigService implements OnModuleInit {
       { value: 'THIRD_PARTY_TRANSFER', label: '第三方转单', enabled: true },
       { value: 'MINIAPP_SELF_SERVICE', label: '小程序自助下单', enabled: true },
       { value: 'CUSTOMER_SERVICE_MANUAL', label: '客服手动派单', enabled: true },
+      { value: 'LIVE_LUCKY_BAG_GIFT', label: '直播间福袋赠送', enabled: true },
       { value: 'OFFICIAL_ACCOUNT', label: '公众号下单', enabled: true },
     ];
     const raw = await this.getJson<any[]>(SystemConfigService.KEYS.ORDER_SOURCE_OPTIONS, fallback);
     const list = Array.isArray(raw) ? raw : fallback;
-    return list
+    const normalized = list
       .map((item: any) => ({
         value: String(item?.value || '').trim(),
         label: String(item?.label || item?.value || '').trim(),
         enabled: item?.enabled !== false,
       }))
       .filter((item) => item.value && item.label);
+    if (!normalized.some((item) => item.value === 'LIVE_LUCKY_BAG_GIFT')) {
+      normalized.push({ value: 'LIVE_LUCKY_BAG_GIFT', label: '直播间福袋赠送', enabled: true });
+    }
+    return normalized;
   }
 
   async getEnabledOrderSourceOptions() {

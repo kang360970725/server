@@ -64,6 +64,7 @@ const ORDER_SOURCE_DEFAULTS = [
     {value: 'THIRD_PARTY_TRANSFER', label: '第三方转单', enabled: true},
     {value: 'MINIAPP_SELF_SERVICE', label: '小程序自助下单', enabled: true},
     {value: 'CUSTOMER_SERVICE_MANUAL', label: '客服手动派单', enabled: true},
+    {value: 'LIVE_LUCKY_BAG_GIFT', label: '直播间福袋赠送', enabled: true},
     {value: 'OFFICIAL_ACCOUNT', label: '公众号下单', enabled: true},
 ];
 
@@ -2985,7 +2986,8 @@ export class OrdersService {
 
         // ✅ 赠送单：不收款，但仍然要正常结算/分红
         // - 为避免前端误传金额导致“赠送单被计入营收”，后端这里强制清零
-        const isGifted = Boolean(dto.isGifted);
+        const isLiveLuckyBagGift = orderSource === 'LIVE_LUCKY_BAG_GIFT';
+        const isGifted = isLiveLuckyBagGift || Boolean(dto.isGifted);
 
         // 赠送金额口径（本期统一为“按应收承担成本”）
         const originalAmount = this.toAmount2(Number(dto.receivableAmount ?? 0));
@@ -3011,7 +3013,7 @@ export class OrdersService {
         if (useMemberBalancePayment && !customerUserId) {
             throw new BadRequestException('使用会员储值支付时必须选择会员用户');
         }
-        const isPaid = dto.isGifted ? false : useMemberBalancePayment ? true : Boolean(dto.isPaid);
+        const isPaid = isLiveLuckyBagGift ? true : isGifted ? false : useMemberBalancePayment ? true : Boolean(dto.isPaid);
 
         // 统一优惠汇总（先接基础口径，便于后续无缝接优惠券/活动）
         const memberDiscount = isGifted
@@ -3035,8 +3037,11 @@ export class OrdersService {
         const giftDiscountAmount = this.toAmount2(giftedAmount);
         const discountAmount = this.toAmount2(memberDiscountAmount + couponDiscountAmount + activityDiscountAmount + giftDiscountAmount + manualAdjustAmount);
         const finalPayableAmount = this.toAmount2(Math.max(0, originalAmount - discountAmount));
-        const effectivePaidAmount =
-            selectedUserCoupon || memberDiscountAmount > 0 ? finalPayableAmount : this.toAmount2(Number(dto.paidAmount ?? finalPayableAmount));
+        const effectivePaidAmount = isGifted
+            ? 0
+            : selectedUserCoupon || memberDiscountAmount > 0
+              ? finalPayableAmount
+              : this.toAmount2(Number(dto.paidAmount ?? finalPayableAmount));
         const effectiveSettlementAmountForCreate = selectedUserCoupon || memberDiscountAmount > 0 ? finalPayableAmount : effectiveSettlementAmount;
         const discountType = this.resolveDiscountType({
             memberDiscountAmount,
