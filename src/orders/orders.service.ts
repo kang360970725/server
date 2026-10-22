@@ -1,4 +1,4 @@
-import {BadRequestException, ConflictException, Injectable, Logger, NotFoundException} from '@nestjs/common';
+import {BadRequestException, ConflictException, Injectable, Logger, NotFoundException, ServiceUnavailableException} from '@nestjs/common';
 import {PrismaService} from '../prisma/prisma.service';
 import {CreateOrderDto} from './dto/create-order.dto';
 import {AcceptDispatchDto} from './dto/accept-dispatch.dto';
@@ -389,6 +389,12 @@ export class OrdersService {
 
     /** 创建独立支付尝试并调用收钱吧生成二维码；整单与补收均使用新的 client_sn。 */
     async createShouqianbaPaymentRequest(orderIdInput: number, amountInput?: number, purposeInput?: string) {
+        const onlineQrPaymentPaused = true;
+        if (onlineQrPaymentPaused) {
+            throw new ServiceUnavailableException('线上二维码支付已暂停，请改用线下确认收款');
+        }
+
+        /* istanbul ignore next -- 保留实现，恢复渠道时关闭上方暂停开关即可。 */
         const orderId = Number(orderIdInput);
         if (!orderId) throw new BadRequestException('orderId 必填');
         const purpose =
@@ -535,6 +541,7 @@ export class OrdersService {
             await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
             const order = await tx.order.findUnique({where: {id: orderId}});
             if (!order || order.isPaid || order.isGifted || order.unpaidAutoDeductedAt) return null;
+            if (order.status !== OrderStatus.COMPLETED_PENDING_CONFIRM && order.status !== OrderStatus.COMPLETED) return null;
             if (!order.unpaidSince || order.unpaidSince.getTime() > Date.now() - 48 * 60 * 60 * 1000) return null;
             const userId = Number(order.unpaidResponsibleUserId || 0);
             if (!userId) return null;
@@ -625,6 +632,7 @@ export class OrdersService {
             where: {
                 isPaid: false,
                 isGifted: false,
+                status: {in: [OrderStatus.COMPLETED_PENDING_CONFIRM, OrderStatus.COMPLETED]},
                 unpaidResponsibleUserId: {not: null},
                 unpaidSince: {not: null},
                 unpaidAutoDeductedAt: null,
@@ -2149,6 +2157,7 @@ export class OrdersService {
             amount: number;
             sourceType: string;
             sourceId: number;
+            walletAvailableBalance?: number;
         },
     ) {
         let remaining = this.toAmount2(input.amount);
@@ -2161,6 +2170,31 @@ export class OrdersService {
             },
             orderBy: [{createdAt: 'asc'}, {id: 'asc'}],
         });
+        const walletAvailableBalance = this.toAmount2(input.walletAvailableBalance);
+        if (walletAvailableBalance > 0) {
+            const lotBalance = this.toAmount2(
+                lots.reduce(
+                    (sum: number, lot: any) =>
+                        sum + this.toAmount2(lot.principalRemaining) + this.toAmount2(lot.bonusRemaining),
+                    0,
+                ),
+            );
+            const legacyGap = this.toAmount2(Math.max(0, walletAvailableBalance - lotBalance));
+            if (legacyGap > 0) {
+                const legacyLot = await tx.memberBalanceLot.create({
+                    data: {
+                        userId: input.userId,
+                        sourceType: 'LEGACY_RECONCILIATION',
+                        principalInitial: legacyGap,
+                        principalRemaining: legacyGap,
+                        bonusInitial: 0,
+                        bonusRemaining: 0,
+                        status: 'ACTIVE',
+                    },
+                });
+                lots.push(legacyLot);
+            }
+        }
         const allocations = new Map<number, {lot: any; principal: number; bonus: number}>();
         for (const lot of lots) {
             if (remaining <= 0) break;
@@ -2238,6 +2272,28 @@ export class OrdersService {
             },
             orderBy: [{createdAt: 'asc'}, {id: 'asc'}],
         });
+        const lotBalance = this.toAmount2(
+            lots.reduce(
+                (sum: number, lot: any) =>
+                    sum + this.toAmount2(lot.principalRemaining) + this.toAmount2(lot.bonusRemaining),
+                0,
+            ),
+        );
+        const legacyGap = this.toAmount2(Math.max(0, this.toAmount2(account.availableBalance) - lotBalance));
+        if (legacyGap > 0) {
+            const legacyLot = await tx.memberBalanceLot.create({
+                data: {
+                    userId: input.userId,
+                    sourceType: 'LEGACY_RECONCILIATION',
+                    principalInitial: legacyGap,
+                    principalRemaining: legacyGap,
+                    bonusInitial: 0,
+                    bonusRemaining: 0,
+                    status: 'ACTIVE',
+                },
+            });
+            lots.push(legacyLot);
+        }
         let remaining = amount;
         const allocations = new Map<number, {principal: number; bonus: number}>();
         for (const lot of lots) {
@@ -2259,7 +2315,7 @@ export class OrdersService {
             }
         }
         if (remaining > 0) {
-            throw new ConflictException('储值余额与充值批次余额不一致，请先完成资金对账');
+            throw new ConflictException('会员历史储值台账缺失，系统无法自动补齐，请联系管理员核对充值记录');
         }
 
         const reservation = await tx.memberOrderBalanceReservation.create({
@@ -2949,6 +3005,9 @@ export class OrdersService {
             .toUpperCase();
         const useMemberBalancePayment = scene === 'ADMIN' && !isGifted && requestedPaymentChannel === 'BALANCE';
         const useShouqianbaPendingPayment = scene === 'ADMIN' && !isGifted && requestedPaymentChannel === 'SHOUQIANBA';
+        if (useShouqianbaPendingPayment) {
+            throw new ServiceUnavailableException('线上二维码支付已暂停，请改用线下确认收款');
+        }
         if (useMemberBalancePayment && !customerUserId) {
             throw new BadRequestException('使用会员储值支付时必须选择会员用户');
         }
@@ -3488,6 +3547,7 @@ export class OrdersService {
                 latestPayment: {
                     select: {
                         id: true,
+                        paymentNo: true,
                         clientSn: true,
                         purpose: true,
                         attemptNo: true,
@@ -4047,7 +4107,8 @@ export class OrdersService {
                     ...(!order.isPaid && !order.isGifted
                         ? {
                               unpaidResponsibleUserId: Number(operatorId || order.dispatcherId || 0) || null,
-                              unpaidSince: (order as any).unpaidSince || new Date(),
+                              // 48 小时责任期从结单开始，派单/存单阶段不启动计时。
+                              unpaidSince: null,
                               unpaidLastReminderAt: null,
                           }
                         : {}),
@@ -4257,6 +4318,13 @@ export class OrdersService {
                         where: {id: dispatch.orderId},
                         data: {
                             status: dispatchStatus === 'COMPLETED' ? OrderStatus.COMPLETED_PENDING_CONFIRM : OrderStatus.ARCHIVED,
+                            ...(!dispatch.order.isPaid && !dispatch.order.isGifted
+                                ? {
+                                      // 结单待确认才启动未收款 48 小时责任期；存单继续保持不计时。
+                                      unpaidSince: dispatchStatus === 'COMPLETED' ? now : null,
+                                      unpaidLastReminderAt: null,
+                                  }
+                                : {}),
                             ...(pendingCustomerGameId && pendingCustomerGameId !== existingCustomerGameId ? {customerGameId: pendingCustomerGameId} : {}),
                         },
                     });
@@ -4442,19 +4510,20 @@ export class OrdersService {
                     } as any,
                 },
             });
-            const accountAfter = await tx.walletAccount.update({
-                where: {userId},
-                data: {availableBalance: {decrement: supplementAmount}},
-            });
             const allocation = await this.allocateMemberBalanceLotsTx(tx, {
                 userId,
                 amount: supplementAmount,
                 sourceType: 'ORDER_PAYMENT',
                 sourceId: payment.id,
+                walletAvailableBalance: Number(account.availableBalance),
             });
             if (allocation.untracked > 0) {
-                throw new ConflictException('储值余额与充值批次余额不一致，请先完成资金对账');
+                throw new ConflictException('会员历史储值台账缺失，系统无法自动补齐，请联系管理员核对充值记录');
             }
+            const accountAfter = await tx.walletAccount.update({
+                where: {userId},
+                data: {availableBalance: {decrement: supplementAmount}},
+            });
             await tx.walletTransaction.create({
                 data: {
                     userId,

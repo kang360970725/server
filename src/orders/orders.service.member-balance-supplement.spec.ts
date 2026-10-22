@@ -73,6 +73,50 @@ describe('OrdersService member balance supplement transaction', () => {
     });
 });
 
+describe('OrdersService member balance legacy reconciliation', () => {
+    it('uses wallet balance as authority and auto-creates the missing legacy lot', async () => {
+        const service = Object.create(OrdersService.prototype) as any;
+        const tx = {
+            memberBalanceLot: {
+                findMany: jest.fn().mockResolvedValue([
+                    {
+                        id: 2,
+                        principalRemaining: 161.25,
+                        bonusRemaining: 150,
+                    },
+                ]),
+                create: jest.fn().mockResolvedValue({
+                    id: 99,
+                    principalRemaining: 657,
+                    bonusRemaining: 0,
+                }),
+                update: jest.fn().mockResolvedValue({}),
+            },
+            memberBalanceLotUsage: {
+                create: jest.fn().mockResolvedValue({}),
+            },
+        };
+
+        const result = await service.allocateMemberBalanceLotsTx(tx, {
+            userId: 630,
+            amount: 500,
+            sourceType: 'ORDER_PAYMENT',
+            sourceId: 7001,
+            walletAvailableBalance: 968.25,
+        });
+
+        expect(tx.memberBalanceLot.create).toHaveBeenCalledWith({
+            data: expect.objectContaining({
+                userId: 630,
+                sourceType: 'LEGACY_RECONCILIATION',
+                principalInitial: 657,
+                principalRemaining: 657,
+            }),
+        });
+        expect(result).toEqual({allocated: 500, untracked: 0});
+    });
+});
+
 describe('OrdersService renewal attribution adjustment', () => {
     it('reverses the old bonus, updates attribution and settles the new members', async () => {
         const service = Object.create(OrdersService.prototype) as any;
