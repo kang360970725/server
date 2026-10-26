@@ -410,6 +410,20 @@ export class OrdersController {
         });
     }
 
+    /** 确认待人工退款已由财务线下完成（仅闭合退款流水，不重复执行订单冲正）。 */
+    @Post('refund/:refundId/confirm-manual')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:detail:refund:button')
+    confirmManualRefund(
+        @Param('refundId', ParseIntPipe) refundId: number,
+        @Body() body: {remark?: string},
+        @Req() req: any,
+    ) {
+        this.assertButtonPermission(req?.user, 'orders:detail:refund:button', '当前角色无权确认退款');
+        const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+        return this.ordersService.confirmManualRefund(refundId, operatorId, body?.remark);
+    }
+
     @Get('complaints')
     @UseGuards(PermissionsGuard)
     @Permissions('orders:list:page')

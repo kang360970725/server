@@ -3592,14 +3592,19 @@ export class OrdersService {
                     select: {
                         id: true,
                         refundNo: true,
+                        channel: true,
+                        status: true,
                         refundType: true,
                         staffLiable: true,
                         liableUserIds: true,
                         amount: true,
                         remainingAmount: true,
                         reason: true,
+                        operatorId: true,
+                        raw: true,
                         refundedAt: true,
                         createdAt: true,
+                        updatedAt: true,
                     },
                     orderBy: {id: 'desc'},
                 },
@@ -6032,6 +6037,90 @@ export class OrdersService {
         }
 
         return this.getOrderDetail(orderId);
+    }
+
+    /**
+     * 闭合待人工退款流水。
+     * 订单冲正、收益回滚及处罚在首次发起退款时已经完成；这里绝不重复执行这些业务动作。
+     */
+    async confirmManualRefund(refundIdInput: number, operatorIdInput: number, remarkInput?: string) {
+        const refundId = Number(refundIdInput);
+        const operatorId = Number(operatorIdInput);
+        const remark = String(remarkInput || '').trim();
+        if (!refundId) throw new BadRequestException('refundId 必填');
+        if (!operatorId) throw new BadRequestException('未登录或无权限操作');
+        if (!remark) throw new BadRequestException('请填写线下退款凭证或确认备注');
+
+        const existing: any = await this.prisma.orderRefund.findUnique({
+            where: {id: refundId},
+            include: {order: {select: {id: true, autoSerial: true, status: true}}},
+        });
+        if (!existing) throw new NotFoundException('退款记录不存在');
+
+        const existingRaw = existing?.raw && typeof existing.raw === 'object' && !Array.isArray(existing.raw) ? existing.raw : {};
+        if (String(existing.status) === 'SUCCESS' && Boolean(existingRaw?.manualOfflineRefundCompleted)) {
+            return {
+                success: true,
+                idempotent: true,
+                refundId: existing.id,
+                orderId: existing.orderId,
+                refundNo: existing.refundNo,
+                amount: Number(existing.amount || 0),
+                status: existing.status,
+                refundedAt: existing.refundedAt,
+            };
+        }
+        if (String(existing.status) !== 'MANUAL_REQUIRED') {
+            throw new BadRequestException('该退款记录不是待人工退款状态');
+        }
+        if (String(existing?.order?.status || '') !== OrderStatus.REFUNDED) {
+            throw new BadRequestException('订单状态异常，请先核查订单退款状态');
+        }
+
+        const confirmedAt = new Date();
+        const updated = await this.prisma.$transaction(async (tx) => {
+            const result = await tx.orderRefund.updateMany({
+                where: {id: refundId, status: 'MANUAL_REQUIRED'},
+                data: {
+                    status: 'SUCCESS',
+                    refundedAt: confirmedAt,
+                    raw: {
+                        ...existingRaw,
+                        manualOfflineRefundCompleted: true,
+                        manualRefundRequestedAt: existing.refundedAt || existing.createdAt,
+                        manualRefundConfirmedAt: confirmedAt,
+                        manualRefundConfirmedBy: operatorId,
+                        manualRefundConfirmationRemark: remark.slice(0, 500),
+                    } as any,
+                },
+            });
+            if (result.count !== 1) {
+                const current = await tx.orderRefund.findUnique({where: {id: refundId}});
+                if (String(current?.status || '') === 'SUCCESS') return current;
+                throw new BadRequestException('退款状态已变化，请刷新后重试');
+            }
+            return tx.orderRefund.findUnique({where: {id: refundId}});
+        });
+
+        await this.logOrderAction(operatorId, Number(existing.orderId), 'CONFIRM_MANUAL_REFUND', {
+            refundId,
+            refundNo: existing.refundNo,
+            amount: Number(existing.amount || 0),
+            requestedAt: existing.refundedAt || existing.createdAt,
+            confirmedAt,
+            remark,
+        });
+
+        return {
+            success: true,
+            idempotent: false,
+            refundId,
+            orderId: existing.orderId,
+            refundNo: existing.refundNo,
+            amount: Number(existing.amount || 0),
+            status: updated?.status,
+            refundedAt: updated?.refundedAt,
+        };
     }
 
     async adminAcceptDispatch(dispatchId: number, operator: any, remark?: string) {
