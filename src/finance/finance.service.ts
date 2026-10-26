@@ -758,14 +758,27 @@ export class FinanceService {
                     where: { paymentTime: timeWhere, isPaid: true, isGifted: false },
                     select: { id: true, autoSerial: true, orderSource: true, paidAmount: true, paymentTime: true,
                         dispatcherId: true, dispatcher: { select: { name: true, userType: true } },
-                        latestPayment: { select: { channel: true } } },
+                        latestPayment: { select: {
+                            channel: true, paymentNo: true, clientSn: true, providerSn: true, transactionId: true,
+                        } } },
                 }),
                 tx.orderReceipt.findMany({ where: { paidAt: timeWhere } }),
                 tx.memberRechargeOrder.findMany({
                     where: { status: 'SUCCESS', paidAt: timeWhere },
-                    select: { id: true, rechargeNo: true, payAmount: true, channel: true, paidAt: true, operatorId: true, notifyRaw: true },
+                    select: { id: true, rechargeNo: true, payAmount: true, channel: true, paidAt: true, operatorId: true,
+                        transactionId: true, notifyRaw: true },
                 }),
             ]);
+            const snapshotOrderIds = [...new Set(snapshots.map((item) => Number(item.orderId)).filter(Boolean))];
+            const snapshotOrders = snapshotOrderIds.length
+                ? await tx.order.findMany({
+                    where: { id: { in: snapshotOrderIds } },
+                    select: { id: true, latestPayment: { select: {
+                        paymentNo: true, clientSn: true, providerSn: true, transactionId: true,
+                    } } },
+                })
+                : [];
+            const snapshotPaymentMap = new Map(snapshotOrders.map((item) => [item.id, item.latestPayment]));
             const tracked = orders.length ? await tx.orderReceipt.findMany({
                 where: { orderId: { in: orders.map((o) => o.id) }, kind: 'INITIAL' }, select: { orderId: true },
             }) : [];
@@ -775,13 +788,20 @@ export class FinanceService {
                 paymentTime: o.paymentTime!, paidAmount: Number(o.paidAmount),
                 orderSource: o.orderSource || 'CUSTOMER_SERVICE_MANUAL',
                 channel: o.latestPayment?.channel || (o.orderSource === 'MINIAPP_SELF_SERVICE' ? 'MINIAPP_WECHAT' : 'MANUAL_SHOUQIANBA'),
+                paymentNo: o.latestPayment?.paymentNo, clientSn: o.latestPayment?.clientSn,
+                providerSn: o.latestPayment?.providerSn, transactionId: o.latestPayment?.transactionId,
                 dispatcherId: o.dispatcherId, dispatcherName: o.dispatcher?.name, dispatcherUserType: o.dispatcher?.userType,
             }));
-            for (const s of snapshots) items.push({
-                receiptId: s.receiptKey, kind: s.kind, orderId: s.orderId, autoSerial: s.autoSerial,
-                paymentTime: s.paidAt, paidAmount: Number(s.amount), orderSource: s.orderSource, channel: s.channel,
-                dispatcherId: s.dispatcherId, dispatcherName: s.dispatcherName, dispatcherUserType: s.dispatcherType,
-            });
+            for (const s of snapshots) {
+                const payment = snapshotPaymentMap.get(s.orderId);
+                items.push({
+                    receiptId: s.receiptKey, kind: s.kind, orderId: s.orderId, autoSerial: s.autoSerial,
+                    paymentTime: s.paidAt, paidAmount: Number(s.amount), orderSource: s.orderSource, channel: s.channel,
+                    paymentNo: payment?.paymentNo, clientSn: payment?.clientSn,
+                    providerSn: payment?.providerSn, transactionId: payment?.transactionId,
+                    dispatcherId: s.dispatcherId, dispatcherName: s.dispatcherName, dispatcherUserType: s.dispatcherType,
+                });
+            }
             for (const r of recharges) {
                 // 微信实付优先用回调总金额（分），防止测试支付把套餐面值计入收入。
                 const raw = r.notifyRaw as any;
@@ -789,6 +809,7 @@ export class FinanceService {
                 const paidAmount = Number.isFinite(actualFen) && actualFen >= 0 ? actualFen / 100 : Number(r.payAmount);
                 items.push({ receiptId: `RECHARGE:${r.id}`, kind: 'RECHARGE', autoSerial: r.rechargeNo,
                     paymentTime: r.paidAt!, paidAmount, channel: r.channel, orderSource: 'MEMBER_RECHARGE',
+                    transactionId: r.transactionId,
                     dispatcherId: r.operatorId });
             }
             return { success: true, data: { range: { startDate: range.startDate, endDate: range.endDate },

@@ -23,6 +23,7 @@ export type ReceiptItem = {
   receiptId: string; kind: string; orderId?: number; autoSerial: string;
   paymentTime: Date | string; paidAmount: number; channel: string; orderSource: string;
   dispatcherId?: number | null; dispatcherName?: string | null; dispatcherUserType?: string | null;
+  paymentNo?: string | null; clientSn?: string | null; providerSn?: string | null; transactionId?: string | null;
 };
 
 export function reconcileReceipts(receipts: ReceiptItem[]) {
@@ -55,7 +56,8 @@ export function reconcileReceipts(receipts: ReceiptItem[]) {
       receiptTypeLabel: recharge ? '会员充值' : item.kind === 'SUPPLEMENT' ? '订单补收' : '订单收款',
       channelLabel: channelLabelMap[normalizedChannel] || (recharge ? '会员充值' : '其他收款'),
       reconciliationType: offline ? 'OFFLINE' : online ? 'ONLINE' : recharge ? 'RECHARGE' : 'OTHER',
-      reconciliationLabel: offline ? '线下待人工核对' : online ? '线上自动验证' : recharge ? '会员充值' : '其他' };
+      reconciliationLabel: offline ? '线下待人工核对' : online ? '线上自动验证' : recharge ? '会员充值' : '其他',
+      hasExternalPaymentReference: Boolean(item.providerSn || item.transactionId || item.clientSn) };
     for (const b of [total, day]) {
       if (recharge) { b.recharge += cents; b.rechargeCount++; }
       else {
