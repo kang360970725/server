@@ -753,11 +753,13 @@ export class FinanceService {
         const timeWhere = { gte: range.startAt, lt: range.endAt };
         // 同一数据库快照读取，避免补收事务提交时重复统计旧订单与新流水。
         return this.prisma.$transaction(async (tx) => {
-            const [orders, snapshots, recharges] = await Promise.all([
+            const [orders, snapshots, recharges, refunds] = await Promise.all([
                 tx.order.findMany({
                     where: { paymentTime: timeWhere, isPaid: true, isGifted: false },
-                    select: { id: true, autoSerial: true, orderSource: true, paidAmount: true, paymentTime: true,
+                    select: { id: true, autoSerial: true, orderSource: true, status: true, paidAmount: true, paymentTime: true,
                         dispatcherId: true, dispatcher: { select: { name: true, userType: true } },
+                        refunds: { where: { status: { in: ['SUCCESS', 'MANUAL_REQUIRED'] } },
+                            select: { status: true, amount: true, refundedAt: true } },
                         latestPayment: { select: {
                             channel: true, paymentNo: true, clientSn: true, providerSn: true, transactionId: true,
                         } } },
@@ -768,17 +770,33 @@ export class FinanceService {
                     select: { id: true, rechargeNo: true, payAmount: true, channel: true, paidAt: true, operatorId: true,
                         transactionId: true, notifyRaw: true },
                 }),
+                tx.orderRefund.findMany({
+                    where: { status: 'SUCCESS', refundedAt: timeWhere },
+                    select: { id: true, refundNo: true, orderId: true, amount: true, channel: true, refundedAt: true,
+                        order: { select: { autoSerial: true, orderSource: true, status: true, dispatcherId: true,
+                            dispatcher: { select: { name: true, userType: true } },
+                            latestPayment: { select: { paymentNo: true, clientSn: true, providerSn: true, transactionId: true } } } } },
+                }),
             ]);
             const snapshotOrderIds = [...new Set(snapshots.map((item) => Number(item.orderId)).filter(Boolean))];
             const snapshotOrders = snapshotOrderIds.length
                 ? await tx.order.findMany({
                     where: { id: { in: snapshotOrderIds } },
-                    select: { id: true, latestPayment: { select: {
+                    select: { id: true, status: true,
+                        refunds: { where: { status: { in: ['SUCCESS', 'MANUAL_REQUIRED'] } },
+                            select: { status: true, amount: true, refundedAt: true } },
+                        latestPayment: { select: {
                         paymentNo: true, clientSn: true, providerSn: true, transactionId: true,
                     } } },
                 })
                 : [];
-            const snapshotPaymentMap = new Map(snapshotOrders.map((item) => [item.id, item.latestPayment]));
+            const snapshotOrderMap = new Map(snapshotOrders.map((item) => [item.id, {
+                payment: item.latestPayment,
+                orderStatus: item.status,
+                refundStatus: item.refunds?.some((refund) => refund.status === 'SUCCESS') ? 'SUCCESS'
+                    : item.refunds?.some((refund) => refund.status === 'MANUAL_REQUIRED') ? 'MANUAL_REQUIRED' : null,
+                refundAmount: item.refunds?.reduce((sum, refund) => sum + Number(refund.amount || 0), 0) || 0,
+            }]));
             const tracked = orders.length ? await tx.orderReceipt.findMany({
                 where: { orderId: { in: orders.map((o) => o.id) }, kind: 'INITIAL' }, select: { orderId: true },
             }) : [];
@@ -790,15 +808,23 @@ export class FinanceService {
                 channel: o.latestPayment?.channel || (o.orderSource === 'MINIAPP_SELF_SERVICE' ? 'MINIAPP_WECHAT' : 'MANUAL_SHOUQIANBA'),
                 paymentNo: o.latestPayment?.paymentNo, clientSn: o.latestPayment?.clientSn,
                 providerSn: o.latestPayment?.providerSn, transactionId: o.latestPayment?.transactionId,
+                orderStatus: o.status,
+                refundStatus: o.refunds?.some((item) => item.status === 'SUCCESS') ? 'SUCCESS'
+                    : o.refunds?.some((item) => item.status === 'MANUAL_REQUIRED') ? 'MANUAL_REQUIRED' : null,
+                refundAmount: o.refunds?.reduce((sum, item) => sum + Number(item.amount || 0), 0) || 0,
                 dispatcherId: o.dispatcherId, dispatcherName: o.dispatcher?.name, dispatcherUserType: o.dispatcher?.userType,
             }));
             for (const s of snapshots) {
-                const payment = snapshotPaymentMap.get(s.orderId);
+                const snapshotOrder = snapshotOrderMap.get(s.orderId);
+                const payment = snapshotOrder?.payment;
                 items.push({
                     receiptId: s.receiptKey, kind: s.kind, orderId: s.orderId, autoSerial: s.autoSerial,
                     paymentTime: s.paidAt, paidAmount: Number(s.amount), orderSource: s.orderSource, channel: s.channel,
                     paymentNo: payment?.paymentNo, clientSn: payment?.clientSn,
                     providerSn: payment?.providerSn, transactionId: payment?.transactionId,
+                    orderStatus: snapshotOrder?.orderStatus,
+                    refundStatus: snapshotOrder?.refundStatus,
+                    refundAmount: snapshotOrder?.refundAmount,
                     dispatcherId: s.dispatcherId, dispatcherName: s.dispatcherName, dispatcherUserType: s.dispatcherType,
                 });
             }
@@ -811,6 +837,18 @@ export class FinanceService {
                     paymentTime: r.paidAt!, paidAmount, channel: r.channel, orderSource: 'MEMBER_RECHARGE',
                     transactionId: r.transactionId,
                     dispatcherId: r.operatorId });
+            }
+            for (const r of refunds) {
+                items.push({
+                    receiptId: `REFUND:${r.id}`, kind: 'REFUND', orderId: r.orderId,
+                    autoSerial: r.order.autoSerial, paymentTime: r.refundedAt!, paidAmount: -Number(r.amount),
+                    refundAmount: Number(r.amount), refundStatus: 'SUCCESS', orderStatus: r.order.status,
+                    channel: r.channel, orderSource: r.order.orderSource || 'CUSTOMER_SERVICE_MANUAL',
+                    paymentNo: r.order.latestPayment?.paymentNo, clientSn: r.order.latestPayment?.clientSn,
+                    providerSn: r.order.latestPayment?.providerSn, transactionId: r.order.latestPayment?.transactionId,
+                    dispatcherId: r.order.dispatcherId, dispatcherName: r.order.dispatcher?.name,
+                    dispatcherUserType: r.order.dispatcher?.userType,
+                });
             }
             return { success: true, data: { range: { startDate: range.startDate, endDate: range.endDate },
                 ...reconcileReceipts(items) } };

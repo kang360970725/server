@@ -24,11 +24,13 @@ export type ReceiptItem = {
   paymentTime: Date | string; paidAmount: number; channel: string; orderSource: string;
   dispatcherId?: number | null; dispatcherName?: string | null; dispatcherUserType?: string | null;
   paymentNo?: string | null; clientSn?: string | null; providerSn?: string | null; transactionId?: string | null;
+  orderStatus?: string | null; refundStatus?: string | null; refundAmount?: number;
 };
 
 export function reconcileReceipts(receipts: ReceiptItem[]) {
   const bucket = () => ({ orderIds: new Set<number>(), manualOrderIds: new Set<number>(),
     allPaid: 0, orderPaid: 0, orderCash: 0, balance: 0, manual: 0, recharge: 0, rechargeCount: 0,
+    grossCashReceipt: 0, refund: 0, refundCount: 0, cashRefund: 0, balanceRefund: 0,
     offlineOrderIds: new Set<number>(), offline: 0, onlineOrderIds: new Set<number>(), online: 0,
     dispatcherMap: new Map<string, any>(), offlineDispatcherMap: new Map<string, any>(), detailRows: [] as any[] });
   const total = bucket(), days = new Map<string, ReturnType<typeof bucket>>();
@@ -38,28 +40,36 @@ export function reconcileReceipts(receipts: ReceiptItem[]) {
     const day = days.get(axis)!;
     const cents = Math.round(Number(item.paidAmount) * 100);
     const recharge = item.kind === 'RECHARGE';
+    const refund = item.kind === 'REFUND';
     const cash = item.channel !== 'BALANCE';
     const normalizedChannel = String(item.channel || '').trim().toUpperCase();
-    const offline = !recharge && ['MANUAL', 'MANUAL_SHOUQIANBA', 'MANUAL_CONFIRMED'].includes(normalizedChannel);
+    const offline = !recharge && !refund && ['MANUAL', 'MANUAL_SHOUQIANBA', 'MANUAL_CONFIRMED'].includes(normalizedChannel);
     // 只有具备平台交易回执的明确渠道才能标记为“线上自动验证”；未知历史渠道不得推断为已验证。
-    const online = !recharge && ['SHOUQIANBA_WAP', 'MINIAPP_WECHAT'].includes(normalizedChannel);
+    const online = !recharge && !refund && ['SHOUQIANBA_WAP', 'MINIAPP_WECHAT'].includes(normalizedChannel);
     // 当前业务约定：非小程序外部收款均为收钱吧；储值消费不重复计现金。
-    const manual = cash && (recharge ? item.channel === 'MANUAL' : item.orderSource !== 'MINIAPP_SELF_SERVICE');
+    const manual = !refund && cash && (recharge ? item.channel === 'MANUAL' : item.orderSource !== 'MINIAPP_SELF_SERVICE');
     const channelLabelMap: Record<string, string> = {
       MANUAL: '人工线下收款', MANUAL_SHOUQIANBA: '线下收款', MANUAL_CONFIRMED: '线下收款',
       SHOUQIANBA_WAP: '收钱吧在线收款', MINIAPP_WECHAT: '小程序微信支付',
       CUSTOMER_SERVICE_BALANCE: '客服责任余额代偿', BALANCE: '会员储值',
     };
     const detail = { ...item, paymentTime: new Date(item.paymentTime).toISOString(), paidAmount: cents / 100,
-      cashAmount: cash ? cents / 100 : 0, dispatcherLabel: item.dispatcherName || '未指定',
+      cashAmount: cash ? cents / 100 : 0, netRevenueAmount: cash ? cents / 100 : 0,
+      dispatcherLabel: item.dispatcherName || '未指定',
       dispatcherUserType: item.dispatcherUserType || 'UNKNOWN',
-      receiptTypeLabel: recharge ? '会员充值' : item.kind === 'SUPPLEMENT' ? '订单补收' : '订单收款',
+      receiptTypeLabel: refund ? '订单退款' : recharge ? '会员充值' : item.kind === 'SUPPLEMENT' ? '订单补收' : '订单收款',
       channelLabel: channelLabelMap[normalizedChannel] || (recharge ? '会员充值' : '其他收款'),
-      reconciliationType: offline ? 'OFFLINE' : online ? 'ONLINE' : recharge ? 'RECHARGE' : 'OTHER',
-      reconciliationLabel: offline ? '线下待人工核对' : online ? '线上自动验证' : recharge ? '会员充值' : '其他',
+      reconciliationType: refund ? 'REFUND' : offline ? 'OFFLINE' : online ? 'ONLINE' : recharge ? 'RECHARGE' : 'OTHER',
+      reconciliationLabel: refund ? '退款已完成' : offline ? '线下待人工核对' : online ? '线上自动验证' : recharge ? '会员充值' : '其他',
       hasExternalPaymentReference: Boolean(item.providerSn || item.transactionId || item.clientSn) };
     for (const b of [total, day]) {
       if (recharge) { b.recharge += cents; b.rechargeCount++; }
+      else if (refund) {
+        b.refund += Math.abs(cents); b.refundCount++;
+        b.orderPaid += cents;
+        if (cash) { b.orderCash += cents; b.cashRefund += Math.abs(cents); }
+        else { b.balance += cents; b.balanceRefund += Math.abs(cents); }
+      }
       else {
         b.orderIds.add(item.orderId!); b.orderPaid += cents;
         if (cash) b.orderCash += cents; else b.balance += cents;
@@ -68,9 +78,10 @@ export function reconcileReceipts(receipts: ReceiptItem[]) {
         if (online) { b.onlineOrderIds.add(item.orderId!); b.online += cents; }
       }
       if (cash) b.allPaid += cents;
+      if (cash && !refund) b.grossCashReceipt += cents;
       if (manual) b.manual += cents;
     }
-    if (!recharge && manual) {
+    if (!recharge && !refund && manual) {
       const key = String(item.dispatcherId || 0);
       if (!day.dispatcherMap.has(key)) day.dispatcherMap.set(key, { dispatcherId: item.dispatcherId || null,
         dispatcherName: detail.dispatcherLabel, dispatcherLabel: detail.dispatcherLabel,
@@ -90,6 +101,9 @@ export function reconcileReceipts(receipts: ReceiptItem[]) {
   }
   const summarize = (b: ReturnType<typeof bucket>) => ({
     allOrderCount: b.orderIds.size, allPaidAmountTotal: b.allPaid / 100,
+    grossCashReceiptAmountTotal: b.grossCashReceipt / 100,
+    refundAmountTotal: b.refund / 100, refundCount: b.refundCount,
+    cashRefundAmountTotal: b.cashRefund / 100, memberBalanceRefundAmountTotal: b.balanceRefund / 100,
     orderPaidAmountTotal: b.orderPaid / 100, orderCashAmountTotal: b.orderCash / 100,
     memberBalanceAmountTotal: b.balance / 100, rechargeAmountTotal: b.recharge / 100, rechargeCount: b.rechargeCount,
     manualReceiptOrderCount: b.manualOrderIds.size, manualReceiptAmountTotal: b.manual / 100,

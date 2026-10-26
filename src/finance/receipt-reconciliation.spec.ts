@@ -53,6 +53,22 @@ describe('收款日统计', () => {
     expect(result.rows[0].rechargeCount).toBe(2);
     expect(reconcileReceipts([]).rows).toEqual([]);
   });
+  it('成功退款按退款发生日生成负向流水，储值退款不冲减现金', () => {
+    const result = reconcileReceipts([
+      receipt({ paidAmount: 100, paymentTime: '2026-08-30T16:01:00Z' }),
+      receipt({ receiptId: 'REFUND:1', kind: 'REFUND', paidAmount: -100,
+        refundAmount: 100, refundStatus: 'SUCCESS', paymentTime: '2026-08-31T16:01:00Z' }),
+      receipt({ orderId: 2, paidAmount: 50, channel: 'BALANCE', paymentTime: '2026-08-30T16:01:00Z' }),
+      receipt({ receiptId: 'REFUND:2', kind: 'REFUND', orderId: 2, paidAmount: -50,
+        refundAmount: 50, refundStatus: 'SUCCESS', channel: 'BALANCE', paymentTime: '2026-08-31T16:01:00Z' }),
+    ]);
+    expect(result.summary).toMatchObject({
+      grossCashReceiptAmountTotal: 100, refundAmountTotal: 150, cashRefundAmountTotal: 100,
+      memberBalanceRefundAmountTotal: 50, allPaidAmountTotal: 0, orderPaidAmountTotal: 0,
+      memberBalanceAmountTotal: 0, refundCount: 2,
+    });
+    expect(result.rows[1].detailRows.every((row) => row.receiptTypeLabel === '订单退款')).toBe(true);
+  });
 });
 
 describe('FinanceService 收款数据读取', () => {
@@ -91,6 +107,7 @@ describe('FinanceService 收款数据读取', () => {
         { id: 2, rechargeNo: 'R2', payAmount: 100, channel: 'WECHAT',
           notifyRaw: { amount: { total: 1 } }, paidAt: new Date('2026-08-30T16:02:00Z') },
       ]) },
+      orderRefund: { findMany: jest.fn().mockResolvedValue([]) },
     };
     const service = new FinanceService({ $transaction: (fn: any) => fn(tx) } as any);
     const result = await service.dashboardReconciliation({ startDate: '2026-08-31', endDate: '2026-08-31' });
