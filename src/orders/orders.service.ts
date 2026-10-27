@@ -64,6 +64,7 @@ const ORDER_SOURCE_DEFAULTS = [
     {value: 'THIRD_PARTY_TRANSFER', label: '第三方转单', enabled: true},
     {value: 'MINIAPP_SELF_SERVICE', label: '小程序自助下单', enabled: true},
     {value: 'CUSTOMER_SERVICE_MANUAL', label: '客服手动派单', enabled: true},
+    {value: 'STORE_PENDING_SETTLEMENT', label: '门店订单-待结算', enabled: true},
     {value: 'LIVE_LUCKY_BAG_GIFT', label: '直播间福袋赠送', enabled: true},
     {value: 'OFFICIAL_ACCOUNT', label: '公众号下单', enabled: true},
 ];
@@ -541,7 +542,7 @@ export class OrdersService {
         const deducted = await this.prisma.$transaction(async (tx) => {
             await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
             const order = await tx.order.findUnique({where: {id: orderId}});
-            if (!order || order.isPaid || order.isGifted || order.unpaidAutoDeductedAt) return null;
+            if (!order || order.isPaid || order.isGifted || order.orderSource === 'STORE_PENDING_SETTLEMENT' || order.unpaidAutoDeductedAt) return null;
             if (order.status !== OrderStatus.COMPLETED_PENDING_CONFIRM && order.status !== OrderStatus.COMPLETED) return null;
             if (!order.unpaidSince || order.unpaidSince.getTime() > Date.now() - 48 * 60 * 60 * 1000) return null;
             const userId = Number(order.unpaidResponsibleUserId || 0);
@@ -637,6 +638,7 @@ export class OrdersService {
                 unpaidResponsibleUserId: {not: null},
                 unpaidSince: {not: null},
                 unpaidAutoDeductedAt: null,
+                orderSource: {not: 'STORE_PENDING_SETTLEMENT'},
             },
             orderBy: {unpaidSince: 'asc'},
             take: 300,
@@ -2779,7 +2781,7 @@ export class OrdersService {
 
     private canDispatchBeforePaid(order: {isGifted?: boolean | null; orderSource?: string | null}) {
         const source = String(order?.orderSource || '').trim() || 'CUSTOMER_SERVICE_MANUAL';
-        return Boolean(order?.isGifted) || source === 'CUSTOMER_SERVICE_MANUAL';
+        return Boolean(order?.isGifted) || ['CUSTOMER_SERVICE_MANUAL', 'STORE_PENDING_SETTLEMENT'].includes(source);
     }
 
     private async calcCouponDiscount(params: {
@@ -2987,10 +2989,14 @@ export class OrdersService {
         // ✅ 赠送单：不收款，但仍然要正常结算/分红
         // - 为避免前端误传金额导致“赠送单被计入营收”，后端这里强制清零
         const isLiveLuckyBagGift = orderSource === 'LIVE_LUCKY_BAG_GIFT';
+        const isStorePendingSettlement = orderSource === 'STORE_PENDING_SETTLEMENT';
         const isGifted = isLiveLuckyBagGift || Boolean(dto.isGifted);
 
         // 赠送金额口径（本期统一为“按应收承担成本”）
-        const originalAmount = this.toAmount2(Number(dto.receivableAmount ?? 0));
+        const projectUnitPrice = this.toAmount2(Number(project.price ?? 0));
+        const pricedQuantity = String(project.billingMode || '') === 'HOURLY' ? Math.max(0.5, Number(dto.orderQuantity ?? 1)) : 1;
+        // 应收金额始终由项目价格快照和数量计算，不接受客户端任意改价。
+        const originalAmount = this.toAmount2(projectUnitPrice * pricedQuantity);
         const settlementAmountInput =
             dto.settlementAmount != null
                 ? Number(dto.settlementAmount)
@@ -3005,18 +3011,18 @@ export class OrdersService {
         const requestedPaymentChannel = String((dto as any)?.paymentChannel || '')
             .trim()
             .toUpperCase();
-        const useMemberBalancePayment = scene === 'ADMIN' && !isGifted && requestedPaymentChannel === 'BALANCE';
-        const useShouqianbaPendingPayment = scene === 'ADMIN' && !isGifted && requestedPaymentChannel === 'SHOUQIANBA';
+        const useMemberBalancePayment = scene === 'ADMIN' && !isGifted && !isStorePendingSettlement && requestedPaymentChannel === 'BALANCE';
+        const useShouqianbaPendingPayment = scene === 'ADMIN' && !isGifted && !isStorePendingSettlement && requestedPaymentChannel === 'SHOUQIANBA';
         if (useShouqianbaPendingPayment) {
             throw new ServiceUnavailableException('线上二维码支付已暂停，请改用线下确认收款');
         }
         if (useMemberBalancePayment && !customerUserId) {
             throw new BadRequestException('使用会员储值支付时必须选择会员用户');
         }
-        const isPaid = isLiveLuckyBagGift ? true : isGifted ? false : useMemberBalancePayment ? true : Boolean(dto.isPaid);
+        const isPaid = isLiveLuckyBagGift ? true : isStorePendingSettlement || isGifted ? false : useMemberBalancePayment ? true : Boolean(dto.isPaid);
 
         // 统一优惠汇总（先接基础口径，便于后续无缝接优惠券/活动）
-        const memberDiscount = isGifted
+        const memberDiscount = isGifted || !useMemberBalancePayment
             ? {amount: 0, rate: 1, levelCode: null, benefitId: null}
             : await this.resolveMemberOrderDiscount({
                   customerUserId,
@@ -3116,7 +3122,7 @@ export class OrdersService {
                     orderQuantity: Number(dto.orderQuantity ?? 1),
                     autoSerial: serial,
                     // ✅ 赠送单不可强制清零金额，清零后结算会产生错误
-                    receivableAmount: dto.receivableAmount,
+                    receivableAmount: originalAmount,
                     paidAmount: effectivePaidAmount,
                     settlementBaseAmount: effectiveSettlementAmountForCreate,
                     paymentTime: paidAt,
@@ -3316,8 +3322,10 @@ export class OrdersService {
 
         const where: any = {};
 
-        // 你原来的精确/单字段筛选保留
-        if (query.serial) where.autoSerial = {contains: query.serial};
+        const keywordAsSerial = String(query.keyword || '').trim();
+        const exactSerial = String(query.serial || (/^V[0-9A-Z]{8,32}$/i.test(keywordAsSerial) ? keywordAsSerial : '')).trim();
+        // 超过 90 天只允许通过完整订单号精确查询，普通列表默认限制在最近 90 天。
+        if (exactSerial) where.autoSerial = exactSerial;
         if (query.projectId) where.projectId = query.projectId;
         // 草稿和已取消订单不进入日常订单列表；取消记录仍可通过订单号直达详情审计。
         if (query.status && String(query.status) !== OrderStatus.CANCELLED) {
@@ -3347,6 +3355,15 @@ export class OrdersService {
                 const start = new Date(Date.UTC(year, month - 1, 1) - 8 * 60 * 60 * 1000);
                 const end = new Date(Date.UTC(year, month, 1) - 8 * 60 * 60 * 1000);
                 where.createdAt = {gte: start, lt: end};
+            }
+        }
+        if (!exactSerial) {
+            const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+            if (where.createdAt) {
+                const requestedStart = where.createdAt.gte instanceof Date ? where.createdAt.gte : cutoff;
+                where.createdAt = {...where.createdAt, gte: requestedStart > cutoff ? requestedStart : cutoff};
+            } else {
+                where.createdAt = {gte: cutoff};
             }
         }
         if (query.orderSource) where.orderSource = String(query.orderSource).trim();
@@ -4114,7 +4131,7 @@ export class OrdersService {
                     status: 'WAIT_ACCEPT' as any,
                     currentDispatchId: createdDispatch.id,
                     ...(updateOrderDispatcherId ? {dispatcherId: operatorId || order.dispatcherId} : {}),
-                    ...(!order.isPaid && !order.isGifted
+                    ...(!order.isPaid && !order.isGifted && order.orderSource !== 'STORE_PENDING_SETTLEMENT'
                         ? {
                               unpaidResponsibleUserId: Number(operatorId || order.dispatcherId || 0) || null,
                               // 48 小时责任期从结单开始，派单/存单阶段不启动计时。
@@ -4328,7 +4345,7 @@ export class OrdersService {
                         where: {id: dispatch.orderId},
                         data: {
                             status: dispatchStatus === 'COMPLETED' ? OrderStatus.COMPLETED_PENDING_CONFIRM : OrderStatus.ARCHIVED,
-                            ...(!dispatch.order.isPaid && !dispatch.order.isGifted
+                            ...(!dispatch.order.isPaid && !dispatch.order.isGifted && dispatch.order.orderSource !== 'STORE_PENDING_SETTLEMENT'
                                 ? {
                                       // 结单待确认才启动未收款 48 小时责任期；存单继续保持不计时。
                                       unpaidSince: dispatchStatus === 'COMPLETED' ? now : null,
@@ -6341,6 +6358,41 @@ export class OrdersService {
     /*** -----------------------------
      * 订单编辑
      * -----------------------------*/
+    async updateOrderCustomerIdentifier(dto: any, operatorIdInput: number) {
+        const orderId = Number(dto?.id);
+        const operatorId = Number(operatorIdInput);
+        if (!orderId) throw new BadRequestException('id 必填');
+        if (!operatorId) throw new BadRequestException('未登录或无权限操作');
+
+        const order = await this.prisma.order.findUnique({where: {id: orderId}});
+        if (!order) throw new NotFoundException('订单不存在');
+        if (order.status === OrderStatus.REFUNDED) throw new BadRequestException('已退款订单不允许编辑');
+
+        const rawType = String(dto?.customerIdentifierType || '').trim().toUpperCase();
+        const identifierType = rawType === 'ALIAS' ? 'ALIAS' : 'GAME_ID';
+        const identifier = String(dto?.customerGameId || '').trim();
+        if (!identifier) throw new BadRequestException('客户标识不能为空');
+        const originalIdentifier = String(dto?.customerOriginalIdentifier || '').trim() || identifier;
+
+        await this.prisma.order.update({
+            where: {id: orderId},
+            data: {
+                customerIdentifierType: identifierType,
+                customerGameId: identifierType === 'GAME_ID' ? identifier : null,
+                customerOriginalIdentifier: originalIdentifier,
+            },
+        });
+        await this.logOrderAction(operatorId, orderId, 'UPDATE_ORDER_CUSTOMER_IDENTIFIER', {
+            before: {
+                customerIdentifierType: order.customerIdentifierType,
+                customerGameId: order.customerGameId,
+                customerOriginalIdentifier: order.customerOriginalIdentifier,
+            },
+            after: {customerIdentifierType: identifierType, customerGameId: identifierType === 'GAME_ID' ? identifier : null, customerOriginalIdentifier: originalIdentifier},
+        });
+        return this.getOrderDetail(orderId);
+    }
+
     async updateOrderEditable(dto: any, operatorId: number) {
         operatorId = Number(operatorId);
         const orderId = Number(dto?.id);

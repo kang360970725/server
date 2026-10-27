@@ -454,7 +454,7 @@ export class OrdersController {
     update(@Body() dto: any, @Req() req: any) {
         this.assertButtonPermission(req?.user, 'orders:detail:edit:button', '当前角色无权编辑订单');
         const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
-        return this.ordersService.updateOrderEditable(dto, operatorId);
+        return this.ordersService.updateOrderCustomerIdentifier(dto, operatorId);
     }
 
     /** 确认收款（管理端/财务） */

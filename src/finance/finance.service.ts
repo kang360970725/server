@@ -72,6 +72,7 @@ export class FinanceService {
             THIRD_PARTY_TRANSFER: '第三方转单',
             MINIAPP_SELF_SERVICE: '小程序自助下单',
             CUSTOMER_SERVICE_MANUAL: '客服手动派单',
+            STORE_PENDING_SETTLEMENT: '门店订单-待结算',
             LIVE_LUCKY_BAG_GIFT: '直播间福袋赠送',
             OFFICIAL_ACCOUNT: '公众号下单',
         };

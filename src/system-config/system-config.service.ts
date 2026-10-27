@@ -462,6 +462,7 @@ export class SystemConfigService implements OnModuleInit {
           { value: 'THIRD_PARTY_TRANSFER', label: '第三方转单', enabled: true },
           { value: 'MINIAPP_SELF_SERVICE', label: '小程序自助下单', enabled: true },
           { value: 'CUSTOMER_SERVICE_MANUAL', label: '客服手动派单', enabled: true },
+          { value: 'STORE_PENDING_SETTLEMENT', label: '门店订单-待结算', enabled: true },
           { value: 'LIVE_LUCKY_BAG_GIFT', label: '直播间福袋赠送', enabled: true },
           { value: 'OFFICIAL_ACCOUNT', label: '公众号下单', enabled: true },
         ], null, 2),
@@ -860,6 +861,7 @@ export class SystemConfigService implements OnModuleInit {
       { value: 'THIRD_PARTY_TRANSFER', label: '第三方转单', enabled: true },
       { value: 'MINIAPP_SELF_SERVICE', label: '小程序自助下单', enabled: true },
       { value: 'CUSTOMER_SERVICE_MANUAL', label: '客服手动派单', enabled: true },
+      { value: 'STORE_PENDING_SETTLEMENT', label: '门店订单-待结算', enabled: true },
       { value: 'LIVE_LUCKY_BAG_GIFT', label: '直播间福袋赠送', enabled: true },
       { value: 'OFFICIAL_ACCOUNT', label: '公众号下单', enabled: true },
     ];
@@ -874,6 +876,9 @@ export class SystemConfigService implements OnModuleInit {
       .filter((item) => item.value && item.label);
     if (!normalized.some((item) => item.value === 'LIVE_LUCKY_BAG_GIFT')) {
       normalized.push({ value: 'LIVE_LUCKY_BAG_GIFT', label: '直播间福袋赠送', enabled: true });
+    }
+    if (!normalized.some((item) => item.value === 'STORE_PENDING_SETTLEMENT')) {
+      normalized.push({ value: 'STORE_PENDING_SETTLEMENT', label: '门店订单-待结算', enabled: true });
     }
     return normalized;
   }

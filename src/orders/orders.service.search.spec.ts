@@ -54,6 +54,23 @@ describe('OrdersService customer identifier search', () => {
     ]));
   });
 
+  it('limits normal list queries to the latest 90 days', async () => {
+    const { service, prisma } = createService();
+    const before = Date.now();
+    await service.listOrders({});
+    const cutoff = prisma.order.findMany.mock.calls[0][0].where.createdAt.gte as Date;
+    expect(cutoff).toBeInstanceOf(Date);
+    expect(cutoff.getTime()).toBeGreaterThanOrEqual(before - 90 * 24 * 60 * 60 * 1000 - 1000);
+  });
+
+  it('allows an old order lookup only through an exact full order serial', async () => {
+    const { service, prisma } = createService();
+    await service.listOrders({ keyword: 'V01HSBMCM63ACH' });
+    const where = prisma.order.findMany.mock.calls[0][0].where;
+    expect(where.autoSerial).toBe('V01HSBMCM63ACH');
+    expect(where.createdAt).toBeUndefined();
+  });
+
   it('excludes draft and cancelled orders from the normal order list', async () => {
     const { service, prisma } = createService();
 
