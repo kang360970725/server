@@ -4366,7 +4366,9 @@ export class OrdersService {
                     if (pendingCustomerGameId && !isValidCustomerGameId(pendingCustomerGameId)) {
                         throw new BadRequestException('客户准确游戏ID只能填写纯数字，请核对后重试');
                     }
-                    if (requiresCustomerGameId && !existingCustomerGameIdValid && !pendingCustomerGameId) {
+                    // 服务者自行存/结单时仍要求补齐准确数字 ID；客服代操作时允许暂缺，
+                    // 避免客服因无法向客户即时取得游戏 ID 而无法推进订单状态。
+                    if (requiresCustomerGameId && !existingCustomerGameIdValid && !pendingCustomerGameId && !options.forceByAdmin) {
                         throw new BadRequestException('该订单由昵称/房间号派单，请先补齐客户准确游戏ID后再存单或结单');
                     }
 
