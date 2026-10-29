@@ -131,6 +131,9 @@ model User {
   announcementsCreated        SystemAnnouncement[]       @relation("AnnouncementCreator")
   announcementReads           SystemAnnouncementRead[]
   notifications               UserNotification[]
+  feedbackTickets             FeedbackTicket[] @relation("FeedbackTicketUser")
+  feedbackTicketsHandled      FeedbackTicket[] @relation("FeedbackTicketHandler")
+  feedbackReplies             FeedbackReply[]  @relation("FeedbackReplyUser")
   csDutySchedules             CsDutySchedule[]
   csDutyLeaves                CsDutyLeave[]              @relation("CsDutyLeaveUser")
   csDutySubstituteLeaves      CsDutyLeave[]              @relation("CsDutyLeaveSubstitute")
@@ -581,6 +584,43 @@ model UserNotification {
   @@index([userId, isRead, createdAt], map: "idx_notification_user_read")
   @@index([type, createdAt], map: "idx_notification_type")
   @@map("user_notifications")
+}
+
+model FeedbackTicket {
+  id          Int             @id @default(autoincrement())
+  ticketNo    String          @unique @db.VarChar(64)
+  userId      Int
+  category    String          @db.VarChar(32)
+  title       String          @db.VarChar(120)
+  content     String          @db.Text
+  contact     String?         @db.VarChar(120)
+  status      String          @default("PENDING") @db.VarChar(24)
+  handledBy   Int?
+  lastReplyAt DateTime?
+  closedAt    DateTime?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  user        User            @relation("FeedbackTicketUser", fields: [userId], references: [id], onDelete: Cascade)
+  handler     User?           @relation("FeedbackTicketHandler", fields: [handledBy], references: [id], onDelete: SetNull)
+  replies     FeedbackReply[]
+
+  @@index([userId, createdAt], map: "idx_feedback_ticket_user_created")
+  @@index([status, updatedAt], map: "idx_feedback_ticket_status_updated")
+  @@map("feedback_tickets")
+}
+
+model FeedbackReply {
+  id         Int            @id @default(autoincrement())
+  ticketId   Int
+  userId     Int
+  authorType String         @db.VarChar(16)
+  content    String         @db.Text
+  createdAt  DateTime       @default(now())
+  ticket     FeedbackTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user       User           @relation("FeedbackReplyUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt], map: "idx_feedback_reply_ticket_created")
+  @@map("feedback_replies")
 }
 
 model CsDutySchedule {
@@ -1257,6 +1297,10 @@ model Order {
   customerOriginalIdentifier String?
   /// 下单客户（用于小程序/公众号等自助来源回溯客户信息）
   customerUserId             Int?
+  /// 小票小程序码使用的随机认领令牌。不得使用订单号或自增 ID 代替。
+  claimToken                 String?                 @unique @db.VarChar(32)
+  /// 首次扫码会员成功认领时间；已关联会员的后台订单可为空。
+  claimedAt                  DateTime?
   /// 当前客服/当前归属客服：允许在重新派单时更新
   dispatcherId               Int?
   /// 初始客服：创建订单时固化，结单客服分红按该字段结算
@@ -1356,6 +1400,7 @@ model Order {
   @@index([dispatcherId])
   @@index([initialDispatcherId])
   @@index([customerUserId])
+  @@index([claimToken], map: "idx_order_claim_token")
   @@index([status])
   @@index([isRenewal])
   @@index([orderSource])
@@ -1561,9 +1606,9 @@ model ProductReview {
 model OrderDiscount {
   id          Int      @id @default(autoincrement())
   orderId     Int
-  /// 优惠来源：COUPON / GIFT / ACTIVITY / MANUAL
+  /// 优惠来源：MEMBER / COUPON / GIFT / ACTIVITY / MANUAL
   sourceType  String   @db.VarChar(20)
-  /// 来源主键：优惠券ID/活动ID/操作人ID（可空）
+  /// 来源主键：会员权益ID/优惠券模板ID/活动ID/操作人ID（可空）
   sourceId    Int?
   /// 规则类型：CASH / DISCOUNT / FULL_REDUCTION / GIFT / MANUAL
   ruleType    String   @db.VarChar(30)
@@ -2517,6 +2562,8 @@ enum NotificationType {
   CS_DUTY_SUBSTITUTION
   ORDER_UNPAID_REMINDER
   ORDER_UNPAID_AUTO_DEDUCTED
+  FEEDBACK_REPLY
+  ORDER_PROGRESS
 }
 
 enum AnnouncementAudience {

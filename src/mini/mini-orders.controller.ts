@@ -285,6 +285,7 @@ export class MiniOrdersController {
           projectSnapshot: true,
           createdAt: true,
           paymentTime: true,
+          review: { select: { id: true } },
           latestPayment: {
             select: {
               amount: true,
@@ -367,6 +368,20 @@ export class MiniOrdersController {
   async recordSubscribeMessage(@Req() req: any, @Body() body: any) {
     const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
     return miniOk(await this.miniSubscribeMessageService.recordSubscribeRequest(uid, body));
+  }
+
+  @Public()
+  @Get('claim/preview')
+  @ApiOperation({ summary: '小票扫码订单脱敏预览' })
+  async claimPreview(@Query('token') token: string) {
+    return miniOk(await this.ordersService.getOrderClaimPreview(token));
+  }
+
+  @Post('claim')
+  @ApiOperation({ summary: '登录会员首次认领小票订单' })
+  async claimOrder(@Req() req: any, @Body() body: any) {
+    const uid = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    return miniOk(await this.ordersService.claimOrderForMember(body?.token, uid), '订单认领成功');
   }
 
   @Get(':id')
@@ -463,6 +478,7 @@ export class MiniOrdersController {
       customerUserId: uid,
     });
     try {
+      if (playerIds.length) return miniOk(order, '下单成功');
       await this.miniSubscribeMessageService.pushOrderProgressMessage(
         Number((order as any)?.id || 0),
         '订单已创建，等待派单',
@@ -983,7 +999,9 @@ export class MiniOrdersController {
         throw new BadRequestException('当前订单状态不可评价');
       }
 
-      if (own.status !== OrderStatus.REFUNDED) {
+      // 客户允许在陪玩结单后、客服最终确认结算前先评价。
+      // 此阶段必须保留 COMPLETED_PENDING_CONFIRM，否则会阻断客服后续确认结单。
+      if (own.status !== OrderStatus.REFUNDED && own.status !== OrderStatus.COMPLETED_PENDING_CONFIRM) {
         await tx.order.update({ where: { id }, data: { status: OrderStatus.REVIEWED } });
       }
 

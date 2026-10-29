@@ -24,7 +24,7 @@ import {
     MemberPointDirection,
 } from '@prisma/client';
 import {WalletService} from '../wallet/wallet.service';
-import {randomInt, randomUUID} from 'crypto';
+import {randomBytes, randomInt, randomUUID} from 'crypto';
 import {groupByUserId, round2, roundMix1, toNum} from '../utils/money/format';
 import {computeBillingGuaranteed, computeBillingHours, computeBillingMODEPLAY, resolveGuaranteedSettlementPolicy} from '../utils/orderDispatches/revenueInit';
 import {compareSettlementsToPlan} from '../utils/finance/generateRepairPlan';
@@ -87,6 +87,100 @@ export class OrdersService {
         private staffActivityService: StaffActivityService,
         private shouqianbaService: ShouqianbaService,
     ) {}
+
+    async getOrCreateOrderClaimToken(orderId: number) {
+        const id = Number(orderId);
+        if (!id) throw new BadRequestException('订单 ID 无效');
+        const current = await this.prisma.order.findUnique({
+            where: {id},
+            select: {id: true, claimToken: true, customerUserId: true},
+        });
+        if (!current) throw new NotFoundException('订单不存在');
+        if (current.claimToken) {
+            return {orderId: id, token: current.claimToken, bound: Boolean(current.customerUserId)};
+        }
+
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            const token = randomBytes(16).toString('hex');
+            try {
+                const updated = await this.prisma.order.update({
+                    where: {id},
+                    data: {claimToken: token},
+                    select: {customerUserId: true},
+                });
+                return {orderId: id, token, bound: Boolean(updated.customerUserId)};
+            } catch (error: any) {
+                if (String(error?.code || '') !== 'P2002' || attempt === 2) throw error;
+            }
+        }
+        throw new ServiceUnavailableException('订单认领码生成失败，请稍后重试');
+    }
+
+    async getOrderClaimPreview(tokenInput: unknown) {
+        const token = String(tokenInput || '').trim().toLowerCase();
+        if (!/^[0-9a-f]{32}$/.test(token)) throw new BadRequestException('订单认领码无效');
+        const order = await this.prisma.order.findUnique({
+            where: {claimToken: token},
+            select: {
+                id: true,
+                autoSerial: true,
+                status: true,
+                createdAt: true,
+                customerUserId: true,
+                project: {select: {name: true, coverImage: true}},
+                projectSnapshot: true,
+            },
+        });
+        if (!order) throw new NotFoundException('订单认领码不存在或已失效');
+        const snapshot = order.projectSnapshot && typeof order.projectSnapshot === 'object' ? order.projectSnapshot as any : {};
+        const serial = String(order.autoSerial || '');
+        return {
+            orderId: order.id,
+            orderNoMasked: serial.length > 6 ? `${serial.slice(0, 3)}***${serial.slice(-3)}` : serial,
+            projectName: String(order.project?.name || snapshot?.name || '订单服务'),
+            coverImage: order.project?.coverImage || snapshot?.coverImage || null,
+            status: order.status,
+            createdAt: order.createdAt,
+            claimed: Boolean(order.customerUserId),
+        };
+    }
+
+    async claimOrderForMember(tokenInput: unknown, userId: number) {
+        const token = String(tokenInput || '').trim().toLowerCase();
+        const uid = Number(userId);
+        if (!/^[0-9a-f]{32}$/.test(token)) throw new BadRequestException('订单认领码无效');
+        if (!uid) throw new BadRequestException('请先登录会员账号');
+
+        const result = await this.prisma.$transaction(async (tx) => {
+            const order = await tx.order.findUnique({
+                where: {claimToken: token},
+                select: {id: true, customerUserId: true},
+            });
+            if (!order) throw new NotFoundException('订单认领码不存在或已失效');
+            if (order.customerUserId && Number(order.customerUserId) !== uid) {
+                throw new ConflictException('该订单已被其他会员认领');
+            }
+            if (!order.customerUserId) {
+                const claimed = await tx.order.updateMany({
+                    where: {id: order.id, claimToken: token, customerUserId: null},
+                    data: {customerUserId: uid, claimedAt: new Date()},
+                });
+                if (claimed.count !== 1) throw new ConflictException('订单刚刚已被其他会员认领');
+            }
+            await tx.userLog.create({
+                data: {
+                    userId: uid,
+                    action: order.customerUserId ? 'MINI_ORDER_CLAIM_REOPEN' : 'MINI_ORDER_CLAIM_SUCCESS',
+                    targetType: 'ORDER',
+                    targetId: order.id,
+                    newData: {source: 'RECEIPT_QR'} as any,
+                    remark: order.customerUserId ? 'member reopened claimed order' : 'member claimed order from receipt qr',
+                },
+            });
+            return {orderId: order.id, claimed: !order.customerUserId, alreadyOwned: Boolean(order.customerUserId)};
+        });
+        return result;
+    }
 
     private normalizeRequiredRemark(input: any, message = '请填写处理原因') {
         const remark = String(input || '').trim();
@@ -2011,6 +2105,13 @@ export class OrdersService {
         return 'MIXED';
     }
 
+    /** 会员等级折扣只属于会员储值消费，不随“已关联会员”自动生效。 */
+    private shouldApplyMemberBalanceDiscount(paymentChannel?: unknown, balanceSettlementMode?: unknown): boolean {
+        const channel = String(paymentChannel || '').trim().toUpperCase();
+        if (channel) return channel === 'BALANCE';
+        return String(balanceSettlementMode || '').trim().toUpperCase() === 'RESERVE_CAPTURE';
+    }
+
     private async resolveMemberOrderDiscount(input: {customerUserId?: number | null; project: any; originalAmount: number}) {
         const userId = Number(input.customerUserId || 0);
         if (!userId || input.originalAmount <= 0) return {amount: 0, rate: 1, levelCode: null, benefitId: null};
@@ -3011,7 +3112,7 @@ export class OrdersService {
         const requestedPaymentChannel = String((dto as any)?.paymentChannel || '')
             .trim()
             .toUpperCase();
-        const useMemberBalancePayment = scene === 'ADMIN' && !isGifted && !isStorePendingSettlement && requestedPaymentChannel === 'BALANCE';
+        const useMemberBalancePayment = scene === 'ADMIN' && !isGifted && !isStorePendingSettlement && this.shouldApplyMemberBalanceDiscount(requestedPaymentChannel);
         const useShouqianbaPendingPayment = scene === 'ADMIN' && !isGifted && !isStorePendingSettlement && requestedPaymentChannel === 'SHOUQIANBA';
         if (useShouqianbaPendingPayment) {
             throw new ServiceUnavailableException('线上二维码支付已暂停，请改用线下确认收款');
@@ -3309,6 +3410,15 @@ export class OrdersService {
         }
 
         // 未选择打手：保持 WAIT_ASSIGN
+        if (scene === 'ADMIN' && customerUserId) {
+            try {
+                await this.miniSubscribeMessageService.pushOrderProgressMessage(
+                    Number(order.id),
+                    '订单已关联会员，电子小票已生成，请留意后续服务进度',
+                    '待派单',
+                );
+            } catch {}
+        }
         return this.getOrderDetail(order.id);
     }
 
@@ -3529,6 +3639,9 @@ export class OrdersService {
                         avatar: true,
                         userType: true,
                     },
+                },
+                review: {
+                    select: {id: true},
                 },
 
                 // ✅ 当前派单批次
@@ -3958,7 +4071,7 @@ export class OrdersService {
                 await this.shouqianbaService.cancelPayment(paymentToCancel.id, `BlueCat cancel ${operatorId}`);
             }
         }
-        return this.prisma.$transaction(async (tx) => {
+        const updatedOrder = await this.prisma.$transaction(async (tx) => {
             await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
             const order = await tx.order.findUnique({where: {id: orderId}});
             if (!order) throw new NotFoundException('订单不存在');
@@ -4000,6 +4113,10 @@ export class OrdersService {
             }
             return updated;
         });
+        try {
+            await this.miniSubscribeMessageService.pushOrderProgressMessage(orderId, '订单已取消，可在小程序查看退款或售后状态', '已取消');
+        } catch {}
+        return updatedOrder;
     }
 
     async deleteOrder(orderId: number, operatorId: number, remark?: string) {
@@ -4189,6 +4306,11 @@ export class OrdersService {
             });
         } catch (e) {
             console.error('[notify][dispatch-assigned] failed', e?.message || e);
+        }
+        try {
+            await this.miniSubscribeMessageService.pushOrderProgressMessage(orderId, '订单已派单，请留意服务者接单进度', '待接单');
+        } catch (e: any) {
+            console.error('[notify][customer-order-progress][dispatch-assigned] failed', e?.message || e);
         }
 
         return this.getOrderDetail(orderId);
@@ -4414,6 +4536,30 @@ export class OrdersService {
             });
         } catch (e) {
             console.error('[notify][dispatch-archive-complete] failed', e?.message || e);
+        }
+
+        // 陪玩完成结单后，订单已进入“待确认结单”且客户端允许评价。
+        // 此时立即通知客户，避免等待客服最终确认结算后才收到评价提醒。
+        if (dispatchStatus === DispatchStatus.COMPLETED) {
+            try {
+                await this.miniSubscribeMessageService.pushOrderProgressMessage(
+                    Number(orderId),
+                    '服务已完成，欢迎前往评价本次服务',
+                    '待评价',
+                );
+            } catch (e: any) {
+                console.error('[notify][mini-order-progress][dispatch-complete] failed', e?.message || e);
+            }
+        } else {
+            try {
+                await this.miniSubscribeMessageService.pushOrderProgressMessage(
+                    Number(orderId),
+                    '本轮服务进度已保存，订单仍在服务中',
+                    '服务中',
+                );
+            } catch (e: any) {
+                console.error('[notify][mini-order-progress][dispatch-archive] failed', e?.message || e);
+            }
         }
 
         return {
@@ -5317,6 +5463,16 @@ export class OrdersService {
             });
         });
 
+        try {
+            await this.miniSubscribeMessageService.pushOrderProgressMessage(
+                orderId,
+                '售后申请已提交，客服将在审核后通知处理结果',
+                '售后处理中',
+            );
+        } catch (e: any) {
+            console.error('[notify][mini-order-progress][after-sales-apply] failed', e?.message || e);
+        }
+
         return {
             success: true,
             status: OrderStatus.WAIT_AFTERSALE,
@@ -6053,6 +6209,14 @@ export class OrdersService {
             console.error('[notify][mini-member-asset][refund-order] failed', e?.message || e);
         }
 
+        try {
+            await this.miniSubscribeMessageService.pushOrderProgressMessage(
+                orderId,
+                isPartialRefund ? `订单已部分退款 ¥${Number(refundAmount || 0).toFixed(2)}` : '订单退款已处理',
+                isPartialRefund ? '部分退款' : '已退款',
+            );
+        } catch {}
+
         return this.getOrderDetail(orderId);
     }
 
@@ -6520,11 +6684,17 @@ export class OrdersService {
                 if (requestedCoupon && Number(requestedCoupon.userId) !== Number(nextCustomerUserId || 0)) {
                     throw new BadRequestException('该优惠券不属于当前会员');
                 }
-                const memberDiscount = await this.resolveMemberOrderDiscount({
-                    customerUserId: nextCustomerUserId,
-                    project: nextProject,
-                    originalAmount: nextOriginalAmount,
-                });
+                const useMemberBalanceDiscount = this.shouldApplyMemberBalanceDiscount(
+                    dto.paymentChannel,
+                    current.balanceSettlementMode,
+                );
+                const memberDiscount = useMemberBalanceDiscount
+                    ? await this.resolveMemberOrderDiscount({
+                          customerUserId: nextCustomerUserId,
+                          project: nextProject,
+                          originalAmount: nextOriginalAmount,
+                      })
+                    : {amount: 0, rate: 1, levelCode: null, benefitId: null};
                 const memberDiscountAmount = this.toAmount2(memberDiscount.amount);
                 const couponBaseAmount = this.toAmount2(Math.max(0, nextOriginalAmount - memberDiscountAmount));
                 const couponDiscountAmount = requestedCoupon
@@ -8194,11 +8364,6 @@ export class OrdersService {
         });
 
         if (!result?.previewOnly && String(result?.status || '') === String(OrderStatus.COMPLETED)) {
-            try {
-                await this.miniSubscribeMessageService.pushOrderProgressMessage(Number(orderId), '订单已完成，欢迎前往评价本次服务', '待评价');
-            } catch (e: any) {
-                console.error('[notify][mini-order-progress][confirm-complete] failed', e?.message || e);
-            }
             try {
                 const orderAfter = await this.prisma.order.findUnique({
                     where: {id: Number(orderId)},

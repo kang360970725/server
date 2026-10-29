@@ -77,6 +77,7 @@ async function main() {
         { key: 'service:online-board:page', name: '服务者在线看板', module: 'service', type: PermissionType.PAGE, parentKey: 'menu:workbench' },
         { key: 'orders:list:page', name: '订单列表', module: 'orders', type: PermissionType.PAGE, parentKey: 'menu:orders' },
         { key: 'orders:complaints:page', name: '客诉工单', module: 'orders', type: PermissionType.PAGE, parentKey: 'menu:orders' },
+        { key: 'service:feedback:page', name: '问题反馈', module: 'orders', type: PermissionType.PAGE, parentKey: 'menu:orders' },
         { key: 'orders:detail:page', name: '订单详情', module: 'orders', type: PermissionType.PAGE, parentKey: 'menu:orders' },
         { key: 'orders:workbench:create:button', name: '服务者在线看板快捷发单', module: 'orders', type: PermissionType.BUTTON, parentKey: 'service:online-board:page' },
         { key: 'orders:list:create:button', name: '订单列表创建订单', module: 'orders', type: PermissionType.BUTTON, parentKey: 'orders:list:page' },

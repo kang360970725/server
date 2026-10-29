@@ -1,6 +1,16 @@
 import { OrdersService } from './orders.service';
 
 describe('OrdersService member order context', () => {
+  it('applies member level discounts only to member-balance payments', () => {
+    const service: any = Object.create(OrdersService.prototype);
+
+    expect(service.shouldApplyMemberBalanceDiscount('BALANCE')).toBe(true);
+    expect(service.shouldApplyMemberBalanceDiscount('MANUAL')).toBe(false);
+    expect(service.shouldApplyMemberBalanceDiscount('SHOUQIANBA')).toBe(false);
+    expect(service.shouldApplyMemberBalanceDiscount(undefined, 'RESERVE_CAPTURE')).toBe(true);
+    expect(service.shouldApplyMemberBalanceDiscount(undefined, null)).toBe(false);
+  });
+
   it('uses the product category, not the order type, for member-discount exclusions', async () => {
     const service: any = Object.create(OrdersService.prototype);
     const rule = {

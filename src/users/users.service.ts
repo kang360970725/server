@@ -783,6 +783,7 @@ export class UsersService {
     page?: number;
     limit?: number;
     search?: string;
+    memberTail?: string;
     userType?: UserType;
     status?: string;
     staffEmploymentStatus?: string;
@@ -799,6 +800,7 @@ export class UsersService {
   {
     const {
       search,
+      memberTail,
       userType,
       status,
       staffEmploymentStatus,
@@ -901,6 +903,19 @@ export class UsersService {
 
         AND.push({ OR });
       }
+    }
+
+    const normalizedMemberTail = String(memberTail || '').replace(/\D/g, '').slice(-20);
+    if (normalizedMemberTail) {
+      if (sceneKey !== 'MEMBER') {
+        throw new ForbiddenException('会员尾号查询仅限会员场景');
+      }
+      AND.push({
+        OR: [
+          { phone: { endsWith: normalizedMemberTail } },
+          { memberProfile: { is: { memberCode: { endsWith: normalizedMemberTail } } } },
+        ],
+      });
     }
 
     /**

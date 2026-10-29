@@ -1,5 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { WechatBindingPlatform } from '@prisma/client';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { NotificationType, WechatBindingPlatform } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SystemConfigService } from '../system-config/system-config.service';
 
@@ -67,6 +67,54 @@ export class MiniSubscribeMessageService {
     private readonly prisma: PrismaService,
     private readonly systemConfigService: SystemConfigService,
   ) {}
+
+  async assertMiniTextSafe(userId: number, contentInput: unknown) {
+    const content = String(contentInput || '').trim();
+    if (!content) return;
+
+    // 本地高置信度兜底；生产环境同时使用微信内容安全接口进行语义审核。
+    const compact = content.toLowerCase().replace(/[\s\-_.*·，。！？、]/g, '');
+    const blockedPatterns = [
+      /代开.*发票|出售.*银行卡|收购.*银行卡|买卖.*身份证/,
+      /博彩|赌球|地下钱庄|洗钱|枪支弹药|毒品交易/,
+      /成人视频|色情服务|招嫖|卖淫|嫖娼/,
+      /恐怖袭击|制作炸弹|煽动颠覆/,
+    ];
+    if (blockedPatterns.some((pattern) => pattern.test(compact))) {
+      throw new BadRequestException('提交内容包含不适宜信息，请修改后重试');
+    }
+
+    try {
+      const binding = await this.prisma.userWechatBinding.findFirst({
+        where: { userId, platform: 'MINIAPP' },
+        orderBy: { updatedAt: 'desc' },
+        select: { openId: true },
+      });
+      if (!binding?.openId) return;
+      const accessToken = await this.getMiniAccessToken();
+      const requestQuery = accessToken ? `?access_token=${encodeURIComponent(accessToken)}` : '';
+      const response = await fetch(`${this.getWechatApiBaseUrl()}/wxa/msg_sec_check${requestQuery}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content, version: 2, scene: 2, openid: binding.openId }),
+      });
+      const result: any = await response.json();
+      const suggest = String(result?.result?.suggest || '').toLowerCase();
+      if (suggest === 'risky' || suggest === 'review') {
+        throw new BadRequestException('提交内容未通过安全审核，请修改后重试');
+      }
+      if (!response.ok || (Number(result?.errcode || 0) !== 0 && Number(result?.errcode || 0) !== 87014)) {
+        this.logger.warn(`微信文本安全检查异常 user=${userId}: ${result?.errmsg || response.status}`);
+      }
+      if (Number(result?.errcode || 0) === 87014) {
+        throw new BadRequestException('提交内容未通过安全审核，请修改后重试');
+      }
+    } catch (error: any) {
+      if (error instanceof BadRequestException) throw error;
+      // 审核服务临时不可用时保留本地高置信度规则，避免阻断正常反馈。
+      this.logger.warn(`微信文本安全检查失败 user=${userId}: ${error?.message || error}`);
+    }
+  }
 
   private getDefaultConfig(): TemplateConfigMap {
     return {
@@ -277,6 +325,11 @@ export class MiniSubscribeMessageService {
   private normalizeTemplateValue(fieldKey: string, value: any) {
     const text = String(value ?? '').trim();
     if (!text) return '';
+    // 微信的 date 类型只接受日期；业务层统一传入的时间值需要在这里去掉时分。
+    if (fieldKey.startsWith('date')) {
+      const matchedDate = text.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+      return matchedDate || text.slice(0, 10);
+    }
     if (fieldKey.startsWith('thing')) return text.slice(0, 20);
     if (fieldKey.startsWith('phrase')) return text.slice(0, 5);
     if (fieldKey.startsWith('name')) return text.slice(0, 10);
@@ -299,13 +352,47 @@ export class MiniSubscribeMessageService {
   }
 
   private buildPagePath(page: string, query?: Record<string, any>) {
-    const base = String(page || '').trim();
+    // 微信订阅消息 page 参数要求使用小程序内部路径，不带开头的斜杠。
+    const base = String(page || '').trim().replace(/^\/+/, '');
     if (!base) return '';
     const params = Object.entries(query || {})
       .filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== '')
       .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
     if (!params.length) return base;
     return `${base}${base.includes('?') ? '&' : '?'}${params.join('&')}`;
+  }
+
+  async generateOrderClaimMiniCode(tokenInput: unknown) {
+    const token = String(tokenInput || '').trim().toLowerCase();
+    if (!/^[0-9a-f]{32}$/.test(token)) throw new Error('订单认领码格式无效');
+    const accessToken = await this.getMiniAccessToken();
+    const requestQuery = accessToken ? `?access_token=${encodeURIComponent(accessToken)}` : '';
+    const response = await fetch(`${this.getWechatApiBaseUrl()}/wxa/getwxacodeunlimit${requestQuery}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        scene: token,
+        page: 'pages/order-claim/index',
+        check_path: false,
+        env_version: String(process.env.WECHAT_MINI_CODE_ENV_VERSION || 'release'),
+        width: 430,
+        auto_color: false,
+        line_color: {r: 245, g: 95, b: 139},
+        is_hyaline: false,
+      }),
+    });
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!response.ok || contentType.includes('application/json') || buffer.length < 100) {
+      let detail = `微信小程序码生成失败（HTTP ${response.status}）`;
+      try {
+        const parsed = JSON.parse(buffer.toString('utf8'));
+        detail = String(parsed?.errmsg || detail);
+      } catch {}
+      throw new Error(detail);
+    }
+    const mimeType = contentType.startsWith('image/') ? contentType.split(';')[0] : 'image/jpeg';
+    return `data:${mimeType};base64,${buffer.toString('base64')}`;
   }
 
   private resolveOrderStatusText(status: string) {
@@ -442,7 +529,8 @@ export class MiniSubscribeMessageService {
         id: true,
         autoSerial: true,
         status: true,
-        updatedAt: true,
+        orderTime: true,
+        createdAt: true,
         customerUserId: true,
         project: { select: { name: true } },
         projectSnapshot: true,
@@ -453,8 +541,26 @@ export class MiniSubscribeMessageService {
     const snapshot = order.projectSnapshot && typeof order.projectSnapshot === 'object' ? (order.projectSnapshot as any) : {};
     const projectName = String(order?.project?.name || snapshot?.name || `订单#${order.id}`).trim();
     const statusText = String(explicitStatusText || this.resolveOrderStatusText(String(order.status || ''))).trim();
+    const stationContent = String(remark || `订单当前状态：${statusText}`).trim();
 
-    return this.sendConfiguredMessage({
+    // 站内信不依赖微信订阅授权，始终作为订单进度通知的可靠兜底。
+    const stationNotification = await this.prisma.userNotification.create({
+      data: {
+        userId: Number(order.customerUserId),
+        type: NotificationType.ORDER_PROGRESS,
+        title: `${statusText} · ${projectName}`.slice(0, 120),
+        content: stationContent,
+        payload: {
+          orderId: Number(order.id),
+          orderNo: order.autoSerial || null,
+          status: String(order.status || ''),
+          statusText,
+          page: `/pages/order-details/index?id=${order.id}`,
+        },
+      },
+    });
+
+    const wechatResult = await this.sendConfiguredMessage({
       userId: Number(order.customerUserId),
       code: 'ORDER_PROGRESS',
       targetType: 'ORDER',
@@ -465,10 +571,12 @@ export class MiniSubscribeMessageService {
         orderNo: order.autoSerial,
         projectName,
         status: statusText,
-        updatedAt: this.formatDateTime(order.updatedAt),
-        remark: String(remark || `订单当前状态：${statusText}`),
+        // 配置项沿用 updatedAt 这一语义键，但当前公共模板对应的是“下单时间”。
+        updatedAt: this.formatDateTime(order.orderTime || order.createdAt),
+        remark: stationContent,
       },
     });
+    return { ...wechatResult, stationNotificationId: stationNotification.id };
   }
 
   async pushMemberAssetMessage(params: {
@@ -508,7 +616,21 @@ export class MiniSubscribeMessageService {
     reviewedAt?: Date | string | null;
     remark?: string;
   }) {
-    return this.sendConfiguredMessage({
+    const stationNotification = await this.prisma.userNotification.create({
+      data: {
+        userId: Number(params.userId),
+        type: NotificationType.ORDER_PROGRESS,
+        title: `售后进度 · ${String(params.result || '处理结果')}`.slice(0, 120),
+        content: String(params.remark || params.result || '售后状态已更新'),
+        payload: {
+          orderId: Number(params.orderId),
+          orderNo: params.orderNo,
+          statusText: params.result,
+          page: `/pages/order-details/index?id=${params.orderId}`,
+        },
+      },
+    });
+    const wechatResult = await this.sendConfiguredMessage({
       userId: Number(params.userId),
       code: 'AFTER_SALES_RESULT',
       targetType: 'ORDER',
@@ -523,6 +645,7 @@ export class MiniSubscribeMessageService {
         remark: String(params.remark || '').trim(),
       },
     });
+    return { ...wechatResult, stationNotificationId: stationNotification.id };
   }
 
   async pushMarketingActivityMessage(params: {

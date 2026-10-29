@@ -40,6 +40,7 @@ import { RentalOrdersModule } from './rental-orders/rental-orders.module';
 import { StaffActivityModule } from './staff-activity/staff-activity.module';
 import { MiniRuntimeInterceptor } from './mini/mini-runtime.interceptor';
 import { MiniFeatureGuard } from './mini/mini-feature.guard';
+import { FeedbackModule } from './feedback/feedback.module';
 
 
 @Module({
@@ -76,6 +77,7 @@ import { MiniFeatureGuard } from './mini/mini-feature.guard';
         ExcellentStaffModule,
         RentalOrdersModule,
         StaffActivityModule,
+        FeedbackModule,
   ],
     controllers: [AppController],
     providers: [AppService, PrismaService,

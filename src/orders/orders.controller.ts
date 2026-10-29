@@ -21,6 +21,7 @@ import { PermissionsGuard } from '../auth/guards/permissions.guard';
 import { Permissions } from '../auth/decorators/permissions.decorator';
 import {DispatchStatus} from "@prisma/client";
 import { SystemConfigService } from '../system-config/system-config.service';
+import { MiniSubscribeMessageService } from '../notifications/mini-subscribe-message.service';
 
 /**
  * Orders Controller（v0.1）
@@ -33,6 +34,7 @@ export class OrdersController {
     constructor(
         private readonly ordersService: OrdersService,
         private readonly systemConfigService: SystemConfigService,
+        private readonly miniSubscribeMessageService: MiniSubscribeMessageService,
     ) {}
 
     private assertCustomerServiceOrFinanceAdmin(user: any) {
@@ -147,6 +149,17 @@ export class OrdersController {
         const id = Number(body.id);
         if (!id || Number.isNaN(id)) throw new BadRequestException('id 必须为数字');
         return this.ordersService.getOrderDetail(id);
+    }
+
+    @Post('claim-code')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:detail:receipt:button', 'orders:list:create:button', 'orders:workbench:create:button')
+    async claimCode(@Body() body: any) {
+        const id = Number(body?.id);
+        if (!id) throw new BadRequestException('id 必须为数字');
+        const claim = await this.ordersService.getOrCreateOrderClaimToken(id);
+        const miniCodeDataUrl = await this.miniSubscribeMessageService.generateOrderClaimMiniCode(claim.token);
+        return {...claim, miniCodeDataUrl, page: 'pages/order-claim/index'};
     }
 
     /** 新建订单（管理端） */
