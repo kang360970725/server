@@ -289,13 +289,23 @@ export class MiniSubscribeMessageService {
       throw new Error('缺少微信小程序 AppID / AppSecret，无法发送订阅消息');
     }
 
+    // 云托管网关故障后的凭证降级必须全程走公网 HTTPS；如果这里仍使用
+    // getWechatApiBaseUrl()，生产环境会再次命中同一个 http 内网网关并继续 502。
+    const tokenBaseUrl = forceCredentialToken ? 'https://api.weixin.qq.com' : this.getWechatApiBaseUrl();
     const tokenResp = await fetch(
-      `${this.getWechatApiBaseUrl()}/cgi-bin/token?grant_type=client_credential&appid=${encodeURIComponent(appId)}&secret=${encodeURIComponent(appSecret)}`,
+      `${tokenBaseUrl}/cgi-bin/token?grant_type=client_credential&appid=${encodeURIComponent(appId)}&secret=${encodeURIComponent(appSecret)}`,
     );
-    const tokenData: any = await tokenResp.json();
+    const tokenText = await tokenResp.text();
+    let tokenData: any = {};
+    try {
+      tokenData = JSON.parse(tokenText);
+    } catch {
+      throw new Error(`获取微信 access_token 失败（HTTP ${tokenResp.status}）：${tokenText.replace(/\s+/g, ' ').trim().slice(0, 120) || '响应格式异常'}`);
+    }
     const accessToken = String(tokenData?.access_token || '').trim();
     if (!accessToken) {
-      throw new Error(String(tokenData?.errmsg || '获取微信 access_token 失败'));
+      const errorCode = Number(tokenData?.errcode || 0);
+      throw new Error(`${String(tokenData?.errmsg || '获取微信 access_token 失败')}${errorCode ? `（errcode ${errorCode}）` : ''}`);
     }
 
     const expiresInSeconds = Math.max(300, Number(tokenData?.expires_in || 7200));
@@ -401,7 +411,7 @@ export class MiniSubscribeMessageService {
         const credentialToken = await this.getMiniAccessToken(true);
         result = await requestCode('https://api.weixin.qq.com', credentialToken);
       } catch (fallbackError: any) {
-        this.logger.warn(`微信小程序码 HTTPS 降级调用失败: ${fallbackError?.message || fallbackError}`);
+        this.logger.warn(`微信小程序码 HTTPS 降级调用失败（获取 access_token 或调用生成码接口）: ${fallbackError?.message || fallbackError}`);
       }
     }
 
