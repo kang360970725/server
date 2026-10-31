@@ -413,29 +413,62 @@ export class MiniSubscribeMessageService {
       line_color: {r: 245, g: 95, b: 139},
       is_hyaline: false,
     });
+    const diagnostics: Array<Record<string, any>> = [];
     const requestCode = async (
+      stage: string,
       baseUrl: string,
       accessToken = '',
       tokenParam: 'access_token' | 'cloudbase_access_token' = 'access_token',
     ) => {
       const query = accessToken ? `?${tokenParam}=${encodeURIComponent(accessToken)}` : '';
-      const response = await fetch(`${baseUrl}/wxa/getwxacodeunlimit${query}`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: requestBody,
-      });
-      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
-      const buffer = Buffer.from(await response.arrayBuffer());
-      return {response, contentType, buffer};
+      const startedAt = Date.now();
+      try {
+        const response = await fetch(`${baseUrl}/wxa/getwxacodeunlimit${query}`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: requestBody,
+        });
+        const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+        const buffer = Buffer.from(await response.arrayBuffer());
+        const textual = contentType.includes('json') || contentType.startsWith('text/');
+        diagnostics.push({
+          stage,
+          baseUrl,
+          authMode: accessToken ? tokenParam : 'cloud-open-api',
+          status: response.status,
+          contentType,
+          bytes: buffer.length,
+          durationMs: Date.now() - startedAt,
+          requestId: response.headers.get('x-request-id')
+            || response.headers.get('x-wx-request-id')
+            || response.headers.get('x-cloudbase-request-id')
+            || response.headers.get('x-tencent-request-id')
+            || '',
+          server: response.headers.get('server') || '',
+          body: textual ? buffer.toString('utf8').replace(/\s+/g, ' ').trim().slice(0, 500) : '[binary omitted]',
+        });
+        return {response, contentType, buffer};
+      } catch (error: any) {
+        const failure = {
+          stage,
+          baseUrl,
+          authMode: accessToken ? tokenParam : 'cloud-open-api',
+          durationMs: Date.now() - startedAt,
+          networkError: this.describeNetworkError(error),
+        };
+        diagnostics.push(failure);
+        this.logger.error(`微信小程序码网络调用诊断 mini-code-diagnostic-v2: ${JSON.stringify(failure)}`);
+        throw error;
+      }
     };
 
     const primaryToken = await this.getMiniAccessToken();
-    let result = await requestCode(this.getWechatApiBaseUrl(), primaryToken);
+    let result = await requestCode('cloud-open-api-initial', this.getWechatApiBaseUrl(), primaryToken);
     // 微信云托管内网网关偶发 502。先短暂重试，避免一次瞬时抖动就让小票退回固定码。
     for (const delayMs of [180, 450]) {
       if (result.response.status < 500) break;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
-      result = await requestCode(this.getWechatApiBaseUrl(), primaryToken);
+      result = await requestCode(`cloud-open-api-retry-${delayMs}`, this.getWechatApiBaseUrl(), primaryToken);
     }
     const isWechatApiError = (current: typeof result) => {
       if (current.response.status >= 400) return true;
@@ -454,6 +487,7 @@ export class MiniSubscribeMessageService {
       const cloudBaseToken = await this.getCloudBaseAccessToken();
       if (cloudBaseToken) {
         result = await requestCode(
+          'cloud-mounted-token',
           'http://api.weixin.qq.com',
           cloudBaseToken,
           'cloudbase_access_token',
@@ -465,7 +499,7 @@ export class MiniSubscribeMessageService {
     if (isWechatApiError(result) && this.isWechatCloudRun()) {
       try {
         const credentialToken = await this.getMiniAccessToken(true);
-        result = await requestCode('https://api.weixin.qq.com', credentialToken);
+        result = await requestCode('public-https-app-secret', 'https://api.weixin.qq.com', credentialToken);
       } catch (fallbackError: any) {
         this.logger.warn(`微信小程序码 HTTPS 降级调用失败（获取 access_token 或调用生成码接口）: ${this.describeNetworkError(fallbackError)}`);
       }
@@ -481,6 +515,18 @@ export class MiniSubscribeMessageService {
         const plainText = buffer.toString('utf8').replace(/\s+/g, ' ').trim().slice(0, 160);
         if (plainText) detail = `${detail}：${plainText}`;
       }
+      this.logger.error(`微信小程序码生成诊断 mini-code-diagnostic-v2: ${JSON.stringify({
+        environment: {
+          nodeEnv: String(process.env.NODE_ENV || ''),
+          tcbEnvId: String(process.env.TCB_ENV_ID || ''),
+          serviceName: String(process.env.K_SERVICE || process.env.TCB_SERVICE_NAME || process.env.SERVICE_NAME || ''),
+          revision: String(process.env.K_REVISION || process.env.TCB_VERSION || process.env.GIT_COMMIT || ''),
+          apiBaseUrl: this.getWechatApiBaseUrl(),
+          miniCodeEnvVersion: String(process.env.WECHAT_MINI_CODE_ENV_VERSION || 'release'),
+        },
+        attempts: diagnostics,
+        finalError: detail,
+      })}`);
       throw new Error(detail);
     }
     const mimeType = contentType.startsWith('image/') ? contentType.split(';')[0] : 'image/jpeg';
