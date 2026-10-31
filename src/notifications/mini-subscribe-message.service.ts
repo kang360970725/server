@@ -63,6 +63,23 @@ export class MiniSubscribeMessageService {
     return this.isWechatCloudRun() ? 'http://api.weixin.qq.com' : 'https://api.weixin.qq.com';
   }
 
+  private describeNetworkError(error: any) {
+    const parts: string[] = [];
+    let current = error;
+    for (let depth = 0; current && depth < 4; depth += 1) {
+      const message = String(current?.message || current).trim();
+      const code = String(current?.code || '').trim();
+      const address = String(current?.address || '').trim();
+      const port = String(current?.port || '').trim();
+      const detail = [code, message, address && `${address}${port ? `:${port}` : ''}`]
+        .filter(Boolean)
+        .join(' / ');
+      if (detail && !parts.includes(detail)) parts.push(detail);
+      current = current?.cause;
+    }
+    return parts.join(' <- ') || '未知网络错误';
+  }
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly systemConfigService: SystemConfigService,
@@ -411,7 +428,7 @@ export class MiniSubscribeMessageService {
         const credentialToken = await this.getMiniAccessToken(true);
         result = await requestCode('https://api.weixin.qq.com', credentialToken);
       } catch (fallbackError: any) {
-        this.logger.warn(`微信小程序码 HTTPS 降级调用失败（获取 access_token 或调用生成码接口）: ${fallbackError?.message || fallbackError}`);
+        this.logger.warn(`微信小程序码 HTTPS 降级调用失败（获取 access_token 或调用生成码接口）: ${this.describeNetworkError(fallbackError)}`);
       }
     }
 
