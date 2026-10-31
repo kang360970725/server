@@ -472,12 +472,13 @@ export class MiniSubscribeMessageService {
     }
     const isWechatApiError = (current: typeof result) => {
       if (current.response.status >= 400) return true;
-      if (!current.contentType.includes('application/json')) return false;
+      // 云托管开放接口即使返回微信 JSON 错误，也可能将 Content-Type 标为
+      // text/plain；不能依赖响应头判断，否则 errcode 48001 不会触发降级。
       try {
         const payload = JSON.parse(current.buffer.toString('utf8'));
-        return Number(payload?.errcode || 0) !== 0 || Boolean(payload?.errmsg);
+        return Number(payload?.errcode || 0) !== 0;
       } catch {
-        return true;
+        return false;
       }
     };
 
