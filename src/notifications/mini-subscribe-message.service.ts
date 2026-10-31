@@ -266,8 +266,8 @@ export class MiniSubscribeMessageService {
     return { success: true };
   }
 
-  private async getMiniAccessToken() {
-    if (this.isWechatCloudRun()) return '';
+  private async getMiniAccessToken(forceCredentialToken = false) {
+    if (this.isWechatCloudRun() && !forceCredentialToken) return '';
 
     const now = Date.now();
     if (this.accessTokenCache && this.accessTokenCache.expiresAt > now + 60_000) {
@@ -365,30 +365,56 @@ export class MiniSubscribeMessageService {
   async generateOrderClaimMiniCode(tokenInput: unknown) {
     const token = String(tokenInput || '').trim().toLowerCase();
     if (!/^[0-9a-f]{32}$/.test(token)) throw new Error('订单认领码格式无效');
-    const accessToken = await this.getMiniAccessToken();
-    const requestQuery = accessToken ? `?access_token=${encodeURIComponent(accessToken)}` : '';
-    const response = await fetch(`${this.getWechatApiBaseUrl()}/wxa/getwxacodeunlimit${requestQuery}`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        scene: token,
-        page: 'pages/order-claim/index',
-        check_path: false,
-        env_version: String(process.env.WECHAT_MINI_CODE_ENV_VERSION || 'release'),
-        width: 430,
-        auto_color: false,
-        line_color: {r: 245, g: 95, b: 139},
-        is_hyaline: false,
-      }),
+    const requestBody = JSON.stringify({
+      scene: token,
+      page: 'pages/order-claim/index',
+      check_path: false,
+      env_version: String(process.env.WECHAT_MINI_CODE_ENV_VERSION || 'release'),
+      width: 430,
+      auto_color: false,
+      line_color: {r: 245, g: 95, b: 139},
+      is_hyaline: false,
     });
-    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
-    const buffer = Buffer.from(await response.arrayBuffer());
+    const requestCode = async (baseUrl: string, accessToken = '') => {
+      const query = accessToken ? `?access_token=${encodeURIComponent(accessToken)}` : '';
+      const response = await fetch(`${baseUrl}/wxa/getwxacodeunlimit${query}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: requestBody,
+      });
+      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      const buffer = Buffer.from(await response.arrayBuffer());
+      return {response, contentType, buffer};
+    };
+
+    const primaryToken = await this.getMiniAccessToken();
+    let result = await requestCode(this.getWechatApiBaseUrl(), primaryToken);
+    // 微信云托管内网网关偶发 502。先短暂重试，避免一次瞬时抖动就让小票退回固定码。
+    for (const delayMs of [180, 450]) {
+      if (result.response.status < 500) break;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      result = await requestCode(this.getWechatApiBaseUrl(), primaryToken);
+    }
+    // 云托管网关持续异常时，若系统已配置 AppSecret，则切换到官方 HTTPS + access_token。
+    if (result.response.status >= 500 && this.isWechatCloudRun()) {
+      try {
+        const credentialToken = await this.getMiniAccessToken(true);
+        result = await requestCode('https://api.weixin.qq.com', credentialToken);
+      } catch (fallbackError: any) {
+        this.logger.warn(`微信小程序码 HTTPS 降级调用失败: ${fallbackError?.message || fallbackError}`);
+      }
+    }
+
+    const {response, contentType, buffer} = result;
     if (!response.ok || contentType.includes('application/json') || buffer.length < 100) {
       let detail = `微信小程序码生成失败（HTTP ${response.status}）`;
       try {
         const parsed = JSON.parse(buffer.toString('utf8'));
-        detail = String(parsed?.errmsg || detail);
-      } catch {}
+        detail = String(parsed?.errmsg || parsed?.message || detail);
+      } catch {
+        const plainText = buffer.toString('utf8').replace(/\s+/g, ' ').trim().slice(0, 160);
+        if (plainText) detail = `${detail}：${plainText}`;
+      }
       throw new Error(detail);
     }
     const mimeType = contentType.startsWith('image/') ? contentType.split(';')[0] : 'image/jpeg';
