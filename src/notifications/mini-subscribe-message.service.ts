@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { NotificationType, WechatBindingPlatform } from '@prisma/client';
+import { readFile } from 'node:fs/promises';
 import { PrismaService } from '../prisma/prisma.service';
 import { SystemConfigService } from '../system-config/system-config.service';
 
@@ -78,6 +79,16 @@ export class MiniSubscribeMessageService {
       current = current?.cause;
     }
     return parts.join(' <- ') || '未知网络错误';
+  }
+
+  private async getCloudBaseAccessToken() {
+    if (!this.isWechatCloudRun()) return '';
+    try {
+      return String(await readFile('/.tencentcloudbase/wx/cloudbase_access_token', 'utf8')).trim();
+    } catch (error: any) {
+      this.logger.warn(`读取微信云托管令牌失败: ${this.describeNetworkError(error)}`);
+      return '';
+    }
   }
 
   constructor(
@@ -402,8 +413,12 @@ export class MiniSubscribeMessageService {
       line_color: {r: 245, g: 95, b: 139},
       is_hyaline: false,
     });
-    const requestCode = async (baseUrl: string, accessToken = '') => {
-      const query = accessToken ? `?access_token=${encodeURIComponent(accessToken)}` : '';
+    const requestCode = async (
+      baseUrl: string,
+      accessToken = '',
+      tokenParam: 'access_token' | 'cloudbase_access_token' = 'access_token',
+    ) => {
+      const query = accessToken ? `?${tokenParam}=${encodeURIComponent(accessToken)}` : '';
       const response = await fetch(`${baseUrl}/wxa/getwxacodeunlimit${query}`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -422,8 +437,32 @@ export class MiniSubscribeMessageService {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       result = await requestCode(this.getWechatApiBaseUrl(), primaryToken);
     }
-    // 云托管网关持续异常时，若系统已配置 AppSecret，则切换到官方 HTTPS + access_token。
-    if (result.response.status >= 500 && this.isWechatCloudRun()) {
+    const isWechatApiError = (current: typeof result) => {
+      if (current.response.status >= 400) return true;
+      if (!current.contentType.includes('application/json')) return false;
+      try {
+        const payload = JSON.parse(current.buffer.toString('utf8'));
+        return Number(payload?.errcode || 0) !== 0 || Boolean(payload?.errmsg);
+      } catch {
+        return true;
+      }
+    };
+
+    // 个别云托管实例未向免鉴权请求注入调用身份，会返回 api unauthorized。
+    // 使用平台挂载的短期令牌再次调用，令牌不会离开容器或写入日志。
+    if (this.isWechatCloudRun() && isWechatApiError(result)) {
+      const cloudBaseToken = await this.getCloudBaseAccessToken();
+      if (cloudBaseToken) {
+        result = await requestCode(
+          'http://api.weixin.qq.com',
+          cloudBaseToken,
+          'cloudbase_access_token',
+        );
+      }
+    }
+
+    // 云托管两条原生链路均失败时，若系统已配置 AppSecret，则切换到官方 HTTPS + access_token。
+    if (isWechatApiError(result) && this.isWechatCloudRun()) {
       try {
         const credentialToken = await this.getMiniAccessToken(true);
         result = await requestCode('https://api.weixin.qq.com', credentialToken);
