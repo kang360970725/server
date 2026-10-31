@@ -91,6 +91,13 @@ export class MiniSubscribeMessageService {
     }
   }
 
+  private maskDiagnosticValue(value: unknown, visibleTail = 6) {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    if (text.length <= visibleTail) return `***(${text.length})`;
+    return `${text.slice(0, 3)}***${text.slice(-visibleTail)}(${text.length})`;
+  }
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly systemConfigService: SystemConfigService,
@@ -444,6 +451,7 @@ export class MiniSubscribeMessageService {
             || response.headers.get('x-cloudbase-request-id')
             || response.headers.get('x-tencent-request-id')
             || '',
+          openApiSeqId: response.headers.get('x-openapi-seqid') || '',
           server: response.headers.get('server') || '',
           body: textual ? buffer.toString('utf8').replace(/\s+/g, ' ').trim().slice(0, 500) : '[binary omitted]',
         });
@@ -520,8 +528,15 @@ export class MiniSubscribeMessageService {
         environment: {
           nodeEnv: String(process.env.NODE_ENV || ''),
           tcbEnvId: String(process.env.TCB_ENV_ID || ''),
+          tcbEnv: String(process.env.TCB_ENV || ''),
+          wxCloudBaseRunEnv: String(process.env.WX_CLOUDBASE_RUN_ENV || ''),
+          wxCloudRunEnv: String(process.env.WX_RUN_ENV || ''),
           serviceName: String(process.env.K_SERVICE || process.env.TCB_SERVICE_NAME || process.env.SERVICE_NAME || ''),
           revision: String(process.env.K_REVISION || process.env.TCB_VERSION || process.env.GIT_COMMIT || ''),
+          wxAppId: this.maskDiagnosticValue(process.env.WX_APPID),
+          miniAppId: this.maskDiagnosticValue(process.env.WECHAT_MINI_APPID),
+          payAppId: this.maskDiagnosticValue(process.env.WECHAT_PAY_APPID),
+          miniAppSecretConfigured: Boolean(String(process.env.WECHAT_MINI_APPSECRET || '').trim()),
           apiBaseUrl: this.getWechatApiBaseUrl(),
           miniCodeEnvVersion: String(process.env.WECHAT_MINI_CODE_ENV_VERSION || 'release'),
         },
