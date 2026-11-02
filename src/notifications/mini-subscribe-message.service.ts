@@ -410,6 +410,10 @@ export class MiniSubscribeMessageService {
   async generateOrderClaimMiniCode(tokenInput: unknown) {
     const token = String(tokenInput || '').trim().toLowerCase();
     if (!/^[0-9a-f]{32}$/.test(token)) throw new Error('订单认领码格式无效');
+    const miniAppId = await this.systemConfigService.getString(
+      SystemConfigService.KEYS.WECHAT_MINI_APPID,
+      String(process.env.WECHAT_MINI_APPID || process.env.WECHAT_PAY_APPID || '').trim(),
+    );
     const requestBody = JSON.stringify({
       scene: token,
       page: 'pages/order-claim/index',
@@ -427,7 +431,12 @@ export class MiniSubscribeMessageService {
       accessToken = '',
       tokenParam: 'access_token' | 'cloudbase_access_token' = 'access_token',
     ) => {
-      const query = accessToken ? `?${tokenParam}=${encodeURIComponent(accessToken)}` : '';
+      const queryParams = new URLSearchParams();
+      if (accessToken) queryParams.set(tokenParam, accessToken);
+      // 云托管资源复用环境需要明确声明实际调用方小程序，否则开放接口代理
+      // 会使用环境默认主体，虽然路径已加入白名单仍会返回 48001。
+      if (baseUrl.startsWith('http://') && miniAppId) queryParams.set('from_appid', miniAppId);
+      const query = queryParams.size ? `?${queryParams.toString()}` : '';
       const startedAt = Date.now();
       try {
         const response = await fetch(`${baseUrl}/wxa/getwxacodeunlimit${query}`, {
@@ -442,6 +451,7 @@ export class MiniSubscribeMessageService {
           stage,
           baseUrl,
           authMode: accessToken ? tokenParam : 'cloud-open-api',
+          fromAppId: baseUrl.startsWith('http://') ? this.maskDiagnosticValue(miniAppId) : '',
           status: response.status,
           contentType,
           bytes: buffer.length,
@@ -461,6 +471,7 @@ export class MiniSubscribeMessageService {
           stage,
           baseUrl,
           authMode: accessToken ? tokenParam : 'cloud-open-api',
+          fromAppId: baseUrl.startsWith('http://') ? this.maskDiagnosticValue(miniAppId) : '',
           durationMs: Date.now() - startedAt,
           networkError: this.describeNetworkError(error),
         };
