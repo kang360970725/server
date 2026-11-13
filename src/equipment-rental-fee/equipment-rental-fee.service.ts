@@ -145,10 +145,11 @@ export class EquipmentRentalFeeService {
     const periodEnd = endDate && endDate < bill.periodEnd ? endDate : bill.periodEnd;
     const day = 86400000;
     const billableDays = Math.max(0, Math.floor((periodEnd.getTime() - periodStart.getTime()) / day) + 1);
-    const daysInPeriod = Math.floor((bill.periodEnd.getTime() - bill.periodStart.getTime()) / day) + 1;
+    const originalEnd = bill.dueAt ? bill.dueAt.getTime() - 1 : bill.periodEnd.getTime();
+    const daysInPeriod = Math.floor((originalEnd - bill.periodStart.getTime()) / day) + 1;
     return {
       periodStart: bill.periodStart,
-      periodEnd: bill.periodEnd,
+      periodEnd: periodEnd >= bill.periodStart ? periodEnd : bill.periodEnd,
       dueAt: bill.dueAt,
       amount: round2(Number(contract.monthlyAmount) * billableDays / daysInPeriod),
     };
@@ -317,8 +318,12 @@ export class EquipmentRentalFeeService {
     return { list, total, page, limit };
   }
 
-  async generateBillsForMonth(monthInput: string, operatorId?: number) {
+  async generateBillsForMonth(monthInput: string, operatorId?: number, manual = Boolean(operatorId)) {
     const month = this.normalizeMonth(monthInput);
+    const currentShanghaiMonth = this.formatMonth(new Date(Date.now() + 8 * 60 * 60 * 1000));
+    if (manual && month >= currentShanghaiMonth) {
+      throw new BadRequestException('只能手动生成已结束月份的设备租赁账单');
+    }
     const months = month >= CALENDAR_BILLING_TRANSITION_MONTH
       ? [...new Set([LAST_LEGACY_SERVICE_MONTH, CALENDAR_BILLING_TRANSITION_MONTH, month])]
       : [month];

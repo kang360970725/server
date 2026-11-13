@@ -67,6 +67,20 @@ describe('EquipmentRentalFeeService', () => {
     expect(prisma.equipmentRentalContract.create).not.toHaveBeenCalled();
   });
 
+  it('rejects manual generation until the billing month has ended in Shanghai', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-30T15:59:59Z'));
+    const prisma = { equipmentRentalContract: { findMany: jest.fn().mockResolvedValue([]) } } as any;
+    const service = new EquipmentRentalFeeService(prisma);
+    try {
+      await expect(service.generateBillsForMonth('2026-11', undefined, true)).rejects.toThrow('只能手动生成已结束月份');
+      expect(prisma.equipmentRentalContract.findMany).not.toHaveBeenCalled();
+      jest.setSystemTime(new Date('2026-11-30T16:00:00Z'));
+      await expect(service.generateBillsForMonth('2026-11', undefined, true)).resolves.toMatchObject({ affected: 0 });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('generates the previous natural-month bill on the next month first day', async () => {
     const createdBills: any[] = [];
     const prisma = {
