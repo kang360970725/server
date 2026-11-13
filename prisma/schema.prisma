@@ -2097,6 +2097,7 @@ model EquipmentRentalBill {
   contractId      Int
   userId          Int
   billMonth       String                    @db.VarChar(7)
+  billingSlot     Int                       @default(0)
   periodStart     DateTime
   periodEnd       DateTime
   amount          Decimal                   @db.Decimal(10, 2)
@@ -2114,7 +2115,7 @@ model EquipmentRentalBill {
   user            User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
   walletTx        WalletTransaction?        @relation("EquipmentRentalWalletTx", fields: [walletTxId], references: [id])
 
-  @@unique([contractId, billMonth], map: "uniq_equipment_rental_contract_month")
+  @@unique([contractId, billMonth, billingSlot], map: "uniq_equipment_rental_contract_month_slot")
   @@index([userId, billMonth], map: "idx_equipment_rental_bill_user_month")
   @@index([status, billMonth], map: "idx_equipment_rental_bill_status_month")
   @@index([userId, status], map: "idx_equipment_rental_bill_user_status")

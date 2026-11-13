@@ -83,13 +83,17 @@ describe('EquipmentRentalFeeService', () => {
         ]),
       },
       equipmentRentalBill: {
-        findUnique: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
         create: jest.fn((payload) => {
           createdBills.push(payload.data);
           return Promise.resolve({ id: 41, ...payload.data });
         }),
       },
     } as any;
+    prisma.$transaction = jest.fn((callback) => callback(prisma));
+    prisma.equipmentRentalContract.findUnique = jest.fn(async ({ where }) =>
+      (await prisma.equipmentRentalContract.findMany()).find((contract) => contract.id === where.id),
+    );
     const service = new EquipmentRentalFeeService(prisma);
 
     await expect(service.generateBillsForMonth('2026-09')).resolves.toMatchObject({ month: '2026-09', affected: 1 });
@@ -116,13 +120,17 @@ describe('EquipmentRentalFeeService', () => {
         ]),
       },
       equipmentRentalBill: {
-        findUnique: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
         create: jest.fn((payload) => {
           createdBills.push(payload.data);
           return Promise.resolve({ id: 40 + createdBills.length, ...payload.data });
         }),
       },
     } as any;
+    prisma.$transaction = jest.fn((callback) => callback(prisma));
+    prisma.equipmentRentalContract.findUnique = jest.fn(async ({ where }) =>
+      (await prisma.equipmentRentalContract.findMany()).find((contract) => contract.id === where.id),
+    );
     const service = new EquipmentRentalFeeService(prisma);
 
     await expect(service.generateBillsForMonth('2026-09')).resolves.toMatchObject({ affected: 2 });
@@ -130,12 +138,46 @@ describe('EquipmentRentalFeeService', () => {
       expect.objectContaining({ contractId: 31, userId: 7, billMonth: '2026-09', amount: 100 }),
       expect.objectContaining({ contractId: 32, userId: 7, billMonth: '2026-09', amount: 80 }),
     ]));
-    expect(prisma.equipmentRentalBill.findUnique).toHaveBeenCalledWith(expect.objectContaining({
-      where: { contractId_billMonth: { contractId: 31, billMonth: '2026-09' } },
+    expect(prisma.equipmentRentalBill.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { contractId: 31, billMonth: '2026-09', billingSlot: { gte: 0 } },
     }));
-    expect(prisma.equipmentRentalBill.findUnique).toHaveBeenCalledWith(expect.objectContaining({
-      where: { contractId_billMonth: { contractId: 32, billMonth: '2026-09' } },
+    expect(prisma.equipmentRentalBill.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { contractId: 32, billMonth: '2026-09', billingSlot: { gte: 0 } },
     }));
+  });
+
+  it.each(['PAID', 'WAIVED'])('backfills only uncovered dates and overwrites a lower %s amount without a wallet debit', async (status) => {
+    const contract = {
+      id: 31, userId: 7, status: 'ACTIVE', monthlyAmount: 310,
+      startDate: new Date('2026-08-15'), endDate: new Date('2026-11-10'),
+    };
+    const bills = [
+      { billMonth: '2026-10', billingSlot: -1, periodStart: new Date('2026-09-15'), periodEnd: new Date('2026-10-14T23:59:59.999Z') },
+      { id: 51, billMonth: '2026-11', billingSlot: 0, status, amount: 310, paidAmount: 310, walletTxId: null },
+    ];
+    const prisma: any = {
+      $transaction: jest.fn((callback) => callback(prisma)),
+      equipmentRentalContract: { findMany: jest.fn().mockResolvedValue([contract]), findUnique: jest.fn().mockResolvedValue(contract) },
+      equipmentRentalBill: {
+        findFirst: jest.fn().mockResolvedValue(bills[0]),
+        findMany: jest.fn(({ where }) => where.billingSlot === -1
+          ? bills.filter((bill) => bill.billingSlot === -1 && bill.periodStart <= where.periodStart.lte
+              && bill.periodEnd >= where.periodEnd.gte)
+          : bills.filter((bill) => (!where.billingSlot || bill.billingSlot >= 0) && bill.billMonth === where.billMonth)),
+        create: jest.fn(({ data }) => { bills.push(data); return data; }),
+        update: jest.fn(({ where, data }) => Object.assign(bills.find((bill) => bill.id === where.id), data)),
+      },
+    };
+    const service = new EquipmentRentalFeeService(prisma);
+
+    await expect(service.generateBillsForMonth('2026-11')).resolves.toMatchObject({ affected: 3, reconciliations: [] });
+    expect(bills).toEqual(expect.arrayContaining([
+      expect.objectContaining({ billMonth: '2026-09', periodEnd: new Date('2026-09-14T23:59:59Z'), amount: 144.67 }),
+      expect.objectContaining({ billMonth: '2026-10', billingSlot: 0, periodStart: new Date('2026-10-15'), amount: 170 }),
+      expect.objectContaining({ id: 51, status, amount: 103.33, paidAmount: 103.33, remainingAmount: 0 }),
+    ]));
+    await service.generateBillsForMonth('2026-11');
+    expect(prisma.equipmentRentalBill.create).toHaveBeenCalledTimes(2);
   });
 
   it('creates a prorated equipment bill through the staff exit date', async () => {
@@ -157,7 +199,7 @@ describe('EquipmentRentalFeeService', () => {
           createdBill = { id: 91, ...data };
           return createdBill;
         }),
-        findMany: jest.fn().mockImplementation(() => [createdBill]),
+        findMany: jest.fn().mockImplementation(({ where }) => where.billingSlot === -1 ? [] : [createdBill]),
       },
     };
     const service = new EquipmentRentalFeeService({} as any);
@@ -193,7 +235,8 @@ describe('EquipmentRentalFeeService', () => {
         }]),
       },
       equipmentRentalBill: {
-        findUnique: jest.fn().mockResolvedValue({
+        findMany: jest.fn(({ where }) => where.billingSlot === -1 ? [] : [{
+          billingSlot: 0,
           id: 41,
           userId: 7,
           billMonth: '2026-09',
@@ -203,11 +246,15 @@ describe('EquipmentRentalFeeService', () => {
           walletTxId: 91,
           user: { id: 7, name: '测试服务者' },
           walletTx: { id: 91, amount: 100, sourceType: 'EQUIPMENT_RENTAL_BILL_SELF_CONFIRM', reversals: [] },
-        }),
+        }]),
         update: jest.fn(),
       },
       userLog: { findFirst: jest.fn().mockResolvedValue(null) },
     } as any;
+    prisma.$transaction = jest.fn((callback) => callback(prisma));
+    prisma.equipmentRentalContract.findUnique = jest.fn(async ({ where }) =>
+      (await prisma.equipmentRentalContract.findMany()).find((contract) => contract.id === where.id),
+    );
     const service = new EquipmentRentalFeeService(prisma);
 
     await expect(service.generateBillsForMonth('2026-09', 1)).resolves.toMatchObject({
@@ -342,7 +389,7 @@ describe('EquipmentRentalFeeService', () => {
     expect(result).toMatchObject({ id: 13, status: 'PAID', walletTxId: null });
     expect(tx.equipmentRentalBill.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: 13 },
+        where: expect.objectContaining({ id: 13 }),
         data: expect.objectContaining({
           paidAmount: 120,
           remainingAmount: 0,
@@ -377,7 +424,7 @@ describe('EquipmentRentalFeeService', () => {
     await service.confirmPaidByOtherChannel(14, 1, '线下实收调整', 88);
 
     expect(tx.equipmentRentalBill.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: 14 },
+      where: expect.objectContaining({ id: 14 }),
       data: expect.objectContaining({ amount: 88, paidAmount: 88, remainingAmount: 0, status: 'PAID' }),
     }));
     await expect(service.confirmPaidByOtherChannel(14, 1, '  ', 88)).rejects.toThrow('请填写其他渠道缴费说明');
