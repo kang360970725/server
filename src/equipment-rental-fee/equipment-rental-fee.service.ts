@@ -423,7 +423,7 @@ export class EquipmentRentalFeeService {
               const paidAmount = settled ? amount : Math.min(amount, Number(existing.paidAmount));
               const remainingAmount = round2(amount - paidAmount);
               const updated = await db.equipmentRentalBill.update({
-                where: { id: existing.id, walletTxId: null, updatedAt: existing.updatedAt },
+                where: { id: existing.id, updatedAt: existing.updatedAt, AND: { walletTxId: null } },
                 data: {
                   contractId: contract.id,
                   periodStart,
