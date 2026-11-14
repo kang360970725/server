@@ -8732,6 +8732,7 @@ export class OrdersService {
         dryRun?: boolean;
         applyRepair?: boolean;
         settlementBaseAmount?: number;
+        settlementBaseMode?: 'PAID_AMOUNT' | 'SETTLEMENT_BASE_AMOUNT';
         type?: '' | 'RECALCULATE';
         scope?: 'COMPLETED_AND_ARCHIVED' | 'COMPLETED_ONLY' | 'ARCHIVED_ONLY';
         modePlayAllocList?: any;
@@ -8753,6 +8754,7 @@ export class OrdersService {
             applyRepair = false,
             scope = 'COMPLETED_AND_ARCHIVED',
             settlementBaseAmount,
+            settlementBaseMode,
             modePlayAllocList,
             playerEvaluations,
             orderTipEnabled,
@@ -8799,6 +8801,9 @@ export class OrdersService {
             /**
              * Step 0：并发保护
              */
+            if (!dryRun || applyRepair) {
+                await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
+            }
             await this.assertOrderNotSettlingOrThrow(tx, orderId, '订单正在结算处理中，禁止历史结算修复');
 
             /**
@@ -8828,7 +8833,15 @@ export class OrdersService {
             const resolvedRepairSettlementBaseAmount =
                 successfulRefundTotal > 0
                     ? refundAdjustedSettlementBaseAmount
-                    : explicitSettlementBaseAmount ?? this.toDecimal2(this.getSettlementBaseAmountFromOrder(order));
+                    : settlementBaseMode
+                      ? this.getSettlementBaseAmountForConfirmation(order, this.normalizeSettlementBaseMode(settlementBaseMode))
+                      : explicitSettlementBaseAmount ?? this.toDecimal2(this.getSettlementBaseAmountFromOrder(order));
+
+            if (explicitSettlementBaseAmount !== null && this.getBillingModeFromOrder(order) === BillingMode.HOURLY
+                && !order.customerUserId && order.isGifted !== true
+                && explicitSettlementBaseAmount > Math.max(this.getSettlementBaseAmountFromOrder(order), refundAdjustedSettlementBaseAmount)) {
+                throw new BadRequestException(`手动结算金额不能超过当前结算基数或剩余实收中的较高金额`);
+            }
 
             const repairOrder = {
                 ...order,
@@ -8963,10 +8976,11 @@ export class OrdersService {
                 planToApply = cached.settlementsToCreate;
             }
 
-            if (explicitSettlementBaseAmount) {
+            if ((explicitSettlementBaseAmount !== null || settlementBaseMode || successfulRefundTotal > 0)
+                && resolvedRepairSettlementBaseAmount !== Number(order.settlementBaseAmount ?? 0)) {
                 await tx.order.update({
                     where: {id: orderId},
-                    data: {settlementBaseAmount: explicitSettlementBaseAmount},
+                    data: {settlementBaseAmount: resolvedRepairSettlementBaseAmount},
                 });
             }
 
@@ -8975,7 +8989,7 @@ export class OrdersService {
              */
             const result = await this.applySettlementPlanTx({
                 tx,
-                order,
+                order: repairOrder,
                 operatorId,
                 settlementsToCreate: planToApply,
                 mode: 'REPAIR_REBUILD',

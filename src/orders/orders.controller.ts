@@ -588,6 +588,7 @@ export class OrdersController {
             dryRun?: boolean;
             applyRepair?: boolean;
             settlementBaseAmount?: number;
+            settlementBaseMode?: 'PAID_AMOUNT' | 'SETTLEMENT_BASE_AMOUNT';
             modePlayAllocList?: any;
             playerEvaluations?: any;
             orderTipEnabled?: boolean;
@@ -615,6 +616,7 @@ export class OrdersController {
             dryRun: body?.dryRun ?? true, // ✅ 默认 dryRun（防误操作）
             applyRepair: body?.applyRepair ?? false, // ✅ 默认 applyRepair（防误操作）
             settlementBaseAmount: body?.settlementBaseAmount,
+            settlementBaseMode: body?.settlementBaseMode,
             modePlayAllocList: body?.modePlayAllocList,
             playerEvaluations: body?.playerEvaluations,
             orderTipEnabled: body?.orderTipEnabled,
