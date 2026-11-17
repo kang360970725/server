@@ -687,7 +687,7 @@ export class MiniSubscribeMessageService {
     }
   }
 
-  async pushOrderProgressMessage(orderId: number, remark?: string, explicitStatusText?: string) {
+  async pushOrderProgressMessage(orderId: number, remark?: string, explicitStatusText?: string, existingStationNotificationId?: number) {
     const order = await this.prisma.order.findUnique({
       where: { id: Number(orderId) },
       select: {
@@ -709,7 +709,7 @@ export class MiniSubscribeMessageService {
     const stationContent = String(remark || `订单当前状态：${statusText}`).trim();
 
     // 站内信不依赖微信订阅授权，始终作为订单进度通知的可靠兜底。
-    const stationNotification = await this.prisma.userNotification.create({
+    const stationNotification = existingStationNotificationId ? { id: existingStationNotificationId } : await this.prisma.userNotification.create({
       data: {
         userId: Number(order.customerUserId),
         type: NotificationType.ORDER_PROGRESS,

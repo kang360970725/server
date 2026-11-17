@@ -1,3 +1,4 @@
+import { activateTournamentTicket, voidTournamentTicket } from '../live-tournament/live-tournament.orders';
 import {
   BadGatewayException,
   BadRequestException,
@@ -1118,6 +1119,7 @@ export class ShouqianbaService {
               payStatus: OrderPayStatus.FAILED,
             },
           });
+          await voidTournamentTicket(tx, order.id);
           if (order.dispatcherId) {
             await tx.userLog.create({
               data: {
@@ -1255,6 +1257,7 @@ export class ShouqianbaService {
             : undefined,
         },
       });
+      await activateTournamentTicket(tx, order.id);
       return order.id;
     });
     if (paidOrderId) {

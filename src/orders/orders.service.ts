@@ -1,3 +1,9 @@
+import { canMemberEnterTournament, tournamentMemberEligibilitySelect } from '../live-tournament/live-tournament.eligibility';
+import { recordTournamentReminder, tournamentReminderCandidates, tournamentWechatScheduleRemark } from '../live-tournament/live-tournament.reminders';
+import { closeTournamentLeaderboard, publishTournamentRound } from '../live-tournament/live-tournament.scores';
+import { getTournamentStage, updateTournamentStage } from '../live-tournament/live-tournament.stage';
+import { adminRescheduleTournamentEntry, bookTournament, tournamentDate, tournamentText, updateTournamentQueue } from '../live-tournament/live-tournament.operations';
+import { activateTournamentTicket, lockTournamentTicket, prepareTournamentTicket, saveTournamentRound, voidTournamentTicket } from '../live-tournament/live-tournament.orders';
 import {BadRequestException, ConflictException, Injectable, Logger, NotFoundException, ServiceUnavailableException} from '@nestjs/common';
 import {PrismaService} from '../prisma/prisma.service';
 import {CreateOrderDto} from './dto/create-order.dto';
@@ -22,6 +28,7 @@ import {
     WalletTxStatus,
     MemberPointBizType,
     MemberPointDirection,
+    Prisma,
 } from '@prisma/client';
 import {WalletService} from '../wallet/wallet.service';
 import {randomBytes, randomInt, randomUUID} from 'crypto';
@@ -2208,7 +2215,7 @@ export class OrdersService {
         const [user, project] = await Promise.all([
             this.prisma.user.findUnique({
                 where: {id: userId},
-                select: {id: true},
+                select: {id: true, ...tournamentMemberEligibilitySelect},
             }),
             this.prisma.gameProject.findUnique({
                 where: {id: projectId},
@@ -2239,8 +2246,21 @@ export class OrdersService {
                 },
             }),
         ]);
+        const tournament = await this.prisma.liveTournament?.findFirst({
+            where: {gameProjectId: projectId},
+            select: {id: true},
+        });
+        const pastPurchase = tournament && await this.prisma.order.findFirst({
+            where: {customerUserId: userId, isPaid: true, paidAmount: {gt: 0}, isGifted: false, status: 'COMPLETED'},
+            select: {id: true},
+        });
         const memberDiscountAmount = this.toAmount2(Number(discount.amount || 0));
         return {
+            ...(tournament ? {tournamentTicket: {
+                certifiedProvider: user.userType === UserType.STAFF,
+                purchaseBlocked: !canMemberEnterTournament(user),
+                hasPastPurchase: Boolean(pastPurchase),
+            }} : {}),
             memberDiscount: {
                 applied: memberDiscountAmount > 0,
                 levelCode: discount.levelCode,
@@ -2818,8 +2838,20 @@ export class OrdersService {
             },
         });
 
+        const isAnonymousReview = Boolean(order.review?.anonymous);
+        const safeReview = order.review
+            ? {
+                ...order.review,
+                user: isAnonymousReview ? null : order.review.user,
+            }
+            : null;
+
         return {
             ...order,
+            // 匿名评价只允许从脱敏后的评价管理入口查看，避免由订单详情反查会员。
+            review: isAnonymousReview ? null : safeReview,
+            playerEvaluations: isAnonymousReview ? [] : order.playerEvaluations,
+            dispatcherReview: isAnonymousReview ? null : order.dispatcherReview,
             latestPayment: payment,
             latestPaymentId: payment.id,
             paymentTime: order?.paymentTime ? new Date(order.paymentTime) : paidAt,
@@ -3218,6 +3250,15 @@ export class OrdersService {
         }
 
         const order = await this.prisma.$transaction(async (tx) => {
+            const tournamentId = await prepareTournamentTicket(tx, {
+                projectId: project.id,
+                memberId: customerUserId,
+                quantity: Number(dto.orderQuantity ?? 1),
+                admin: scene === 'ADMIN',
+                gifted: isGifted,
+                paidOrOnline: (isPaid && !useMemberBalancePayment) || useShouqianbaPendingPayment,
+                manualDispatch: playerIds.length > 0,
+            });
             const createdOrder = await tx.order.create({
                 data: {
                     orderQuantity: Number(dto.orderQuantity ?? 1),
@@ -3384,6 +3425,12 @@ export class OrdersService {
                     data: {usedCount: {increment: 1}},
                 });
             }
+            if (tournamentId !== null) {
+                await tx.liveTournamentEntry.create({
+                    data: {tournamentId, orderId: createdOrder.id, memberId: customerUserId!, activeMemberId: customerUserId!},
+                });
+                if (isPaid) await activateTournamentTicket(tx, createdOrder.id);
+            }
             return createdOrder;
         });
 
@@ -3434,7 +3481,6 @@ export class OrdersService {
 
         const keywordAsSerial = String(query.keyword || '').trim();
         const exactSerial = String(query.serial || (/^V[0-9A-Z]{8,32}$/i.test(keywordAsSerial) ? keywordAsSerial : '')).trim();
-        // 超过 90 天只允许通过完整订单号精确查询，普通列表默认限制在最近 90 天。
         if (exactSerial) where.autoSerial = exactSerial;
         if (query.projectId) where.projectId = query.projectId;
         // 草稿和已取消订单不进入日常订单列表；取消记录仍可通过订单号直达详情审计。
@@ -3580,6 +3626,30 @@ export class OrdersService {
         ]);
 
         const optionList = await this.getOrderSourceOptions();
+        const tournamentEntries = rows.length && this.prisma.liveTournamentEntry
+            ? await this.prisma.liveTournamentEntry.findMany({
+                where: {orderId: {in: rows.map((row: any) => Number(row.id))}},
+                select: {
+                    id: true, orderId: true, status: true, queuePosition: true, providerId: true,
+                    competitionName: true, gameNickname: true,
+                    tournament: {select: {title: true}},
+                },
+            })
+            : [];
+        const providerIds = [...new Set(tournamentEntries.map((entry: any) => Number(entry.providerId)).filter(Boolean))];
+        const tournamentProviders = providerIds.length
+            ? await this.prisma.user.findMany({where: {id: {in: providerIds}}, select: {id: true, name: true}})
+            : [];
+        const providerNameById = new Map(tournamentProviders.map((provider: any) => [Number(provider.id), provider.name]));
+        const tournamentByOrderId = new Map(tournamentEntries.map((entry: any) => [Number(entry.orderId), {
+            id: entry.id,
+            status: entry.status,
+            queuePosition: entry.queuePosition,
+            competitionName: entry.competitionName || entry.gameNickname,
+            providerId: entry.providerId,
+            providerName: entry.providerId ? providerNameById.get(Number(entry.providerId)) || null : null,
+            title: entry.tournament?.title || null,
+        }]));
         const sourceLabelMap = new Map(optionList.map((item) => [item.value, item.label]));
         const paymentChannelLabelMap: Record<string, string> = {
             BALANCE: '会员储值',
@@ -3594,6 +3664,7 @@ export class OrdersService {
         };
         const data = rows.map((row: any) => ({
             ...row,
+            liveTournament: tournamentByOrderId.get(Number(row.id)) || null,
             orderSource: String(row?.orderSource || '').trim() || 'CUSTOMER_SERVICE_MANUAL',
             orderSourceLabel: sourceLabelMap.get(String(row?.orderSource || '').trim() || 'CUSTOMER_SERVICE_MANUAL') || '客服手动派单',
             paymentChannel: String(row?.latestPayment?.channel || '').trim().toUpperCase() || null,
@@ -3641,7 +3712,15 @@ export class OrdersService {
                     },
                 },
                 review: {
-                    select: {id: true},
+                    select: {
+                        id: true, score: true, tags: true, content: true, anonymous: true,
+                        isHidden: true, hiddenReason: true, createdAt: true, updatedAt: true,
+                        user: {select: {id: true, name: true, phone: true, avatar: true}},
+                    },
+                },
+                playerEvaluations: {
+                    include: {player: {select: {id: true, name: true, phone: true, avatar: true}}},
+                    orderBy: {createdAt: 'asc'},
                 },
 
                 // ✅ 当前派单批次
@@ -3744,6 +3823,17 @@ export class OrdersService {
         if (!order) {
             throw new NotFoundException('订单不存在');
         }
+
+        const dispatcherReviewLog = await this.prisma.userLog.findFirst({
+            where: {action: 'MINI_ORDER_DISPATCHER_REVIEW', targetType: 'ORDER', targetId: id},
+            orderBy: {createdAt: 'desc'},
+            select: {id: true, newData: true, createdAt: true},
+        });
+        order.dispatcherReview = dispatcherReviewLog ? {
+            ...(dispatcherReviewLog.newData && typeof dispatcherReviewLog.newData === 'object' ? dispatcherReviewLog.newData : {}),
+            logId: dispatcherReviewLog.id,
+            createdAt: dispatcherReviewLog.createdAt,
+        } : null;
 
         const shouldKeepDispatchParticipant = (dispatch: any, participant: any) => {
             if (!participant) return false;
@@ -4046,6 +4136,106 @@ export class OrdersService {
         };
     }
 
+    async listOrderReviews(query: {
+        page?: number;
+        limit?: number;
+        keyword?: string;
+        scoreMin?: number | string;
+        scoreMax?: number | string;
+        anonymous?: boolean | string;
+        startAt?: string;
+        endAt?: string;
+    }) {
+        const page = Math.max(1, Number(query.page || 1));
+        const limit = Math.min(100, Math.max(1, Number(query.limit || 20)));
+        const keyword = String(query.keyword || '').trim();
+        const scoreMin = query.scoreMin === '' || query.scoreMin == null ? undefined : Number(query.scoreMin);
+        const scoreMax = query.scoreMax === '' || query.scoreMax == null ? undefined : Number(query.scoreMax);
+        const anonymous = query.anonymous === '' || query.anonymous == null
+            ? undefined
+            : query.anonymous === true || query.anonymous === 'true';
+        const createdAt: Prisma.DateTimeFilter = {};
+        if (query.startAt) {
+            const value = new Date(query.startAt);
+            if (Number.isFinite(value.getTime())) createdAt.gte = value;
+        }
+        if (query.endAt) {
+            const value = new Date(query.endAt);
+            if (Number.isFinite(value.getTime())) createdAt.lte = value;
+        }
+        const where: Prisma.ProductReviewWhereInput = {
+            ...(anonymous === undefined ? {} : {anonymous}),
+            ...(scoreMin === undefined && scoreMax === undefined ? {} : {score: {
+                ...(Number.isFinite(scoreMin) ? {gte: scoreMin} : {}),
+                ...(Number.isFinite(scoreMax) ? {lte: scoreMax} : {}),
+            }}),
+            ...(Object.keys(createdAt).length ? {createdAt} : {}),
+            ...(keyword ? {OR: [
+                {content: {contains: keyword}},
+                {AND: [{anonymous: false}, {order: {autoSerial: {contains: keyword}}}]},
+                {project: {name: {contains: keyword}}},
+                {AND: [{anonymous: false}, {user: {name: {contains: keyword}}}]},
+                {AND: [{anonymous: false}, {user: {phone: {contains: keyword}}}]},
+            ]} : {}),
+        };
+        const [rows, total] = await this.prisma.$transaction([
+            this.prisma.productReview.findMany({
+                where,
+                orderBy: {createdAt: 'desc'},
+                skip: (page - 1) * limit,
+                take: limit,
+                include: {
+                    project: {select: {id: true, name: true}},
+                    user: {select: {id: true, name: true, phone: true, avatar: true}},
+                    order: {select: {
+                        id: true, autoSerial: true, status: true,
+                        playerEvaluations: {
+                            include: {player: {select: {id: true, name: true, phone: true, avatar: true}}},
+                            orderBy: {createdAt: 'asc'},
+                        },
+                    }},
+                },
+            }),
+            this.prisma.productReview.count({where}),
+        ]);
+        const orderIds = rows.map(row => row.orderId);
+        const dispatcherLogs = orderIds.length ? await this.prisma.userLog.findMany({
+            where: {
+                action: 'MINI_ORDER_DISPATCHER_REVIEW', targetType: 'ORDER',
+                targetId: {in: orderIds},
+            },
+            orderBy: {createdAt: 'desc'},
+            select: {id: true, targetId: true, newData: true, createdAt: true},
+        }) : [];
+        const dispatcherByOrder = new Map<number, any>();
+        for (const log of dispatcherLogs) {
+            const orderId = Number(log.targetId || 0);
+            if (!orderId || dispatcherByOrder.has(orderId)) continue;
+            dispatcherByOrder.set(orderId, {
+                ...(log.newData && typeof log.newData === 'object' ? log.newData : {}),
+                logId: log.id,
+                createdAt: log.createdAt,
+            });
+        }
+        return {
+            data: rows.map(row => {
+                const isAnonymous = Boolean(row.anonymous);
+                return {
+                    ...row,
+                    orderId: isAnonymous ? null : row.orderId,
+                    order: isAnonymous ? null : row.order,
+                    user: isAnonymous ? null : row.user,
+                    playerEvaluations: row.order.playerEvaluations,
+                    dispatcherReview: dispatcherByOrder.get(row.orderId) || null,
+                };
+            }),
+            total,
+            page,
+            limit,
+            totalPages: Math.ceil(total / limit),
+        };
+    }
+
     /*** -----------------------------
      * 取消订单方法
      * -----------------------------*/
@@ -4077,6 +4267,10 @@ export class OrdersService {
             if (!order) throw new NotFoundException('订单不存在');
             const forbidden = new Set(['COMPLETED', 'REFUNDED']);
             if (forbidden.has(String(order.status))) throw new BadRequestException('当前订单状态不可取消');
+
+            const tournamentTicket = await lockTournamentTicket(tx, orderId);
+            if (tournamentTicket && order.isPaid) throw new BadRequestException('已支付的赛事门票请通过退款处理');
+            if (tournamentTicket) await voidTournamentTicket(tx, orderId);
 
             if ((order as any).balanceSettlementMode === 'RESERVE_CAPTURE') {
                 await this.releaseMemberBalanceReservationTx(tx, orderId, remark || '取消订单');
@@ -4182,6 +4376,10 @@ export class OrdersService {
         });
 
         if (!order) throw new NotFoundException('订单不存在');
+
+        if (await this.prisma.liveTournamentEntry?.findUnique({where: {orderId}})) {
+            throw new BadRequestException('赛事门票由现场转盘分配服务者');
+        }
 
         // ✅ 防重复派单：若存在当前派单批次且仍处于待接/已接阶段，则禁止再次创建新一轮派单
         if (order.currentDispatchId) {
@@ -5727,6 +5925,9 @@ export class OrdersService {
             throw new BadRequestException('订单已退款，禁止重复退款');
         }
 
+        const tournamentEntry = await this.prisma.liveTournamentEntry?.findUnique({where: {orderId}});
+        if (tournamentEntry?.usedAt) throw new BadRequestException('已核销的赛事门票不可退款');
+
         const isReservedBalanceOrder = (order as any).balanceSettlementMode === 'RESERVE_CAPTURE';
         const reservation = (order as any).memberBalanceReservation;
         const isHeldReservedBalanceOrder =
@@ -5796,7 +5997,7 @@ export class OrdersService {
         const refundReason = remark ? String(remark).trim().slice(0, 80) : '订单退款';
         const refundNo = this.buildRefundNo(latestPaymentChannel, orderId);
 
-        const autoRefundTrace = shouldAutoRefund
+        const requestExternalRefund = async () => shouldAutoRefund
             ? await this.wechatPayService.refundTransaction({
                   outTradeNo: String((orderWithPayment as any)?.latestPayment?.paymentNo || '').trim(),
                   transactionId: String((orderWithPayment as any)?.latestPayment?.transactionId || '').trim() || undefined,
@@ -5860,6 +6061,8 @@ export class OrdersService {
             throw new BadRequestException('赔付分摊失败，请检查本单打手信息');
         }
 
+        let autoRefundTrace = tournamentEntry ? null : await requestExternalRefund();
+
         const now = new Date();
         let liabilityPenaltyResult: any = null;
         let compensationPenaltyResult: any = null;
@@ -5867,6 +6070,22 @@ export class OrdersService {
         const penaltyWarnings: string[] = [];
 
         await this.prisma.$transaction(async (tx) => {
+            if (tournamentEntry) {
+                await tx.$queryRaw`SELECT id FROM \`Order\` WHERE id = ${orderId} FOR UPDATE`;
+                const ticket = await lockTournamentTicket(tx, orderId);
+                if (!ticket || ticket.usedAt || ticket.status === 'VOID') {
+                    throw new BadRequestException('赛事门票已核销或已失效');
+                }
+                const currentRefunded = await tx.orderRefund.aggregate({
+                    where: {orderId, status: {in: ['SUCCESS', 'MANUAL_REQUIRED']}},
+                    _sum: {amount: true},
+                });
+                if (this.toAmount2(Number(currentRefunded._sum.amount || 0)) !== previouslyRefundedAmount) {
+                    throw new ConflictException('退款金额已变化，请刷新后重试');
+                }
+                autoRefundTrace = await requestExternalRefund();
+                if (!isPartialRefund && !manualRefundRequired) await voidTournamentTicket(tx, orderId);
+            }
             await tx.orderRefund.create({
                 data: {
                     orderId,
@@ -6113,7 +6332,7 @@ export class OrdersService {
 
             // 退款后及时同步订单财务快照，避免原成本继续占用月度利润。
             await this.rebuildPerformanceAndFinanceByOrderId({tx, orderId});
-        });
+        }, tournamentEntry ? {timeout: 60_000} : undefined);
 
         // 5) 退款后处罚（不阻断退款主流程）
         if (staffLiable && liableUserIds.length > 0) {
@@ -6226,6 +6445,375 @@ export class OrdersService {
      * 闭合待人工退款流水。
      * 订单冲正、收益回滚及处罚在首次发起退款时已经完成；这里绝不重复执行这些业务动作。
      */
+    async getLiveTournamentStage(dayId: number, internal = false) {
+        if (!Number.isSafeInteger(dayId) || dayId <= 0) throw new BadRequestException('请选择有效直播时段');
+        return getTournamentStage(this.prisma, dayId, internal);
+    }
+
+    async updateLiveTournamentStage(dayId: number, entryId: number, action: string) {
+        if (![dayId, entryId].every(id => Number.isSafeInteger(id) && id > 0)) {
+            throw new BadRequestException('请选择有效选手和直播时段');
+        }
+        await this.prisma.$transaction(tx => updateTournamentStage(tx, dayId, entryId, action), {
+            isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+        });
+        return this.getLiveTournamentStage(dayId, true);
+    }
+
+    async listLiveTournaments() {
+        return this.prisma.liveTournament.findMany({
+            orderBy: {id: 'desc'},
+            include: {days: {orderBy: {date: 'asc'}, include: {
+                quotas: true,
+                _count: {select: {entries: {where: {
+                    activeMemberId: {not: null}, status: {notIn: ['VOID', 'ABSENT']},
+                }}}},
+            }}},
+        });
+    }
+
+    async createLiveTournament(body: any) {
+        const title = tournamentText(body?.title, '赛事名称')!;
+        const gameProjectId = Number(body?.gameProjectId);
+        const salesStartAt = tournamentDate(body?.salesStartAt);
+        const salesEndAt = tournamentDate(body?.salesEndAt);
+        const bookingThreshold = Number(body?.bookingThreshold ?? 40);
+        const memberTicketLimit = Number(body?.memberTicketLimit ?? 1);
+        const providerFee = Number(body?.providerFee);
+        if (salesStartAt >= salesEndAt || !Number.isInteger(bookingThreshold) || bookingThreshold < 1 || bookingThreshold > 70 ||
+            !Number.isInteger(memberTicketLimit) || memberTicketLimit < 1 || memberTicketLimit > 70 ||
+            !Number.isSafeInteger(gameProjectId) || gameProjectId <= 0 ||
+            !Number.isFinite(providerFee) || providerFee < 0 || providerFee > 999999999) {
+            throw new BadRequestException('请核对赛事时间、商品及固定服务费');
+        }
+        return this.prisma.$transaction(async (tx) => {
+            await tx.$queryRaw`SELECT id FROM GameProject WHERE id = ${gameProjectId} FOR UPDATE`;
+            if (!(await tx.gameProject.findUnique({where: {id: gameProjectId}}))) throw new BadRequestException('门票商品不存在');
+            if (await tx.liveTournament.findFirst({where: {gameProjectId, status: {not: 'CLOSED'}}})) {
+                throw new BadRequestException('该商品已关联未结束赛事');
+            }
+            return tx.liveTournament.create({data: {title, gameProjectId, salesStartAt, salesEndAt, bookingThreshold, memberTicketLimit, providerFee}});
+        });
+    }
+
+    async addLiveTournamentDay(tournamentId: number, body: any) {
+        const startsAt = tournamentDate(body?.startsAt);
+        const endsAt = tournamentDate(body?.endsAt);
+        const capacity = Number(body?.capacity);
+        const dateKey = new Date(startsAt.getTime() + 8 * 3600_000).toISOString().slice(0, 10);
+        const tournament = await this.prisma.liveTournament.findUnique({where: {id: tournamentId}});
+        if (!tournament || tournament.status === 'CLOSED' || startsAt >= endsAt || !Number.isSafeInteger(capacity) || capacity < 1 || capacity > 70) {
+            throw new BadRequestException('请核对赛事时段及当日人数上限');
+        }
+        return this.prisma.liveTournamentDay.create({data: {tournamentId, date: new Date(dateKey), startsAt, endsAt, capacity}});
+    }
+
+    async generateLiveTournamentDays(tournamentId: number, body: any) {
+        const first = String(body?.firstDate ?? '');
+        const last = String(body?.lastDate ?? '');
+        const start = String(body?.dailyStart ?? '');
+        const end = String(body?.dailyEnd ?? '');
+        const capacity = Number(body?.capacity);
+        if (![first, last].every(date => /^\d{4}-\d{2}-\d{2}$/.test(date)) ||
+            ![start, end].every(time => /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) ||
+            start >= end || !Number.isInteger(capacity) || capacity < 1 || capacity > 70) {
+            throw new BadRequestException('请核对日期、每日直播时间和容量');
+        }
+        const from = tournamentDate(first);
+        const to = tournamentDate(last);
+        const dayMs = 86400000;
+        if (from.toISOString().slice(0, 10) !== first || to.toISOString().slice(0, 10) !== last ||
+            from > to || to.getTime() - from.getTime() >= 70 * dayMs) {
+            throw new BadRequestException('请选择有效日期范围，最多连续 70 天');
+        }
+        const days = [];
+        for (let timestamp = from.getTime(); timestamp <= to.getTime(); timestamp += dayMs) {
+            const date = new Date(timestamp);
+            const key = date.toISOString().slice(0, 10);
+            days.push({
+                tournamentId, date, capacity,
+                startsAt: tournamentDate(`${key}T${start}:00+08:00`),
+                endsAt: tournamentDate(`${key}T${end}:00+08:00`),
+            });
+        }
+        return this.prisma.$transaction(async tx => {
+            await tx.$queryRaw`SELECT id FROM LiveTournament WHERE id = ${tournamentId} FOR UPDATE`;
+            const event = await tx.liveTournament.findUnique({where: {id: tournamentId}});
+            if (!event || event.status === 'CLOSED') throw new BadRequestException('当前赛事不可排期');
+            const result = await tx.liveTournamentDay.createMany({data: days, skipDuplicates: true});
+            const bounds = await tx.liveTournamentDay.aggregate({
+                where: {tournamentId}, _min: {startsAt: true}, _max: {endsAt: true},
+            });
+            await tx.liveTournament.update({
+                where: {id: tournamentId}, data: {startsAt: bounds._min.startsAt, endsAt: bounds._max.endsAt},
+            });
+            return result;
+        });
+    }
+
+    async publishLiveTournament(id: number) {
+        return this.prisma.$transaction(async (tx) => {
+            await tx.$queryRaw`SELECT id FROM LiveTournament WHERE id = ${id} FOR UPDATE`;
+            const tournament = await tx.liveTournament.findUnique({where: {id}, include: {days: true}});
+            if (!tournament || tournament.status !== 'DRAFT') {
+                throw new BadRequestException('当前赛事不可发布');
+            }
+            return tx.liveTournament.update({where: {id}, data: {status: 'PUBLISHED'}});
+        });
+    }
+
+    async publishLiveTournamentRoster(dayId: number, quotas: {providerId: number; minimum: number; maximum: number}[]) {
+        if (!Array.isArray(quotas) || !quotas.length || quotas.length > 70 || quotas.some(row =>
+            !row || !Number.isSafeInteger(row.providerId) || row.providerId <= 0 ||
+            !Number.isSafeInteger(row.minimum) || !Number.isSafeInteger(row.maximum) ||
+            row.minimum < 0 || row.maximum < Math.max(1, row.minimum) || row.maximum > 70
+        ) || new Set(quotas.map(row => row.providerId)).size !== quotas.length) {
+            throw new BadRequestException('请检查服务者及保底、上限配置');
+        }
+        return this.prisma.$transaction(async (tx) => {
+            await tx.$queryRaw`SELECT id FROM LiveTournamentDay WHERE id = ${dayId} FOR UPDATE`;
+            const day = await tx.liveTournamentDay.findUnique({where: {id: dayId}, include: {tournament: true}});
+            if (!day || day.tournament.status === 'CLOSED') throw new BadRequestException('当前时段不可发布名单');
+            const providers = await tx.user.count({where: {
+                id: {in: quotas.map(row => row.providerId)}, userType: UserType.STAFF, status: 'ACTIVE',
+            }});
+            if (providers !== quotas.length) throw new BadRequestException('请选择有效的店内服务者');
+            const drawnEntries = await tx.liveTournamentEntry.findMany({
+                where: {dayId, activeMemberId: {not: null}, providerId: {not: null}},
+                select: {providerId: true},
+            });
+            const remaining = await tx.liveTournamentEntry.count({
+                where: {dayId, activeMemberId: {not: null}, providerId: null, status: {in: ['BOOKED', 'QUEUED', 'ON_STAGE']}},
+            });
+            const planned = day.startsAt <= new Date() || drawnEntries.length ? remaining : day.capacity;
+            const remainingQuotas = quotas.map(row => ({
+                ...row, drawn: drawnEntries.filter(entry => entry.providerId === row.providerId).length,
+            }));
+            if (drawnEntries.some(entry => !quotas.some(row => row.providerId === entry.providerId)) ||
+                remainingQuotas.some(row => row.drawn > row.maximum) ||
+                remainingQuotas.reduce((total, row) => total + Math.max(0, row.minimum - row.drawn), 0) > planned ||
+                remainingQuotas.reduce((total, row) => total + row.maximum - row.drawn, 0) < planned) {
+                throw new BadRequestException(`保留已抽中的服务者，调整保底和上限以覆盖剩余 ${planned} 次抽取`);
+            }
+            await tx.liveTournamentQuota.deleteMany({where: {dayId}});
+            await tx.liveTournamentQuota.createMany({data: quotas.map(({providerId, minimum, maximum}) => ({
+                dayId, providerId, minimum, maximum,
+            }))});
+            return tx.liveTournamentDay.update({where: {id: dayId}, data: {rosterPublishedAt: new Date()}});
+        });
+    }
+
+    async getLiveTournamentDayEntries(dayId: number) {
+        const entries = await this.prisma.liveTournamentEntry.findMany({
+            where: {dayId, activeMemberId: {not: null}},
+            orderBy: [{queuePosition: 'asc'}, {id: 'asc'}],
+            include: {rounds: true},
+        });
+        const completed = await this.prisma.order.findMany({
+            where: {id: {in: entries.map(entry => entry.orderId)}, status: OrderStatus.COMPLETED},
+            select: {id: true},
+        });
+        const completedIds = new Set(completed.map(order => order.id));
+        const statusOrder: Record<string, number> = {
+            ON_STAGE: 0, QUEUED: 1, BOOKED: 2, SCORING: 3, FINISHED: 4, ABSENT: 5, UNBOOKED: 6, VOID: 7,
+        };
+        return entries.map(entry => ({...entry, fulfilled: completedIds.has(entry.orderId)})).sort((a, b) => {
+            const statusDifference = (statusOrder[a.status] ?? 99) - (statusOrder[b.status] ?? 99);
+            if (statusDifference) return statusDifference;
+            if (a.status === 'QUEUED') {
+                return (a.queuePosition ?? Number.MAX_SAFE_INTEGER) - (b.queuePosition ?? Number.MAX_SAFE_INTEGER) || a.id - b.id;
+            }
+            return (b.onStageAt?.getTime() ?? 0) - (a.onStageAt?.getTime() ?? 0) || a.id - b.id;
+        });
+    }
+
+    async saveLiveTournamentQueue(dayId: number, orderedIds: number[], absentId?: number) {
+        if (!Array.isArray(orderedIds) || orderedIds.some(id => !Number.isSafeInteger(id) || id <= 0)) {
+            throw new BadRequestException('请选择有效的参赛选手');
+        }
+        await this.prisma.$transaction((tx) => updateTournamentQueue(tx, dayId, orderedIds, absentId));
+        return this.getLiveTournamentDayEntries(dayId);
+    }
+
+    async adminRescheduleLiveTournamentEntry(entryId: number, targetDayId: number) {
+        const saved = await this.prisma.$transaction(
+            tx => adminRescheduleTournamentEntry(tx, entryId, targetDayId),
+            {isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted},
+        );
+        try {
+            await this.miniSubscribeMessageService.pushOrderProgressMessage(
+                saved.orderId, tournamentWechatScheduleRemark(saved.startsAt), '场次调整',
+            );
+        } catch {}
+        return saved;
+    }
+
+    @Cron('0 * * * * *', {timeZone: 'Asia/Shanghai', waitForCompletion: true})
+    async remindLiveTournamentParticipants() {
+        const now = new Date();
+        const entries = await this.prisma.liveTournamentEntry.findMany({
+            where: tournamentReminderCandidates(now), select: {id: true},
+        });
+        for (const {id} of entries) {
+            try {
+                const reminder = await this.prisma.$transaction(tx => recordTournamentReminder(tx, id, new Date()), {
+                    isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+                });
+                if (reminder) {
+                    await this.miniSubscribeMessageService.pushOrderProgressMessage(
+                        reminder.orderId, reminder.wechatContent, '即将开赛', reminder.notificationId,
+                    );
+                }
+            } catch (error) {
+                this.logger.warn(`赛事赛前提醒失败 entry=${id}: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        }
+    }
+
+    async getMyLiveTournament(memberId: number, orderId: number) {
+        const entry = await this.prisma.liveTournamentEntry.findFirst({
+            where: {orderId, memberId},
+            include: {
+                rounds: {select: {roundNumber: true, publishedScore: true}},
+                tournament: {include: {days: {orderBy: {startsAt: 'asc'}, include: {
+                    _count: {select: {entries: {where: {activeMemberId: {not: null}, status: {notIn: ['VOID', 'ABSENT']}}}}},
+                }}}},
+            },
+        });
+        if (!entry) return null;
+        const member = await this.prisma.user.findUnique({
+            where: {id: memberId}, select: {name: true, phone: true, ...tournamentMemberEligibilitySelect},
+        });
+        const wechat = await this.prisma.userWechatBinding.findFirst({
+            where: {userId: memberId, platform: 'MINIAPP', nickname: {not: null}},
+            orderBy: {updatedAt: 'desc'}, select: {nickname: true},
+        });
+        const {tournament} = entry;
+        const paidTickets = await this.prisma.liveTournamentEntry.count({
+            where: {tournamentId: tournament.id, activeMemberId: {not: null}, status: {notIn: ['PENDING_PAYMENT', 'VOID']}},
+        });
+        const today = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
+        const rosterDay = tournament.days.find(day => day.date.toISOString().slice(0, 10) === today && day.rosterPublishedAt);
+        const stage = rosterDay && tournament.status === 'PUBLISHED'
+            ? await this.getLiveTournamentStage(rosterDay.id) : null;
+        const canBook = canMemberEnterTournament(member) && tournament.status === 'PUBLISHED' && Boolean(tournament.bookingOpenedAt) &&
+            !entry.firstRoundStartedAt && !entry.usedAt &&
+            ['UNBOOKED', 'BOOKED', 'QUEUED', 'ABSENT'].includes(entry.status);
+        return {
+            id: entry.id, orderId, status: entry.status, dayId: entry.dayId,
+            appearanceSequence: entry.appearanceSequence, queuePosition: entry.queuePosition,
+            contactName: entry.contactName || wechat?.nickname || member?.name, contactPhone: entry.contactPhone || member?.phone,
+            gameAccountId: entry.gameAccountId, gameNickname: entry.gameNickname,
+            gameRank: entry.gameRank, competitionName: entry.competitionName,
+            canBook, canReschedule: canBook && !entry.rescheduledAt, checkedIn: Boolean(entry.checkedInAt),
+            redeemed: Boolean(entry.usedAt), rounds: entry.rounds.filter(round => round.publishedScore),
+            title: tournament.title, closed: tournament.status === 'CLOSED', bookingOpen: Boolean(tournament.bookingOpenedAt),
+            bookingThreshold: tournament.bookingThreshold, paidTickets,
+            leaderboard: tournament.leaderboardSnapshot, providers: stage?.providers ?? [],
+            days: tournament.days.map(day => ({
+                id: day.id, startsAt: day.startsAt, endsAt: day.endsAt,
+                remaining: Math.max(0, day.capacity - day._count.entries),
+            })),
+        };
+    }
+
+    async bookLiveTournament(memberId: number, input: Record<string, unknown>) {
+        const booking = await this.prisma.$transaction((tx) => bookTournament(tx, memberId, input), {
+            isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+        });
+        if (booking.bookingChanged) {
+            try {
+                await this.miniSubscribeMessageService.pushOrderProgressMessage(
+                    booking.orderId, tournamentWechatScheduleRemark(booking.startsAt), booking.rescheduledAt ? '改约成功' : '预约成功',
+                );
+            } catch {}
+        }
+        return {id: booking.id, dayId: booking.dayId, status: booking.status};
+
+    }
+
+    async settleLiveTournamentTicket(orderId: number, operatorId: number) {
+        if (![orderId, operatorId].every(id => Number.isSafeInteger(id) && id > 0)) {
+            throw new BadRequestException('订单或操作人无效');
+        }
+        return this.prisma.$transaction(async (tx) => {
+            await tx.$queryRaw`SELECT id FROM \`Order\` WHERE id = ${orderId} FOR UPDATE`;
+            const order = await tx.order.findUnique({where: {id: orderId}, include: {project: true}});
+            const ticket = await tx.liveTournamentEntry.findUnique({
+                where: {orderId}, include: {tournament: true, rounds: true},
+            });
+            if (!order || !ticket || !ticket.usedAt || !ticket.providerId || ticket.status !== 'FINISHED' ||
+                !order.isPaid || order.status === OrderStatus.REFUNDED || order.status === OrderStatus.CANCELLED) {
+                throw new BadRequestException('请先确认门票有效且两局结果均已发布');
+            }
+            const first = ticket.rounds.find(round => round.roundNumber === 1);
+            const second = ticket.rounds.find(round => round.roundNumber === 2);
+            const firstScore = first?.publishedScore as Prisma.JsonObject | null | undefined;
+            const secondScore = second?.publishedScore as Prisma.JsonObject | null | undefined;
+            if (!first?.publishedAt || !firstScore || firstScore.forfeited || typeof firstScore.kills !== 'number' ||
+                !second?.publishedAt || !secondScore || typeof secondScore.kills !== 'number') {
+                throw new BadRequestException('须有有效首局成绩，并发布第二局成绩或弃权结果');
+            }
+            if (order.status === OrderStatus.COMPLETED && order.currentDispatchId) {
+                const existing = await tx.orderSettlement.findFirst({
+                    where: {orderId, dispatchId: order.currentDispatchId, userId: ticket.providerId},
+                    select: {settlementBatchId: true},
+                });
+                if (existing) return {orderId, settlementBatchId: existing.settlementBatchId, idempotent: true};
+            }
+            if (order.status !== OrderStatus.WAIT_ASSIGN || order.currentDispatchId ||
+                await tx.orderDispatch.count({where: {orderId}})) {
+                throw new BadRequestException('订单已有派单或履约记录，请核对后处理');
+            }
+            const fee = Number(ticket.tournament.providerFee);
+            const dispatch = await tx.orderDispatch.create({
+                data: {
+                    orderId, round: 1, status: DispatchStatus.COMPLETED, completedAt: new Date(),
+                    remark: '直播挑战赛整票履约',
+                    participants: {create: {userId: ticket.providerId}},
+                },
+            });
+            const completedOrder = await tx.order.update({
+                where: {id: orderId}, data: {currentDispatchId: dispatch.id}, include: {project: true, dispatches: true},
+            });
+            const result = await this.applySettlementPlanTx({
+                tx, order: completedOrder, operatorId, mode: 'FINAL_CONFIRM', reason: '直播挑战赛整票固定服务费',
+                settlementsToCreate: [{
+                    dispatchId: dispatch.id,
+                    userId: ticket.providerId,
+                    settlementType: 'REGULAR',
+                    calculatedEarnings: fee,
+                    finalEarnings: fee,
+                }],
+            });
+            await this.afterSettlementAppliedTx({
+                tx, orderId, operatorId, settlements: result.settlements,
+                action: 'LIVE_TOURNAMENT_SETTLE', orderStatusToUpdate: OrderStatus.COMPLETED,
+                remark: '直播挑战赛整票固定服务费',
+                logExtra: {fee, providerId: ticket.providerId, secondRoundForfeited: secondScore.forfeited === true},
+            });
+            return {orderId, settlementBatchId: result.settlementBatchId, idempotent: false};
+        }, {isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted});
+    }
+
+    async publishLiveTournamentRound(entryId: number, roundNumber: number) {
+        if (!Number.isSafeInteger(entryId) || entryId <= 0) throw new BadRequestException('请选择有效选手');
+        return this.prisma.$transaction(tx => publishTournamentRound(tx, entryId, roundNumber), {
+            isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+        });
+    }
+
+    async lockLiveTournamentLeaderboard(tournamentId: number) {
+        if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) throw new BadRequestException('请选择有效赛事');
+        return this.prisma.$transaction(tx => closeTournamentLeaderboard(tx, tournamentId));
+    }
+
+    async saveLiveTournamentRound(input: Parameters<typeof saveTournamentRound>[1]) {
+        return this.prisma.$transaction((tx) => saveTournamentRound(tx, input), {
+            isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+        });
+    }
+
     async confirmManualRefund(refundIdInput: number, operatorIdInput: number, remarkInput?: string) {
         const refundId = Number(refundIdInput);
         const operatorId = Number(operatorIdInput);
@@ -6282,6 +6870,7 @@ export class OrdersService {
                 if (String(current?.status || '') === 'SUCCESS') return current;
                 throw new BadRequestException('退款状态已变化，请刷新后重试');
             }
+            if (existing.refundType === 'FULL') await voidTournamentTicket(tx, Number(existing.orderId));
             return tx.orderRefund.findUnique({where: {id: refundId}});
         });
 
@@ -6652,6 +7241,15 @@ export class OrdersService {
             await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
             const current = await tx.order.findUnique({where: {id: orderId}});
             if (!current) throw new NotFoundException('订单不存在');
+            const tournamentTicket = await lockTournamentTicket(tx, orderId);
+            const changingTicketIdentity =
+                (data.customerUserId !== undefined && data.customerUserId !== current.customerUserId) ||
+                (data.projectId !== undefined && data.projectId !== current.projectId) ||
+                (data.orderQuantity !== undefined && data.orderQuantity !== current.orderQuantity);
+            if (changingTicketIdentity && (tournamentTicket || (data.projectId !== undefined &&
+                await tx.liveTournament?.findFirst({where: {gameProjectId: data.projectId}, select: {id: true}})))) {
+                throw new BadRequestException('赛事门票商品、购买数量和绑定会员须通过客服售票流程确认');
+            }
             // 已收款金额与日期不能通过普通编辑回写，否则会修改历史日收入。
             if (
                 current.isPaid &&
@@ -8814,6 +9412,10 @@ export class OrdersService {
                 orderId,
                 scope,
             });
+
+            if (await tx.liveTournamentEntry?.findUnique({where: {orderId}, select: {id: true}})) {
+                throw new BadRequestException('赛事门票使用固定服务费，不能按普通订单规则重算');
+            }
 
             const successfulRefundTotal = this.toDecimal2(
                 (order?.refunds || []).reduce((sum: number, item: any) => sum + Number(item?.amount || 0), 0),

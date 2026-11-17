@@ -3,7 +3,7 @@ import { OrdersController } from './orders.controller';
 describe('OrdersController list', () => {
   it('forwards the month filter and normalized pagination to the service', async () => {
     const listOrders = jest.fn().mockResolvedValue({ data: [], total: 0 });
-    const controller = new OrdersController({ listOrders } as any, {} as any);
+    const controller = new OrdersController({ listOrders } as any, {} as any, {} as any);
 
     await controller.list({
       page: '2',
@@ -20,7 +20,7 @@ describe('OrdersController list', () => {
 
   it('does not forward an empty month filter', async () => {
     const listOrders = jest.fn().mockResolvedValue({ data: [], total: 0 });
-    const controller = new OrdersController({ listOrders } as any, {} as any);
+    const controller = new OrdersController({ listOrders } as any, {} as any, {} as any);
 
     await controller.list({ orderMonth: '' });
 

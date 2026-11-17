@@ -1,3 +1,4 @@
+import { Public } from '../auth/decorators/public.decorator';
 import {
     Body,
     Controller,
@@ -123,6 +124,23 @@ export class OrdersController {
             keyword: body?.keyword,
             page: Number(body?.page ?? 1),
             limit: Number(body?.limit ?? 20),
+        });
+    }
+
+    /** 小程序订单评价（管理端） */
+    @Post('reviews/list')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:list:page')
+    async orderReviews(@Body() body: any) {
+        return this.ordersService.listOrderReviews({
+            page: Number(body?.page ?? 1),
+            limit: Number(body?.limit ?? 20),
+            keyword: body?.keyword,
+            scoreMin: body?.scoreMin,
+            scoreMax: body?.scoreMax,
+            anonymous: body?.anonymous,
+            startAt: body?.startAt,
+            endAt: body?.endAt,
         });
     }
 
@@ -355,6 +373,76 @@ export class OrdersController {
     }
 
     /** 确认结算 */
+    @Public()
+    @Get('live-tournament/stage/:dayId')
+    async publicTournamentStage(@Param('dayId', ParseIntPipe) dayId: number) {
+        return this.ordersService.getLiveTournamentStage(dayId);
+    }
+
+    @Post('live-tournament/operations')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:detail:dispatch:button')
+    async liveTournamentOperations(@Body() body: any, @Req() req: any) {
+        this.assertButtonPermission(req?.user, 'orders:detail:dispatch:button', '当前角色无权操作赛事');
+        switch (body?.action) {
+            case 'stage': return this.ordersService.getLiveTournamentStage(Number(body.dayId), true);
+            case 'stage-enter':
+            case 'stage-draw':
+            case 'stage-start':
+            case 'stage-finish':
+                return this.ordersService.updateLiveTournamentStage(Number(body.dayId), Number(body.entryId), body.action);
+            case 'list': return this.ordersService.listLiveTournaments();
+            case 'create': return this.ordersService.createLiveTournament(body);
+            case 'generate-days': return this.ordersService.generateLiveTournamentDays(Number(body.tournamentId), body);
+            case 'add-day': return this.ordersService.addLiveTournamentDay(Number(body.tournamentId), body);
+            case 'publish': return this.ordersService.publishLiveTournament(Number(body.tournamentId));
+            case 'roster': return this.ordersService.publishLiveTournamentRoster(Number(body.dayId), body.quotas);
+            case 'entries': return this.ordersService.getLiveTournamentDayEntries(Number(body.dayId));
+            case 'queue': return this.ordersService.saveLiveTournamentQueue(Number(body.dayId), body.orderedIds, body.absentId);
+            case 'reschedule-entry': return this.ordersService.adminRescheduleLiveTournamentEntry(Number(body.entryId), Number(body.targetDayId));
+            default: throw new BadRequestException('未知赛事操作');
+        }
+    }
+
+    @Post('live-tournament/settle')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:detail:confirm-complete:button')
+    async settleLiveTournamentTicket(@Body() body: any, @Req() req: any) {
+        this.assertCustomerServiceOrFinanceAdmin(req?.user);
+        this.assertButtonPermission(req?.user, 'orders:detail:confirm-complete:button', '当前角色无权结算赛事订单');
+        return this.ordersService.settleLiveTournamentTicket(Number(body?.orderId), Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub));
+    }
+
+    @Post('live-tournament/score-publication')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:detail:confirm-complete:button')
+    async publishLiveTournamentScore(@Body() body: any, @Req() req: any) {
+        this.assertCustomerServiceOrFinanceAdmin(req?.user);
+        this.assertButtonPermission(req?.user, 'orders:detail:confirm-complete:button', '当前角色无权发布赛事成绩');
+        return body?.action === 'lock'
+            ? this.ordersService.lockLiveTournamentLeaderboard(Number(body.tournamentId))
+            : this.ordersService.publishLiveTournamentRound(Number(body?.entryId), Number(body?.roundNumber));
+    }
+
+    @Post('live-tournament/round-score')
+    @UseGuards(PermissionsGuard)
+    @Permissions('orders:detail:confirm-complete:button')
+    async saveLiveTournamentRound(@Body() body: any, @Req() req: any) {
+        this.assertCustomerServiceOrFinanceAdmin(req?.user);
+        this.assertButtonPermission(req?.user, 'orders:detail:confirm-complete:button', '当前角色无权录入赛事成绩');
+        if (!Number.isSafeInteger(body?.orderId) || body.orderId <= 0 || !Number.isSafeInteger(body?.kills)) {
+            throw new BadRequestException('请输入有效订单和击杀数');
+        }
+        return this.ordersService.saveLiveTournamentRound({
+            orderId: body.orderId,
+            roundNumber: body.roundNumber,
+            kills: body.kills,
+            forfeited: body.forfeited === true,
+            firstKillElapsedMs: body.firstKillElapsedMs ?? null,
+            firstKillAt: body.firstKillAt == null ? null : new Date(body.firstKillAt),
+        });
+    }
+
     @Post('confirm-complete')
     @UseGuards(PermissionsGuard)
     @Permissions('orders:detail:confirm-complete:button')

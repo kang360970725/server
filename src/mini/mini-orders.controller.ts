@@ -27,6 +27,23 @@ export class MiniOrdersController {
     private readonly miniSubscribeMessageService: MiniSubscribeMessageService,
   ) {}
 
+  @Get('live-tournament/mine')
+  async myLiveTournament(@Req() req: any, @Query('orderId') orderId: string) {
+    const memberId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    if (!Number.isSafeInteger(memberId) || memberId <= 0) throw new BadRequestException('请先登录');
+    const id = Number(orderId);
+    if (!Number.isSafeInteger(id) || id <= 0) throw new BadRequestException('门票订单无效');
+    return miniOk(await this.ordersService.getMyLiveTournament(memberId, id));
+  }
+
+  @Post('live-tournament/book')
+  async bookLiveTournament(@Body() body: Record<string, unknown>, @Req() req: any) {
+    const memberId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
+    if (!Number.isSafeInteger(memberId) || memberId <= 0) throw new BadRequestException('请先登录');
+    return miniOk(await this.ordersService.bookLiveTournament(memberId, body ?? {}), '预约成功');
+  }
+
+
   private ownOrderWhere(uid: number, id?: number) {
     return {
       ...(id ? { id } : {}),
@@ -330,11 +347,13 @@ export class MiniOrdersController {
       this.prisma.order.count({ where }),
     ]);
 
+    const tickets = await this.tournamentOrderSummaries(uid, list.map(row => row.id));
     const normalizedList = (list || []).map((row: any) => {
       const snapshotCoverImage = String(row?.projectSnapshot?.coverImage || '').trim();
       const currentCoverImage = String(row?.project?.coverImage || '').trim();
       return {
         ...row,
+        tournamentTicket: tickets.get(row.id) ?? null,
         project: row?.project
           ? {
               ...row.project,
@@ -351,6 +370,26 @@ export class MiniOrdersController {
       limit,
       totalPages: Math.ceil(total / limit),
     });
+  }
+
+  private async tournamentOrderSummaries(userId: number, orderIds: number[]) {
+    if (!orderIds.length) return new Map();
+    const entries = await this.prisma.liveTournamentEntry.findMany({
+      where: { memberId: userId, orderId: { in: orderIds } },
+      select: {
+        orderId: true,
+        status: true,
+        day: { select: { startsAt: true } },
+        tournament: { select: { title: true, status: true, bookingOpenedAt: true } },
+      },
+    });
+    return new Map(entries.map(entry => [entry.orderId, {
+      title: entry.tournament.title,
+      status: entry.status,
+      closed: entry.tournament.status === 'CLOSED',
+      bookingOpen: entry.tournament.status === 'PUBLISHED' && Boolean(entry.tournament.bookingOpenedAt),
+      startsAt: entry.day?.startsAt ?? null,
+    }]));
   }
 
   @Get('subscribe-message/config')
@@ -404,9 +443,13 @@ export class MiniOrdersController {
     });
     if (!own) throw new BadRequestException('订单不存在或无权限访问');
 
-    const detail = await this.ordersService.getOrderDetail(id);
+    const [detail, tickets] = await Promise.all([
+      this.ordersService.getOrderDetail(id),
+      this.tournamentOrderSummaries(uid, [id]),
+    ]);
     return miniOk(this.sanitizeMiniOrderPayload({
       ...detail,
+      tournamentTicket: tickets.get(id) ?? null,
       afterSalesPolicy: this.buildAfterSalesPolicy(detail),
     }));
   }

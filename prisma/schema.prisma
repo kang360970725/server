@@ -2931,3 +2931,122 @@ enum QuestionnaireQuestionType {
   MULTIPLE_CHOICE
   TEXT
 }
+
+enum LiveTournamentStatus {
+  DRAFT
+  PUBLISHED
+  CLOSED
+}
+
+enum LiveTournamentEntryStatus {
+  PENDING_PAYMENT
+  UNBOOKED
+  BOOKED
+  QUEUED
+  ON_STAGE
+  SCORING
+  FINISHED
+  ABSENT
+  VOID
+}
+
+model LiveTournament {
+  id                  Int                  @id @default(autoincrement())
+  title               String               @db.VarChar(120)
+  gameProjectId       Int
+  status              LiveTournamentStatus @default(DRAFT)
+  salesStartAt        DateTime
+  salesEndAt          DateTime
+  startsAt            DateTime?
+  endsAt              DateTime?
+  memberTicketLimit   Int                  @default(1)
+  ticketLimit         Int                  @default(70)
+  bookingThreshold    Int                  @default(40)
+  bookingOpenedAt     DateTime?
+  leaderboardLockedAt DateTime?
+  leaderboardSnapshot Json?
+  providerFee         Decimal              @db.Decimal(10, 1)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  days                LiveTournamentDay[]
+  entries             LiveTournamentEntry[]
+
+  @@index([gameProjectId, status])
+}
+
+model LiveTournamentDay {
+  id            Int                        @id @default(autoincrement())
+  tournamentId  Int
+  date          DateTime                   @db.Date
+  startsAt      DateTime
+  endsAt        DateTime
+  capacity      Int
+  rosterPublishedAt DateTime?
+  tournament    LiveTournament             @relation(fields: [tournamentId], references: [id])
+  quotas        LiveTournamentQuota[]
+  entries       LiveTournamentEntry[]
+
+  @@unique([tournamentId, date])
+}
+
+model LiveTournamentQuota {
+  dayId      Int
+  providerId Int
+  minimum    Int
+  maximum    Int
+  day        LiveTournamentDay @relation(fields: [dayId], references: [id])
+
+  @@id([dayId, providerId])
+}
+
+model LiveTournamentEntry {
+  id                 Int                       @id @default(autoincrement())
+  tournamentId       Int
+  orderId            Int                       @unique
+  memberId           Int
+  // Set to memberId while the ticket occupies the member's purchase slot.
+  activeMemberId     Int?
+  dayId              Int?
+  status             LiveTournamentEntryStatus @default(PENDING_PAYMENT)
+  contactName        String?                   @db.VarChar(100)
+  contactPhone       String?                   @db.VarChar(32)
+  gameAccountId      String?                   @db.VarChar(100)
+  gameNickname       String?                   @db.VarChar(100)
+  gameRank           String?                   @db.VarChar(100)
+  competitionName    String?                   @db.VarChar(100)
+  appearanceSequence Int?
+  queuePosition      Int?
+  checkedInAt        DateTime?
+  onStageAt          DateTime?
+  firstRoundStartedAt DateTime?
+  usedAt             DateTime?
+  rescheduledAt      DateTime?
+  preMatchReminderAt DateTime?
+  providerId         Int?
+  drawnAt            DateTime?
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+  tournament         LiveTournament            @relation(fields: [tournamentId], references: [id])
+  day                LiveTournamentDay?        @relation(fields: [dayId], references: [id])
+  rounds             LiveTournamentRound[]
+
+  @@index([tournamentId, activeMemberId], map: "idx_live_tournament_active_member")
+  @@unique([dayId, appearanceSequence], map: "uq_live_tournament_day_appearance")
+  @@index([dayId, status, queuePosition])
+  @@index([tournamentId, memberId])
+}
+
+model LiveTournamentRound {
+  entryId            Int
+  roundNumber        Int
+  kills              Int?
+  firstKillElapsedMs Int?
+  firstKillAt        DateTime?
+  forfeited          Boolean             @default(false)
+  publishedAt        DateTime?
+  publishedScore     Json?
+  updatedAt          DateTime            @updatedAt
+  entry              LiveTournamentEntry @relation(fields: [entryId], references: [id])
+
+  @@id([entryId, roundNumber])
+}
