@@ -61,6 +61,12 @@ export async function getTournamentStage(db: Client, dayId: number, internal: bo
     return {
         leaderboard: tournament.leaderboardSnapshot, locked: Boolean(tournament.leaderboardLockedAt),
         title: tournament.title, current: player(current), next: player(next), providers,
+        day: {
+            id: day.id,
+            startsAt: day.startsAt,
+            endsAt: day.endsAt,
+            capacity: day.capacity,
+        },
         sales: {
             paid: occupied - pending,
             remaining: Math.max(0, Math.min(70, tournament.ticketLimit) - occupied),

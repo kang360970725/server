@@ -391,6 +391,7 @@ export class OrdersController {
             case 'stage-start':
             case 'stage-finish':
                 return this.ordersService.updateLiveTournamentStage(Number(body.dayId), Number(body.entryId), body.action);
+            case 'studio-entry': return this.ordersService.resolveLiveTournamentStudioDay();
             case 'list': return this.ordersService.listLiveTournaments();
             case 'create': return this.ordersService.createLiveTournament(body);
             case 'generate-days': return this.ordersService.generateLiveTournamentDays(Number(body.tournamentId), body);

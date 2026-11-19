@@ -6472,6 +6472,72 @@ export class OrdersService {
         });
     }
 
+    async resolveLiveTournamentStudioDay(now = new Date()) {
+        const chinaOffsetMs = 8 * 60 * 60 * 1000;
+        const chinaNow = new Date(now.getTime() + chinaOffsetMs);
+        const chinaDayStart = Date.UTC(
+            chinaNow.getUTCFullYear(),
+            chinaNow.getUTCMonth(),
+            chinaNow.getUTCDate(),
+        ) - chinaOffsetMs;
+        const dayStart = new Date(chinaDayStart);
+        const dayEnd = new Date(chinaDayStart + 24 * 60 * 60 * 1000);
+        const days = await this.prisma.liveTournamentDay.findMany({
+            where: {
+                startsAt: { lt: dayEnd },
+                endsAt: { gt: dayStart },
+                tournament: { status: 'PUBLISHED' },
+            },
+            orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
+            include: {
+                tournament: { select: { id: true, title: true } },
+                _count: {
+                    select: {
+                        entries: {
+                            where: {
+                                activeMemberId: { not: null },
+                                status: { in: ['ON_STAGE', 'QUEUED'] },
+                            },
+                        },
+                    },
+                },
+            },
+        });
+        if (!days.length) {
+            return {
+                day: null,
+                serverNow: now,
+                message: '今日暂无已发布的直播场次，请联系赛事运营确认排期',
+            };
+        }
+
+        const nowMs = now.getTime();
+        const inProgress = days.filter(day => day.startsAt.getTime() <= nowMs && day.endsAt.getTime() > nowMs);
+        const upcoming = days.filter(day => day.startsAt.getTime() > nowMs);
+        const selected = inProgress[0] ?? upcoming[0] ?? days[days.length - 1];
+        const state = selected.startsAt.getTime() > nowMs
+            ? 'UPCOMING'
+            : selected.endsAt.getTime() > nowMs ? 'IN_PROGRESS' : 'ENDED';
+        return {
+            day: {
+                id: selected.id,
+                tournamentId: selected.tournament.id,
+                title: selected.tournament.title,
+                startsAt: selected.startsAt,
+                endsAt: selected.endsAt,
+                capacity: selected.capacity,
+                rosterPublished: Boolean(selected.rosterPublishedAt),
+                queuedOrPlaying: selected._count.entries,
+                state,
+            },
+            candidateCount: days.length,
+            serverNow: now,
+            selectionReason: state === 'IN_PROGRESS'
+                ? '已自动关联当前进行中的场次'
+                : state === 'UPCOMING' ? '已自动关联今日最近的待开场场次' : '已自动关联今日最后一场',
+        };
+    }
+
     async createLiveTournament(body: any) {
         const title = tournamentText(body?.title, '赛事名称')!;
         const gameProjectId = Number(body?.gameProjectId);
