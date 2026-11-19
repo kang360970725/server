@@ -41,7 +41,21 @@ describe('resolveLiveTournamentStudioDay', () => {
         expect(result.day.state).toBe('UPCOMING');
     });
 
-    it('今日没有已发布场次时安全停止，不猜测其他日期', async () => {
+    it('今天没有直播时关联最近的未来场次并进入预热展示', async () => {
+        const futureDay = day(21, '2026-11-21T12:00:00.000Z', '2026-11-21T15:00:00.000Z');
+        const prisma = { liveTournamentDay: { findMany: jest.fn()
+            .mockResolvedValueOnce([])
+            .mockResolvedValueOnce([futureDay]) } };
+
+        const result = await (OrdersService.prototype.resolveLiveTournamentStudioDay as any)
+            .call({ prisma }, new Date('2026-11-19T08:00:00.000Z'));
+
+        expect(result.day.id).toBe(21);
+        expect(result.day.state).toBe('PREHEAT');
+        expect(result.selectionReason).toContain('预热展示');
+    });
+
+    it('没有今日或未来的已发布场次时安全停止', async () => {
         const { result, findMany } = await resolve([], '2026-11-19T08:00:00.000Z');
 
         expect(result.day).toBeNull();

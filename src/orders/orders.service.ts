@@ -6482,27 +6482,41 @@ export class OrdersService {
         ) - chinaOffsetMs;
         const dayStart = new Date(chinaDayStart);
         const dayEnd = new Date(chinaDayStart + 24 * 60 * 60 * 1000);
-        const days = await this.prisma.liveTournamentDay.findMany({
+        const dayQueryInclude = Prisma.validator<Prisma.LiveTournamentDayInclude>()({
+            tournament: { select: { id: true, title: true } },
+            _count: {
+                select: {
+                    entries: {
+                        where: {
+                            activeMemberId: { not: null },
+                            status: { in: ['ON_STAGE', 'QUEUED'] },
+                        },
+                    },
+                },
+            },
+        });
+        let days = await this.prisma.liveTournamentDay.findMany({
             where: {
                 startsAt: { lt: dayEnd },
                 endsAt: { gt: dayStart },
                 tournament: { status: 'PUBLISHED' },
             },
             orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
-            include: {
-                tournament: { select: { id: true, title: true } },
-                _count: {
-                    select: {
-                        entries: {
-                            where: {
-                                activeMemberId: { not: null },
-                                status: { in: ['ON_STAGE', 'QUEUED'] },
-                            },
-                        },
-                    },
-                },
-            },
+            include: dayQueryInclude,
         });
+        let preheatFallback = false;
+        if (!days.length) {
+            days = await this.prisma.liveTournamentDay.findMany({
+                where: {
+                    startsAt: { gte: dayEnd },
+                    tournament: { status: 'PUBLISHED' },
+                },
+                orderBy: [{ startsAt: 'asc' }, { id: 'asc' }],
+                take: 1,
+                include: dayQueryInclude,
+            });
+            preheatFallback = days.length > 0;
+        }
         if (!days.length) {
             return {
                 day: null,
@@ -6515,7 +6529,7 @@ export class OrdersService {
         const inProgress = days.filter(day => day.startsAt.getTime() <= nowMs && day.endsAt.getTime() > nowMs);
         const upcoming = days.filter(day => day.startsAt.getTime() > nowMs);
         const selected = inProgress[0] ?? upcoming[0] ?? days[days.length - 1];
-        const state = selected.startsAt.getTime() > nowMs
+        const state = preheatFallback ? 'PREHEAT' : selected.startsAt.getTime() > nowMs
             ? 'UPCOMING'
             : selected.endsAt.getTime() > nowMs ? 'IN_PROGRESS' : 'ENDED';
         return {
@@ -6532,7 +6546,9 @@ export class OrdersService {
             },
             candidateCount: days.length,
             serverNow: now,
-            selectionReason: state === 'IN_PROGRESS'
+            selectionReason: state === 'PREHEAT'
+                ? '今日暂无直播，已自动关联最近场次并进入预热展示'
+                : state === 'IN_PROGRESS'
                 ? '已自动关联当前进行中的场次'
                 : state === 'UPCOMING' ? '已自动关联今日最近的待开场场次' : '已自动关联今日最后一场',
         };
