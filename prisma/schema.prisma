@@ -1972,6 +1972,10 @@ model WalletWithdrawalRequest {
   userId             Int
   /// 申请金额（始终为正数）
   amount             Float
+  /// 在途时 amount 为尚冻结的金额，完成时为累计实际出款金额。
+  partialPaidAmount  Decimal                   @default(0) @db.Decimal(12, 2)
+  reserveOffsetAmount Decimal                  @default(0) @db.Decimal(12, 2)
+  reserveDispatchIds Json?
   status             WithdrawalStatus         @default(PENDING_REVIEW)
   channel            WithdrawalChannel        @default(MANUAL)
   transferStatus     WithdrawalTransferStatus @default(NOT_STARTED)

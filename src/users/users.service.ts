@@ -1,3 +1,5 @@
+import { getStaffExitOrderReserve } from '../wallet/staff-exit-order-reserve';
+import { ACTIVE_WITHDRAWAL_STATUSES } from '../wallet/wallet-funding.util';
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import { CreateUserDto } from './dto/create-user.dto';
@@ -6,7 +8,7 @@ import { ChangeLevelDto } from './dto/change-level.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { StaffExitDto, StaffExitMode } from './dto/staff-exit.dto';
 import { StaffClearDto } from './dto/staff-clear.dto';
-import { PlayerWorkStatus, StaffEmploymentStatus, UserStatus, UserType, WalletHoldStatus, WalletTxStatus } from '@prisma/client';
+import { Prisma, PlayerWorkStatus, StaffEmploymentStatus, UserStatus, UserType, WalletHoldStatus, WalletTxStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { WalletService } from '../wallet/wallet.service';
 import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
@@ -591,6 +593,12 @@ export class UsersService {
         const hashedPassword = await bcrypt.hash(password, 10);
         const rejoinedUser = await this.prisma.$transaction(async (tx) => {
           await this.wallet.ensureWalletAccount(existingStaff.id, tx as any);
+          await tx.$queryRaw`SELECT userId FROM wallet_accounts WHERE userId = ${existingStaff.id} FOR UPDATE`;
+          const reservedWithdrawal = await tx.walletWithdrawalRequest.findFirst({
+            where: { userId: existingStaff.id, status: 'PENDING_REVIEW', partialPaidAmount: { gt: 0 } },
+            select: { id: true },
+          });
+          if (reservedWithdrawal) throw new BadRequestException('请先结清已部分出款的提现，再办理重新入店');
           const account = await tx.walletAccount.findUnique({
             where: { userId: existingStaff.id },
             select: {
@@ -1206,10 +1214,10 @@ export class UsersService {
     });
   }
 
-  private buildStaffExitPreviewFromUser(user: any, config: any, effectiveAcceptedOrderCount = 0) {
+  private buildStaffExitPreviewFromUser(user: any, config: any, effectiveAcceptedOrderCount = 0, orderReserve = 0) {
     const ruleSummary = this.buildStaffRuleSummary(user, config);
     const availableBalance = Number(user?.walletAccount?.availableBalance ?? 0);
-    const frozenBalance = Number(user?.walletAccount?.frozenBalance ?? 0);
+    const frozenBalance = Number(user?.walletAccount?.earningFrozenBalance ?? user?.walletAccount?.frozenBalance ?? 0);
     const depositBalance = Number(user?.walletAccount?.depositBalance ?? 0);
     const depositAmountRule = Number(ruleSummary.matchedDepositAmount || 0);
     const joinedAt = this.getStaffJoinedAt(user);
@@ -1222,7 +1230,7 @@ export class UsersService {
     const refundDepositAmount = isDepositForfeit ? 0 : depositBalance;
     const forfeitDepositAmount = Math.max(0, Number((depositBalance - refundDepositAmount).toFixed(2)));
     const releaseAmount = Number((frozenBalance + refundDepositAmount).toFixed(2));
-    const maxAvailableForDepositTopUp = Math.max(0, Number((availableBalance + releaseAmount).toFixed(2)));
+    const maxAvailableForDepositTopUp = Math.max(0, Number((availableBalance + releaseAmount - orderReserve).toFixed(2)));
     const depositTopUpForfeitAmount = isDepositForfeit
       ? Math.min(depositShortfallAmount, maxAvailableForDepositTopUp)
       : 0;
@@ -1252,6 +1260,8 @@ export class UsersService {
       depositTopUpUnpaidAmount,
       releaseAmount,
       finalAvailableBalance,
+      orderReserveAmount: orderReserve,
+      withdrawableAfterExit: Math.max(0, Number((finalAvailableBalance - orderReserve).toFixed(2))),
       clearAmount: Number((availableBalance + frozenBalance + depositBalance).toFixed(2)),
       depositAmountRule,
       firstWithdrawMinBalance: ruleSummary.matchedFirstWithdrawMinBalance,
@@ -1271,6 +1281,7 @@ export class UsersService {
           select: {
             availableBalance: true,
             frozenBalance: true,
+            earningFrozenBalance: true,
             depositBalance: true,
           },
         },
@@ -1289,12 +1300,17 @@ export class UsersService {
       throw new BadRequestException('该员工已在黑名单中，不支持退店操作');
     }
 
-    const [config, effectiveAcceptedOrderCount] = await Promise.all([
+    const [config, effectiveAcceptedOrderCount, reserve] = await Promise.all([
       this.staffRuleEngineService.getConfig(),
       this.countEffectiveAcceptedOrders(id),
+      getStaffExitOrderReserve(this.prisma, id),
     ]);
 
-    return this.buildStaffExitPreviewFromUser(user, config, effectiveAcceptedOrderCount);
+    return {
+      ...this.buildStaffExitPreviewFromUser(user, config, effectiveAcceptedOrderCount, reserve.amount),
+      orderReserveNeedsReview: reserve.needsReview,
+      ...(reserve.needsReview ? { withdrawableAfterExit: 0 } : {}),
+    };
   }
 
   async grantExitedStaffLoginGrace(
@@ -1391,21 +1407,27 @@ export class UsersService {
       this.staffRuleEngineService.getConfig(),
       this.countEffectiveAcceptedOrders(id),
     ]);
-    const preview = this.buildStaffExitPreviewFromUser(oldUser, config, effectiveAcceptedOrderCount);
-    const available = Number(preview.availableBalance ?? 0);
-    const frozen = Number(preview.frozenBalance ?? 0);
-    const deposit = Number(preview.depositBalance ?? 0);
-    const refundableDeposit = Number(preview.refundDepositAmount ?? 0);
-    const forfeitDeposit = Number(preview.forfeitDepositAmount ?? 0);
-    const depositTopUpForfeit = Number(preview.depositTopUpForfeitAmount ?? 0);
-    const releaseAmount = Number((frozen + refundableDeposit).toFixed(2));
-    const finalAvailable = Number((available + releaseAmount - depositTopUpForfeit).toFixed(2));
-
     const now = new Date();
     const nextEmploymentStatus = addToBlacklist ? StaffEmploymentStatus.BLACKLISTED : StaffEmploymentStatus.EXITED;
 
     return this.prisma.$transaction(async (tx) => {
-      await this.wallet.ensureWalletAccount(id, tx as any);
+      const account = await this.lockStaffExitWallet(tx, id);
+      const paying = await tx.walletWithdrawalRequest.findFirst({
+        where: { userId: id, status: 'PAYING' },
+        select: { id: true },
+      });
+      if (paying) throw new BadRequestException('请先核实正在打款的提现单，再办理退店');
+      const reserve = await getStaffExitOrderReserve(tx, id);
+      const preview = this.buildStaffExitPreviewFromUser({ ...oldUser, walletAccount: account }, config, effectiveAcceptedOrderCount, reserve.amount);
+      const available = preview.availableBalance;
+      const frozen = preview.frozenBalance;
+      const deposit = preview.depositBalance;
+      const refundableDeposit = preview.refundDepositAmount;
+      const forfeitDeposit = preview.forfeitDepositAmount;
+      const depositTopUpForfeit = preview.depositTopUpForfeitAmount;
+      const releaseAmount = preview.releaseAmount;
+      const finalAvailable = preview.finalAvailableBalance;
+      const withdrawalFrozen = Number(account.withdrawFrozenBalance);
 
       const offlineFeeSettlement = await this.offlineFeeService.prepareStaffExitSettlementTx(tx as any, id, operatorId, now);
       const equipmentFeeSettlement = await this.equipmentRentalFeeService.prepareStaffExitSettlementTx(tx as any, id, operatorId, now);
@@ -1419,6 +1441,9 @@ export class UsersService {
         throw new BadRequestException(
           `退店失败：可用余额与未解冻收益合计 ¥${chargeableBalance.toFixed(2)}，不足以结清线下管理费、设备使用费及其他退店应扣款 ¥${requiredBalance.toFixed(2)}`,
         );
+      }
+      if (addToBlacklist && withdrawalFrozen > 0) {
+        throw new BadRequestException('加入黑名单前请先核对并关闭在途提现');
       }
       if (addToBlacklist && Number((finalAvailable - exitFeeAmount).toFixed(2)) > 0) {
         throw new BadRequestException('加入黑名单前需先清空可用余额，请使用一键清零');
@@ -1443,6 +1468,8 @@ export class UsersService {
             refundDepositAmount: refundableDeposit,
             forfeitDepositAmount: forfeitDeposit,
             depositTopUpForfeitAmount: depositTopUpForfeit,
+            orderReserveAmount: reserve.amount,
+            orderReserveNeedsReview: reserve.needsReview,
             offlineFeeAmount: offlineFeeSettlement.totalAmount,
             equipmentRentalFeeAmount: equipmentFeeSettlement.totalAmount,
           },
@@ -1472,9 +1499,8 @@ export class UsersService {
         where: { userId: id },
         data: {
           availableBalance: { increment: Number((releaseAmount - depositTopUpForfeit).toFixed(2)) },
-          frozenBalance: 0,
+          frozenBalance: withdrawalFrozen,
           earningFrozenBalance: 0,
-          withdrawFrozenBalance: 0,
           depositBalance: 0,
         } as any,
         select: { availableBalance: true, frozenBalance: true },
@@ -1482,7 +1508,7 @@ export class UsersService {
 
       if (frozen > 0) {
         await tx.walletTransaction.updateMany({
-          where: { userId: id, status: WalletTxStatus.FROZEN },
+          where: { userId: id, status: WalletTxStatus.FROZEN, direction: 'IN' },
           data: { status: WalletTxStatus.AVAILABLE },
         });
         await tx.walletHold.updateMany({
@@ -1571,7 +1597,18 @@ export class UsersService {
       });
 
       return updatedUser;
-    });
+    }, { isolationLevel: 'ReadCommitted' });
+  }
+
+  private async lockStaffExitWallet(tx: Prisma.TransactionClient, id: number) {
+    await tx.$queryRaw`SELECT id FROM users WHERE id = ${id} FOR UPDATE`;
+    const user = await tx.user.findUnique({ where: { id }, select: { staffEmploymentStatus: true } });
+    if (!user || user.staffEmploymentStatus === 'EXITED' || user.staffEmploymentStatus === 'BLACKLISTED') {
+      throw new BadRequestException('该员工已退店或加入黑名单');
+    }
+    await this.wallet.ensureWalletAccount(id, tx);
+    await tx.$queryRaw`SELECT userId FROM wallet_accounts WHERE userId = ${id} FOR UPDATE`;
+    return tx.walletAccount.findUniqueOrThrow({ where: { userId: id } });
   }
 
   async clearStaffAssets(
@@ -1609,15 +1646,26 @@ export class UsersService {
 
     const addToBlacklist = Boolean(dto?.addToBlacklist);
     const remark = String(dto?.remark || '').trim() || (addToBlacklist ? '员工清退并加入黑名单' : '员工清退');
-    const available = Number(oldUser?.walletAccount?.availableBalance ?? 0);
-    const frozen = Number(oldUser?.walletAccount?.frozenBalance ?? 0);
-    const deposit = Number(oldUser?.walletAccount?.depositBalance ?? 0);
-    const clearAmount = Number((available + frozen + deposit).toFixed(2));
     const now = new Date();
     const nextEmploymentStatus = addToBlacklist ? StaffEmploymentStatus.BLACKLISTED : StaffEmploymentStatus.EXITED;
 
     return this.prisma.$transaction(async (tx) => {
-      await this.wallet.ensureWalletAccount(id, tx as any);
+      const account = await this.lockStaffExitWallet(tx, id);
+      const activeWithdrawal = await tx.walletWithdrawalRequest.findFirst({
+        where: { userId: id, status: { in: ACTIVE_WITHDRAWAL_STATUSES as Prisma.EnumWithdrawalStatusFilter['in'] } },
+        select: { id: true },
+      });
+      if (activeWithdrawal || Number(account.withdrawFrozenBalance) !== 0) {
+        throw new BadRequestException('清退前请先核对并关闭在途提现');
+      }
+      const reserve = await getStaffExitOrderReserve(tx, id);
+      const available = Number(account.availableBalance);
+      const frozen = Number(account.frozenBalance);
+      const deposit = Number(account.depositBalance);
+      const totalAssets = Number((available + frozen + deposit).toFixed(2));
+      const retainedForOrders = Math.min(Math.max(0, totalAssets), reserve.needsReview ? Math.max(0, totalAssets) : reserve.amount);
+      const remainingBalance = totalAssets < 0 ? totalAssets : retainedForOrders;
+      const clearAmount = Number((totalAssets - remainingBalance).toFixed(2));
 
       const log = await tx.userLog.create({
         data: {
@@ -1633,6 +1681,9 @@ export class UsersService {
           },
           newData: {
             addToBlacklist,
+            orderReserveAmount: reserve.amount,
+            orderReserveNeedsReview: reserve.needsReview,
+            retainedForOrders,
             remark,
           },
           remark,
@@ -1660,7 +1711,7 @@ export class UsersService {
       const accountAfter = await tx.walletAccount.update({
         where: { userId: id },
         data: {
-          availableBalance: 0,
+          availableBalance: remainingBalance,
           frozenBalance: 0,
           earningFrozenBalance: 0,
           withdrawFrozenBalance: 0,
@@ -1709,7 +1760,7 @@ export class UsersService {
       }
 
       return updatedUser;
-    });
+    }, { isolationLevel: 'ReadCommitted' });
   }
 
   async findOne(id: number, actor?: { userType?: UserType }) {

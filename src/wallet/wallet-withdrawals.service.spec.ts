@@ -196,6 +196,7 @@ describe('WalletWithdrawalsService.applyWithdrawal', () => {
         }),
       },
       orderParticipant: {
+        findMany: jest.fn().mockResolvedValue([]),
         findFirst: jest.fn(),
       },
       walletAccount: {
@@ -283,11 +284,18 @@ describe('WalletWithdrawalsService.reviewWithdrawal', () => {
   };
 
   it.each([
-    [-700, 800, true], [-1000, 800, true], [-1000.01, 800, false], [-700, 799, false],
-  ])('reviews pre-reserved withdrawal with available=%s reserve=%s allowed=%s', async (available, reserved, allowed) => {
+    [-700, 800, true, false], [-1000, 800, true, false], [-1000.01, 800, false, false], [-700, 799, false, false],
+    [-700, 800, false, true], [-500, 800, true, true],
+  ])('reviews pre-reserved withdrawal with available=%s reserve=%s allowed=%s bombLoss=%s', async (available, reserved, allowed, bombLoss) => {
     const request = { id: 12, userId: 7, amount: 800, status: 'PENDING_REVIEW', reserveTxId: 90,
       reserveTx: { userId: 7, sourceId: 12, amount: 800, status: 'FROZEN', direction: 'OUT', bizType: 'WITHDRAW_RESERVE' } };
     const tx: any = {
+      user: { findUnique: jest.fn().mockResolvedValue({ staffEmploymentStatus: bombLoss ? 'EXITED' : 'ACTIVE' }) },
+      orderParticipant: { findMany: jest.fn().mockResolvedValue([{
+        progressBaseWan: -400,
+        dispatch: { id: 40, order: { id: 41, autoSerial: 'ORDER41', baseAmountWan: 1000,
+          settlementBaseAmount: 1000, projectSnapshot: { billingMode: 'GUARANTEED' } } },
+      }]) },
       $queryRawUnsafe: jest.fn().mockResolvedValue([]),
       walletAccount: { findUnique: jest.fn().mockResolvedValue({ availableBalance: available, earningFrozenBalance: 1000,
         withdrawFrozenBalance: reserved, frozenBalance: 1000 + reserved, depositBalance: 9000 }) },
@@ -296,7 +304,7 @@ describe('WalletWithdrawalsService.reviewWithdrawal', () => {
         findUnique: jest.fn().mockResolvedValue(request), findMany: jest.fn().mockResolvedValue([request]),
         update: jest.fn().mockImplementation(async ({ data }) => ({ ...request, ...data })),
       },
-      walletTransaction: { findUnique: jest.fn().mockResolvedValue(null), upsert: jest.fn().mockResolvedValue({ id: 91 }) },
+      walletTransaction: { findMany: jest.fn().mockResolvedValue([]), findUnique: jest.fn().mockResolvedValue(null), upsert: jest.fn().mockResolvedValue({ id: 91 }) },
     };
     const { service, walletService } = createService({ $transaction: (fn: any) => fn(tx) });
     walletService.applyWalletAccountDelta.mockResolvedValue({ availableBalance: available, frozenBalance: 1000, earningFrozenBalance: 1000, withdrawFrozenBalance: 0 });
@@ -306,11 +314,89 @@ describe('WalletWithdrawalsService.reviewWithdrawal', () => {
       expect(walletService.applyWalletAccountDelta).toHaveBeenCalledWith(tx, 7, { withdrawFrozenDelta: -800 });
       expect(tx.walletTransaction.upsert).toHaveBeenCalledTimes(1);
     } else {
-      await expect(result).rejects.toThrow();
+      await expect(result).rejects.toThrow(bombLoss ? /存单炸补预留 ¥400.00/ : undefined);
       expect(walletService.applyWalletAccountDelta).not.toHaveBeenCalled();
       expect(tx.walletWithdrawalRequest.update).not.toHaveBeenCalled();
     }
   });
+
+  it.each([[-58.04, 0], [-30, 28.04]])(
+    'keeps the original application and settles its remainder with balance %s',
+    async (balanceAfterSettlement, finalPayout) => {
+      let req: any = {
+        id: 2706, userId: 91, amount: 1300, channel: 'MANUAL', transferStatus: 'NOT_STARTED',
+        status: 'PENDING_REVIEW', partialPaidAmount: 0, reserveTxId: 90,
+      };
+      const hold = { amount: 1300, userId: 91, sourceId: 2706, status: 'FROZEN', direction: 'OUT', bizType: 'WITHDRAW_RESERVE' };
+      const account = { availableBalance: 1.96, earningFrozenBalance: 0, withdrawFrozenBalance: 1300, frozenBalance: 1300 };
+      let finalized = false;
+      const ledger = new Map<string, any>();
+      const tx: any = {
+        $queryRawUnsafe: jest.fn().mockResolvedValue([]),
+        user: { findUnique: jest.fn().mockResolvedValue({ staffEmploymentStatus: 'EXITED' }) },
+        orderDispatch: { count: jest.fn(async () => finalized ? 0 : 1) },
+        orderParticipant: { findMany: jest.fn(async () => finalized ? [] : [{
+          progressBaseWan: -60,
+          dispatch: { id: 12, order: { id: 13, autoSerial: '13', baseAmountWan: 100,
+            settlementBaseAmount: 100, projectSnapshot: { billingMode: 'GUARANTEED' } } },
+        }]) },
+        walletAccount: { findUnique: jest.fn(async () => account) },
+        walletHold: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: 0 } }), count: jest.fn().mockResolvedValue(0) },
+        walletWithdrawalRequest: {
+          findUnique: jest.fn(async () => req),
+          findFirst: jest.fn().mockResolvedValue(null),
+          findMany: jest.fn(async () => [{ ...req, reserveTx: hold }]),
+          update: jest.fn(async ({ data }) => { req = { ...req, ...data }; return req; }),
+        },
+        walletTransaction: {
+          findUnique: jest.fn(async ({ where }) => ledger.get(where.sourceType_sourceId.sourceType)),
+          findMany: jest.fn(async () => finalized ? [{ dispatchId: 12, amount: 60 }] : []),
+          create: jest.fn(async ({ data }) => {
+            const row = { ...data, id: ledger.size + 100 };
+            ledger.set(data.sourceType, row);
+            return row;
+          }),
+          update: jest.fn(async ({ data }) => Object.assign(hold, data)),
+        },
+      };
+      const { service, walletService } = createService({ $transaction: (fn: any) => fn(tx) });
+      walletService.applyWalletAccountDelta.mockImplementation(async (_tx, _uid, delta) => {
+        account.availableBalance = Math.round((account.availableBalance + delta.availableDelta) * 100) / 100;
+        account.withdrawFrozenBalance = Math.round((account.withdrawFrozenBalance + delta.withdrawFrozenDelta) * 100) / 100;
+        account.frozenBalance = account.withdrawFrozenBalance;
+        return account;
+      });
+
+      const first = { requestId: req.id, operatorId: 3, stage: 'PARTIAL' as const, payout: 1241.96, offset: 0, remark: '已确认并记录人工转账' };
+      const last = { ...first, stage: 'FINAL' as const, payout: finalPayout, offset: -balanceAfterSettlement };
+      await expect(service.recordReservedPayout({ ...first, payout: 1242 })).rejects.toThrow('金额已变化');
+      expect(ledger.size).toBe(0);
+      await expect(service.recordReservedPayout(first)).resolves.toMatchObject({
+        id: 2706, status: 'PENDING_REVIEW', amount: 58.04, partialPaidAmount: 1241.96,
+      });
+      await service.recordReservedPayout(first);
+      expect(account.withdrawFrozenBalance).toBe(58.04);
+      expect(hold.amount).toBe(58.04);
+      expect(ledger.size).toBe(1);
+      expect(tx.orderParticipant.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ progressBaseWan: { lt: 0 } }),
+      }));
+      await expect(service.reviewWithdrawal({ requestId: req.id, reviewerId: 3, approve: false })).rejects.toThrow('已部分出款');
+      await expect(service.recordReservedPayout(last)).rejects.toThrow('金额已变化');
+
+      finalized = true;
+      account.availableBalance = balanceAfterSettlement;
+      await expect(service.recordReservedPayout(last)).resolves.toMatchObject({
+        status: 'PAID', amount: Math.round((1241.96 + finalPayout) * 100) / 100, reserveOffsetAmount: -balanceAfterSettlement,
+      });
+      await service.recordReservedPayout(last);
+      expect(account.withdrawFrozenBalance).toBe(0);
+      expect(account.availableBalance).toBe(0);
+      expect(ledger.get('WITHDRAWAL_BOMB_RESERVE_RELEASE').amount).toBe(last.offset);
+      expect(ledger.get('WITHDRAWAL_REQUEST_PAYOUT')?.amount ?? 0).toBe(finalPayout);
+      expect(walletService.applyWalletAccountDelta).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it('allows rejecting a withdrawal when release only partially offsets a negative available balance', async () => {
     const tx: any = {

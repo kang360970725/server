@@ -1,3 +1,5 @@
+import { round2 as roundMoney } from '../utils/money/format';
+import { getBookedBombLossByDispatch, getStaffExitOrderReserve, staffExitOrderReserveReason, unsettledStaffOrderStatuses } from './staff-exit-order-reserve';
 import {BadRequestException, ForbiddenException, Injectable} from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
 import {tcbGetTempFileURL} from "../common/cloudbase.storage";
@@ -221,7 +223,131 @@ export class WalletWithdrawalsService {
         return `WDT${base}`.slice(0, 64);
     }
 
+    private async getExitWithdrawalEligibilityTx(tx: any, userId: number, user?: any) {
+        const current = user ?? await tx.user.findUnique({
+            where: { id: userId },
+            select: { staffEmploymentStatus: true, canWithdraw: true, staffExitedAt: true },
+        });
+        const status = current?.staffEmploymentStatus;
+        if (status === StaffEmploymentStatus.BLACKLISTED) {
+            return { reserve: null, blockReason: '已加入黑名单的服务者不可提现' };
+        }
+        if (status !== StaffEmploymentStatus.EXITED) return { reserve: null, blockReason: null };
+
+        if (current.canWithdraw === false && current.staffExitedAt) {
+            const clear = await tx.userLog.findFirst({
+                where: { targetType: 'USER', targetId: userId, action: 'STAFF_CLEAR', createdAt: { gte: current.staffExitedAt } },
+                select: { id: true },
+            });
+            if (clear) return { reserve: null, blockReason: '已清退账户不可提现' };
+        }
+        return { reserve: await getStaffExitOrderReserve(tx, userId), blockReason: null };
+    }
+
+    private async assertExitOrderReserveTx(tx: any, userId: number, remainingAssets: number, user?: any) {
+        const { reserve, blockReason } = await this.getExitWithdrawalEligibilityTx(tx, userId, user);
+        const reason = blockReason ?? (reserve && staffExitOrderReserveReason(reserve, remainingAssets));
+        if (reason) throw new BadRequestException(reason);
+    }
+
+    private async quoteReservedPayout(tx: any, req: any, spendableAssets: number, user?: any) {
+        if (req.status !== 'PENDING_REVIEW' || req.channel !== 'MANUAL' || req.outTradeNo ||
+            req.transferStatus !== 'NOT_STARTED' || req.payoutTxId) return null;
+        const { reserve, blockReason } = await this.getExitWithdrawalEligibilityTx(tx, req.userId, user);
+        if (!reserve || blockReason || reserve.needsReview) return null;
+        const remaining = Number(req.amount);
+        if (Number(req.partialPaidAmount ?? 0) === 0) {
+            const hold = roundMoney(reserve.amount - spendableAssets);
+            if (spendableAssets < 0 || !reserve.amount || hold <= 0 || hold >= remaining) return null;
+            const otherPartial = await tx.walletWithdrawalRequest.findFirst({
+                where: { userId: req.userId, status: 'PENDING_REVIEW', partialPaidAmount: { gt: 0 } },
+                select: { id: true },
+            });
+            if (otherPartial) return null;
+            return { stage: 'PARTIAL' as const, payout: roundMoney(remaining - hold), hold, offset: 0, orders: reserve.items };
+        }
+        if (reserve.items.length || !Array.isArray(req.reserveDispatchIds)) return null;
+        const saved: { dispatchId: number; bookedAmount: number }[] = req.reserveDispatchIds;
+        const dispatchIds = saved.map(({ dispatchId }) => dispatchId);
+        const unsettled = await tx.orderDispatch.count({
+            where: { id: { in: dispatchIds }, order: { status: { in: unsettledStaffOrderStatuses } } },
+        });
+        if (unsettled) return null;
+        const booked = await getBookedBombLossByDispatch(tx, req.userId, dispatchIds);
+        const confirmedLoss = roundMoney(saved.reduce((total, row) =>
+            total + Math.max(0, (booked.get(row.dispatchId) ?? 0) - row.bookedAmount), 0));
+        const offset = roundMoney(Math.max(0, -spendableAssets));
+        if (offset > remaining || offset > confirmedLoss) return null;
+        return { stage: 'FINAL' as const, payout: roundMoney(remaining - offset), hold: 0, offset, orders: [] };
+    }
+
+    async recordReservedPayout(params: {
+        requestId: number; operatorId: number; stage: 'PARTIAL' | 'FINAL';
+        payout: number; offset: number; remark: string;
+    }) {
+        const { requestId, operatorId, stage, payout, offset } = params;
+        const remark = typeof params.remark === 'string' ? params.remark.trim() : '';
+        if (!remark || remark.length > 500 || !['PARTIAL', 'FINAL'].includes(stage) ||
+            !Number.isFinite(payout) || !Number.isFinite(offset)) {
+            throw new BadRequestException('请确认出款金额并填写服务者确认和打款凭证备注');
+        }
+        return this.prisma.$transaction(async (tx) => {
+            await this.lockWithdrawalRequestTx(tx, requestId);
+            const req = await tx.walletWithdrawalRequest.findUnique({ where: { id: requestId } });
+            if (!req) throw new BadRequestException('提现申请不存在');
+            const sourceType = stage === 'PARTIAL' ? 'WITHDRAWAL_PARTIAL_PAYOUT' : 'WITHDRAWAL_REQUEST_PAYOUT';
+            const existing = await tx.walletTransaction.findUnique({
+                where: { sourceType_sourceId: { sourceType, sourceId: req.id } },
+                select: { amount: true },
+            });
+            if (stage === 'PARTIAL' && existing && roundMoney(existing.amount) === payout && offset === 0) return req;
+            if (stage === 'FINAL' && req.status === 'PAID' && Number(req.partialPaidAmount) > 0 &&
+                roundMoney(req.amount - Number(req.partialPaidAmount)) === payout && Number(req.reserveOffsetAmount) === offset) return req;
+
+            await this.lockWalletAccountTx(tx, req.userId);
+            const funding = await inspectWalletFundingTx(tx, req.userId, req.id);
+            const quote = await this.quoteReservedPayout(tx, req, funding.spendableAssets);
+            if (!quote || quote.stage !== stage || quote.payout !== payout || quote.offset !== offset) {
+                throw new BadRequestException('预留或出款金额已变化，请刷新并核对，避免重复打款');
+            }
+
+            const account = await this.walletService.applyWalletAccountDelta(tx, req.userId, {
+                withdrawFrozenDelta: stage === 'PARTIAL' ? -payout : -req.amount,
+                availableDelta: offset,
+            });
+            this.assertWithdrawalFrozenBucketsNonNegative(account);
+            const snapshot = { availableAfter: Number(account.availableBalance), frozenAfter: Number(account.frozenBalance) };
+            const payoutTx = payout > 0 ? await tx.walletTransaction.create({ data: {
+                userId: req.userId, direction: 'OUT', bizType: 'WITHDRAW_PAYOUT', status: 'AVAILABLE',
+                amount: payout, sourceType, sourceId: req.id, remark, ...snapshot,
+            } }) : null;
+            if (offset > 0) {
+                await tx.walletTransaction.create({ data: {
+                    userId: req.userId, direction: 'IN', bizType: 'WITHDRAW_RELEASE', status: 'AVAILABLE',
+                    amount: offset, sourceType: 'WITHDRAWAL_BOMB_RESERVE_RELEASE', sourceId: req.id,
+                    remark: '释放预留资金抵扣已入账的存单炸补欠款', ...snapshot,
+                } });
+            }
+            await tx.walletTransaction.update({ where: { id: req.reserveTxId }, data: stage === 'PARTIAL'
+                ? { amount: quote.hold, ...snapshot } : { status: 'AVAILABLE', ...snapshot } });
+            const now = new Date();
+            return tx.walletWithdrawalRequest.update({ where: { id: req.id }, data: stage === 'PARTIAL'
+                ? {
+                    amount: quote.hold, partialPaidAmount: payout,
+                    reserveDispatchIds: quote.orders.map(({ dispatchId, bookedAmount }) => ({ dispatchId, bookedAmount })),
+                    reviewedBy: operatorId, reviewedAt: now, transferStartedAt: now, reviewRemark: remark,
+                }
+                : {
+                    amount: roundMoney(Number(req.partialPaidAmount) + payout), reserveOffsetAmount: offset,
+                    status: 'PAID', transferStatus: 'SUCCESS', transferFinishedAt: now, payoutTxId: payoutTx?.id,
+                    reviewRemark: [req.reviewRemark, remark].filter(Boolean).join('；'),
+                },
+            });
+        }, { isolationLevel: 'ReadCommitted' });
+    }
+
     private async completeWithdrawalPayoutTx(tx: any, req: any, operatorId: number, patch: any = {}) {
+        if (Number(req.partialPaidAmount) > 0) throw new BadRequestException('请通过预留余款流程完成出款');
         const PAYOUT_SOURCE_TYPE = 'WITHDRAWAL_REQUEST_PAYOUT';
         await this.lockWalletAccountTx(tx, req.userId);
 
@@ -254,6 +380,10 @@ export class WalletWithdrawalsService {
         const funding = await inspectWalletFundingTx(tx, req.userId, req.id);
         if (funding.spendableAssets < 0) {
             throw new BadRequestException('有效收益冻结不足以覆盖可用余额欠款，暂不能出款，可驳回释放提现冻结');
+        }
+        // 微信成功回执只登记已发生的出款。预留检查在向微信发起打款前执行。
+        if (patch.channel !== 'WECHAT') {
+            await this.assertExitOrderReserveTx(tx, req.userId, funding.spendableAssets);
         }
         const accountAfterPayout = await this.walletService.applyWalletAccountDelta(tx as any, req.userId, {
             withdrawFrozenDelta: -req.amount,
@@ -507,6 +637,8 @@ export class WalletWithdrawalsService {
                 depositLimit: true,
                 staffTags: true,
                 staffEmploymentStatus: true,
+                staffExitedAt: true,
+                canWithdraw: true,
                 userType: true,
                 Role: {
                     select: {
@@ -540,10 +672,16 @@ export class WalletWithdrawalsService {
             )
             : null;
 
+        const eligibility = await this.getExitWithdrawalEligibilityTx(this.prisma, userId, user);
+        const reserve = eligibility.reserve;
+        const availableBalance = Number(user.walletAccount?.availableBalance || 0);
         return {
             userType: user.userType,
             staffEmploymentStatus: user.staffEmploymentStatus,
-            availableBalance: Number(user.walletAccount?.availableBalance || 0),
+            availableBalance: eligibility.blockReason || reserve?.needsReview ? 0
+                : reserve ? Math.max(0, roundMoney(availableBalance - reserve.amount)) : availableBalance,
+            staffExitOrderReserve: reserve?.amount ?? 0,
+            staffExitOrderReserveNeedsReview: reserve?.needsReview ?? false,
             depositBalance: Number(user.walletAccount?.depositBalance || 0),
             depositLimit: Number(matchedRule?.depositAmount ?? user.depositLimit ?? 500),
             firstWithdrawMinBalance: Number(matchedRule?.firstWithdrawMinBalance ?? 1000),
@@ -583,6 +721,7 @@ export class WalletWithdrawalsService {
         }
 
         const reviewed = await this.prisma.$transaction(async (tx) => {
+            await this.lockWalletAccountTx(tx, userId);
             const freezeCheckedUser = await this.autoFreezeDormantStaffIfNeeded(userId, tx);
             if (isDispatchMonitoredStaff(freezeCheckedUser) && String(freezeCheckedUser?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {
                 const config = await this.staffRuleEngineService.getConfig();
@@ -600,6 +739,7 @@ export class WalletWithdrawalsService {
                     withdrawQrCodeKey: true,
                     canWithdraw: true,
                     staffEmploymentStatus: true,
+                    staffExitedAt: true,
                     userType: true,
                     depositLimit: true,
                     staffTags: true,
@@ -622,8 +762,6 @@ export class WalletWithdrawalsService {
             if (!u.canWithdraw && !allowExitedStaffWithdraw) {
                 throw new BadRequestException('当前账户暂不允许提现');
             }
-
-            await this.lockWalletAccountTx(tx, userId);
 
             const repeatedRequest = await tx.walletWithdrawalRequest.findFirst({
                 where: { userId, idempotencyKey },
@@ -737,6 +875,8 @@ export class WalletWithdrawalsService {
             });
 
             const available = Number(refreshedAccount?.availableBalance || 0);
+
+            await this.assertExitOrderReserveTx(tx, userId, available - amount, u);
 
             if (available < amount) {
                 throw new BadRequestException('可用余额不足');
@@ -876,7 +1016,7 @@ export class WalletWithdrawalsService {
             return {
                 ...request,
             };
-        });
+        }, { isolationLevel: 'ReadCommitted' });
 
         return reviewed;
     }
@@ -912,6 +1052,7 @@ export class WalletWithdrawalsService {
             // ✅ 幂等：终态直接返回，避免重复扣减/重复流水
             if (req.status === 'PAID' || req.status === 'REJECTED') return req;
 
+            if (Number(req.partialPaidAmount) > 0) throw new BadRequestException('该申请已部分出款，请通过预留余款流程处理');
             if (approve && req.status !== 'PENDING_REVIEW') {
                 throw new BadRequestException('该提现申请不在待审核状态');
             }
@@ -1026,17 +1167,28 @@ export class WalletWithdrawalsService {
         }
         await this.assertWechatAutoTransferAllowed(req);
 
-        const outTradeNo = req.outTradeNo || this.genTransferOutTradeNo(req);
-        await this.prisma.walletWithdrawalRequest.update({
-            where: { id: req.id },
-            data: {
-                status: 'PAYING',
-                transferStatus: WithdrawalTransferStatus.PROCESSING,
-                outTradeNo,
-                transferStartedAt: req.transferStartedAt || new Date(),
-                failReason: null,
-            },
-        });
+        const outTradeNo = await this.prisma.$transaction(async (tx) => {
+            await this.lockWithdrawalRequestTx(tx, requestId);
+            const latest = await tx.walletWithdrawalRequest.findUnique({ where: { id: requestId } });
+            if (!latest || !['PAYING', 'FAILED'].includes(latest.status) || latest.channel !== 'WECHAT') {
+                throw new BadRequestException('该提现申请已变更，请刷新后重试');
+            }
+            await this.lockWalletAccountTx(tx, latest.userId);
+            const funding = await inspectWalletFundingTx(tx, latest.userId, latest.id);
+            await this.assertExitOrderReserveTx(tx, latest.userId, funding.spendableAssets);
+            const billNo = latest.outTradeNo || this.genTransferOutTradeNo(latest);
+            await tx.walletWithdrawalRequest.update({
+                where: { id: latest.id },
+                data: {
+                    status: 'PAYING',
+                    transferStatus: WithdrawalTransferStatus.PROCESSING,
+                    outTradeNo: billNo,
+                    transferStartedAt: latest.transferStartedAt || new Date(),
+                    failReason: null,
+                },
+            });
+            return billNo;
+        }, { isolationLevel: 'ReadCommitted' });
 
         try {
             const result = await this.wechatTransferService.createTransfer({
@@ -1190,6 +1342,7 @@ export class WalletWithdrawalsService {
                 include: { reserveTx: true },
             });
             if (!req) throw new BadRequestException('提现申请不存在');
+            if (Number(req.partialPaidAmount) > 0) throw new BadRequestException('已部分出款的申请须通过预留余款流程结清');
             if (req.status === 'PAID') {
                 throw new BadRequestException('已打款提现不能废除');
             }
@@ -1278,7 +1431,8 @@ export class WalletWithdrawalsService {
         return list.map((row: any) => ({
             ...row,
             reviewTime: row.reviewedAt ?? null,
-            statusText: this.getStatusText(row.status),
+            statusText: row.status === 'PENDING_REVIEW' && Number(row.partialPaidAmount) > 0
+                ? '已部分出款，余款预留' : this.getStatusText(row.status),
         }));
     }
 
@@ -1300,7 +1454,7 @@ export class WalletWithdrawalsService {
         const where = { status: { in: ['PENDING_REVIEW', 'PAYING', 'FAILED', 'APPROVED'] as any } };
         const { reviewedAt, fromDate, toDate, reviewDate: summaryDate } = this.buildReviewedAtSingleDayRange(reviewDate);
 
-        const [count, aggregate, list, todayApprovedAgg, todayPaidAgg] = await this.prisma.$transaction([
+        const [count, aggregate, list, todayApprovedAgg, todayPaidAgg, todayPartialAgg] = await this.prisma.$transaction([
             this.prisma.walletWithdrawalRequest.count({ where }),
             this.prisma.walletWithdrawalRequest.aggregate({
                 where,
@@ -1316,6 +1470,8 @@ export class WalletWithdrawalsService {
                             name: true,
                             realName: true,
                             staffEmploymentStatus: true,
+                            canWithdraw: true,
+                            staffExitedAt: true,
                             withdrawQrCodeKey: true,
                         },
                     },
@@ -1337,6 +1493,10 @@ export class WalletWithdrawalsService {
                 _sum: { amount: true },
                 _count: true,
             }),
+            this.prisma.walletWithdrawalRequest.aggregate({
+                where: { reviewedAt, status: 'PENDING_REVIEW', partialPaidAmount: { gt: 0 } },
+                _sum: { partialPaidAmount: true }, _count: true,
+            }),
         ]);
 
         const enriched = await Promise.all(
@@ -1351,18 +1511,13 @@ export class WalletWithdrawalsService {
                     },
                 });
 
-                let withdrawQrCodeUrl: string | null = null;
-                const cloudObjectId = r?.user?.withdrawQrCodeKey;
-                if (cloudObjectId) {
-                    withdrawQrCodeUrl = await tcbGetTempFileURL({
-                        cloudPath: cloudObjectId,
-                        maxAgeSeconds: 600,
-                    });
-                }
-
+                let reservedPayout: Awaited<ReturnType<WalletWithdrawalsService['quoteReservedPayout']>> = null;
                 let reviewEligibility: { canApprove: boolean; reason: string; postWithdrawalTotalBalance: number };
                 try {
                     const funding = await inspectWalletFundingTx(this.prisma as any, r.userId, r.id);
+                    reservedPayout = await this.quoteReservedPayout(this.prisma, r, funding.spendableAssets, r.user);
+                    if (Number(r.partialPaidAmount) > 0) throw new BadRequestException('已部分出款，余款须通过预留流程结清');
+                    await this.assertExitOrderReserveTx(this.prisma, r.userId, funding.spendableAssets, r.user);
                     reviewEligibility = funding.spendableAssets >= 0
                         ? { canApprove: true, reason: '可放行', postWithdrawalTotalBalance: funding.spendableAssets }
                         : { canApprove: false, reason: '提现后有效资产不足以覆盖欠款', postWithdrawalTotalBalance: funding.spendableAssets };
@@ -1373,6 +1528,15 @@ export class WalletWithdrawalsService {
                         postWithdrawalTotalBalance:
                             Number(wallet?.availableBalance || 0) + Number(wallet?.earningFrozenBalance || 0),
                     };
+                }
+
+                let withdrawQrCodeUrl: string | null = null;
+                const cloudObjectId = r?.user?.withdrawQrCodeKey;
+                if ((reviewEligibility.canApprove || (reservedPayout && reservedPayout.payout > 0)) && cloudObjectId) {
+                    withdrawQrCodeUrl = await tcbGetTempFileURL({
+                        cloudPath: cloudObjectId,
+                        maxAgeSeconds: 600,
+                    });
                 }
 
                 const [equipmentRisk, offlineFeeRisk] = await Promise.all([
@@ -1405,6 +1569,7 @@ export class WalletWithdrawalsService {
                         withdrawFrozenBalance: 0,
                     },
                     withdrawQrCodeUrl: withdrawQrCodeUrl || null,
+                    reservedPayout,
                     reviewEligibility,
                     feeRiskPreview,
                     wechatAutoTransfer: await this.getWechatAutoEligibilitySnapshot(r.userId),
@@ -1419,10 +1584,10 @@ export class WalletWithdrawalsService {
                 reviewDate: summaryDate,
                 reviewedAtFrom: fromDate.toISOString(),
                 reviewedAtTo: toDate.toISOString(),
-                approvedAmount: Number(todayApprovedAgg?._sum?.amount || 0),
-                approvedCount: Number(todayApprovedAgg?._count || 0),
-                paidAmount: Number(todayPaidAgg?._sum?.amount || 0),
-                paidCount: Number(todayPaidAgg?._count || 0),
+                approvedAmount: roundMoney(Number(todayApprovedAgg?._sum?.amount || 0) + Number(todayPartialAgg._sum.partialPaidAmount || 0)),
+                approvedCount: Number(todayApprovedAgg?._count || 0) + todayPartialAgg._count,
+                paidAmount: roundMoney(Number(todayPaidAgg?._sum?.amount || 0) + Number(todayPartialAgg._sum.partialPaidAmount || 0)),
+                paidCount: Number(todayPaidAgg?._count || 0) + todayPartialAgg._count,
             },
             list: enriched,
         };
@@ -1483,7 +1648,7 @@ export class WalletWithdrawalsService {
         // 主查询
         // ===============================
 
-        const [total, list, approvedAgg, paidAgg] = await this.prisma.$transaction([
+        const [total, list, approvedAgg, paidAgg, partialAgg] = await this.prisma.$transaction([
             this.prisma.walletWithdrawalRequest.count({ where }),
             this.prisma.walletWithdrawalRequest.findMany({
                 where,
@@ -1518,6 +1683,10 @@ export class WalletWithdrawalsService {
                 _sum: { amount: true },
                 _count: true,
             }),
+            this.prisma.walletWithdrawalRequest.aggregate({
+                where: { AND: [where, { status: 'PENDING_REVIEW', partialPaidAmount: { gt: 0 } }] },
+                _sum: { partialPaidAmount: true }, _count: true,
+            }),
         ]);
 
         return {
@@ -1529,10 +1698,10 @@ export class WalletWithdrawalsService {
             page: Math.max(1, Number(page) || 1),
             pageSize: take,
             summary: {
-                approvedAmount: approvedAgg._sum.amount || 0,
-                approvedCount: approvedAgg._count || 0,
-                paidAmount: paidAgg._sum.amount || 0,
-                paidCount: paidAgg._count || 0,
+                approvedAmount: roundMoney(Number(approvedAgg._sum.amount || 0) + Number(partialAgg._sum.partialPaidAmount || 0)),
+                approvedCount: approvedAgg._count + partialAgg._count,
+                paidAmount: roundMoney(Number(paidAgg._sum.amount || 0) + Number(partialAgg._sum.partialPaidAmount || 0)),
+                paidCount: paidAgg._count + partialAgg._count,
             },
         };
     }
@@ -1568,13 +1737,16 @@ export class WalletWithdrawalsService {
 
         const rows = await this.prisma.walletWithdrawalRequest.findMany({
             where: {
-                ...baseWhere,
-                status: { in: [...approvedStatusList] as any },
+                AND: [baseWhere, { OR: [
+                    { status: { in: [...approvedStatusList] } },
+                    { status: 'PENDING_REVIEW', partialPaidAmount: { gt: 0 } },
+                ] }],
             },
             select: {
                 userId: true,
                 amount: true,
                 status: true,
+                partialPaidAmount: true,
             },
         });
 
@@ -1582,13 +1754,14 @@ export class WalletWithdrawalsService {
         const paidMap = new Map<number, { paidAmount: number; paidCount: number }>();
         for (const row of rows as any[]) {
             const uid = Number(row.userId);
-            const amount = Number(row.amount || 0);
+            const partial = row.status === 'PENDING_REVIEW';
+            const amount = Number(partial ? row.partialPaidAmount : row.amount);
             const a = approvedMap.get(uid) || { approvedAmount: 0, approvedCount: 0 };
             a.approvedAmount += amount;
             a.approvedCount += 1;
             approvedMap.set(uid, a);
 
-            if (String(row.status) === 'PAID') {
+            if (row.status === 'PAID' || partial) {
                 const p = paidMap.get(uid) || { paidAmount: 0, paidCount: 0 };
                 p.paidAmount += amount;
                 p.paidCount += 1;

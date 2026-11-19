@@ -115,6 +115,16 @@ export class WalletWithdrawalsController {
         return this.service.reviewWithdrawal({ ...body, reviewerId });
     }
 
+    @UseGuards(PermissionsGuard)
+    @Permissions(WITHDRAWALS_PAGE)
+    @Post('reserved-payout')
+    async reservedPayout(
+        @Req() req: any,
+        @Body() body: { requestId: number; stage: 'PARTIAL' | 'FINAL'; payout: number; offset: number; remark: string },
+    ) {
+        return this.service.recordReservedPayout({ ...body, operatorId: req.user?.userId });
+    }
+
     // ✅ 管理端：查询微信提现状态（成功时会真正完成出款扣减提现冻结）
     @UseGuards(PermissionsGuard)
     @Permissions(WITHDRAWALS_PAGE)

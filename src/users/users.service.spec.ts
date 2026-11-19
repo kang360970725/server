@@ -166,6 +166,8 @@ describe('UsersService.create staff rejoin', () => {
       },
     };
     const tx: any = {
+      $queryRaw: jest.fn().mockResolvedValue([]),
+      walletWithdrawalRequest: { findFirst: jest.fn().mockResolvedValue(null) },
       walletAccount: {
         findUnique: jest.fn().mockResolvedValue(oldStaff.walletAccount),
         update: jest.fn().mockResolvedValue({}),
@@ -332,6 +334,7 @@ describe('UsersService staff exit actions', () => {
         findUnique: jest.fn().mockResolvedValue(activeStaff),
       },
       orderParticipant: {
+        findMany: jest.fn().mockResolvedValue([]),
         count: jest.fn().mockResolvedValue(49),
       },
     });
@@ -360,16 +363,23 @@ describe('UsersService staff exit actions', () => {
       },
     };
     const tx: any = {
+      $queryRaw: jest.fn().mockResolvedValue([]),
+      orderParticipant: { findMany: jest.fn().mockResolvedValue([]) },
+      walletWithdrawalRequest: { findFirst: jest.fn().mockResolvedValue(null) },
       userLog: {
         create: jest.fn().mockResolvedValue({ id: 88 }),
       },
       user: {
+        findUnique: jest.fn().mockResolvedValue(activeStaff),
         update: jest.fn().mockResolvedValue({
           ...activeStaff,
           staffEmploymentStatus: StaffEmploymentStatus.EXITED,
         }),
       },
       walletAccount: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          ...activeStaff.walletAccount, earningFrozenBalance: 0, withdrawFrozenBalance: 250,
+        }),
         update: jest.fn().mockResolvedValue({
           availableBalance: 500,
           frozenBalance: 0,
@@ -391,6 +401,7 @@ describe('UsersService staff exit actions', () => {
         findUnique: jest.fn().mockResolvedValue(activeStaff),
       },
       orderParticipant: {
+        findMany: jest.fn().mockResolvedValue([]),
         count: jest.fn().mockResolvedValue(60),
       },
       $transaction: jest.fn((callback) => callback(tx)),
@@ -403,6 +414,8 @@ describe('UsersService staff exit actions', () => {
         where: { userId: 23 },
         data: expect.objectContaining({
           availableBalance: { increment: -300 },
+          frozenBalance: 250,
+          earningFrozenBalance: 0,
           depositBalance: 0,
         }),
       }),
@@ -449,16 +462,23 @@ describe('UsersService staff exit actions', () => {
       },
     };
     const tx: any = {
+      $queryRaw: jest.fn().mockResolvedValue([]),
+      orderParticipant: { findMany: jest.fn().mockResolvedValue([]) },
+      walletWithdrawalRequest: { findFirst: jest.fn().mockResolvedValue(null) },
       userLog: {
         create: jest.fn().mockResolvedValue({ id: 89 }),
       },
       user: {
+        findUnique: jest.fn().mockResolvedValue(activeStaff),
         update: jest.fn().mockResolvedValue({
           ...activeStaff,
           staffEmploymentStatus: StaffEmploymentStatus.EXITED,
         }),
       },
       walletAccount: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          ...activeStaff.walletAccount, earningFrozenBalance: 0, withdrawFrozenBalance: 0,
+        }),
         update: jest.fn().mockResolvedValue({
           availableBalance: 0,
           frozenBalance: 0,
@@ -480,6 +500,7 @@ describe('UsersService staff exit actions', () => {
         findUnique: jest.fn().mockResolvedValue(activeStaff),
       },
       orderParticipant: {
+        findMany: jest.fn().mockResolvedValue([]),
         count: jest.fn().mockResolvedValue(60),
       },
       $transaction: jest.fn((callback) => callback(tx)),
@@ -510,4 +531,43 @@ describe('UsersService staff exit actions', () => {
       }),
     );
   });
+
+  it('retains funds for unsettled bomb losses during clearance', async () => {
+    const staff = { id: 25, userType: UserType.STAFF, staffEmploymentStatus: StaffEmploymentStatus.ACTIVE };
+    const tx: any = {
+      $queryRaw: jest.fn().mockResolvedValue([]),
+      user: {
+        findUnique: jest.fn().mockResolvedValue(staff),
+        update: jest.fn().mockResolvedValue({ ...staff, staffEmploymentStatus: StaffEmploymentStatus.EXITED }),
+      },
+      userLog: { create: jest.fn().mockResolvedValue({ id: 90 }) },
+      walletWithdrawalRequest: { findFirst: jest.fn().mockResolvedValue(null) },
+      walletAccount: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          availableBalance: 50, frozenBalance: 0, withdrawFrozenBalance: 0, depositBalance: 0,
+        }),
+        update: jest.fn().mockResolvedValue({ availableBalance: 30, frozenBalance: 0 }),
+      },
+      walletTransaction: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn() },
+      orderParticipant: { findMany: jest.fn().mockResolvedValue([{
+        progressBaseWan: -30,
+        dispatch: { id: 42, order: { id: 43, autoSerial: 'ORDER43', baseAmountWan: 100,
+          settlementBaseAmount: 100, projectSnapshot: { billingMode: 'GUARANTEED' } } },
+      }]) },
+    };
+    const service = createService({
+      user: { findUnique: jest.fn().mockResolvedValue(staff) },
+      $transaction: (callback: any) => callback(tx),
+    });
+
+    await service.clearStaffAssets(25, { remark: '清退' } as any, 1, actor);
+
+    expect(tx.walletAccount.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ availableBalance: 30 }),
+    }));
+    expect(tx.walletTransaction.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ amount: 20, sourceType: 'STAFF_CLEAR' }),
+    }));
+  });
+
 });

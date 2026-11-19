@@ -125,7 +125,7 @@ const splitEvenlyWithResidual = (total: number, count: number) => {
     return {base, residual};
 };
 
-const getSettlementBaseAmount = (order: any) => {
+export const getSettlementBaseAmount = (order: any) => {
     const explicit = Number(order?.settlementBaseAmount ?? 0);
     if (Number.isFinite(explicit) && explicit > 0) return roundMix1(explicit);
 
