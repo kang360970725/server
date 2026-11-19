@@ -6518,10 +6518,26 @@ export class OrdersService {
             preheatFallback = days.length > 0;
         }
         if (!days.length) {
+            const tournaments = await this.prisma.liveTournament.findMany({
+                where: { status: 'PUBLISHED', salesEndAt: { gt: now } },
+                orderBy: [{ salesStartAt: 'asc' }, { id: 'desc' }],
+                select: { id: true, title: true, salesStartAt: true, salesEndAt: true },
+            });
+            const tournament = tournaments.find(item => item.salesStartAt <= now && item.salesEndAt > now)
+                ?? tournaments[0];
+            if (tournament) {
+                return {
+                    day: null,
+                    tournament,
+                    serverNow: now,
+                    selectionReason: '赛事尚未排期，已进入赛事售票预热展示',
+                };
+            }
             return {
                 day: null,
+                tournament: null,
                 serverNow: now,
-                message: '今日暂无已发布的直播场次，请联系赛事运营确认排期',
+                message: '暂无正在售票或等待开售的已发布赛事',
             };
         }
 
@@ -6551,6 +6567,34 @@ export class OrdersService {
                 : state === 'IN_PROGRESS'
                 ? '已自动关联当前进行中的场次'
                 : state === 'UPCOMING' ? '已自动关联今日最近的待开场场次' : '已自动关联今日最后一场',
+        };
+    }
+
+    async getLiveTournamentPreheat(tournamentId: number) {
+        if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) throw new BadRequestException('请选择有效赛事');
+        const tournament = await this.prisma.liveTournament.findUnique({ where: { id: tournamentId } });
+        if (!tournament || tournament.status !== 'PUBLISHED') throw new BadRequestException('赛事暂不可展示');
+        const counts = await this.prisma.liveTournamentEntry.groupBy({
+            by: ['status'],
+            where: { tournamentId, activeMemberId: { not: null }, status: { not: 'VOID' } },
+            _count: { _all: true },
+        });
+        const occupied = counts.reduce((total, row) => total + row._count._all, 0);
+        const pending = counts.find(row => row.status === 'PENDING_PAYMENT')?._count._all ?? 0;
+        const now = new Date();
+        return {
+            tournamentId: tournament.id,
+            title: tournament.title,
+            salesStartAt: tournament.salesStartAt,
+            salesEndAt: tournament.salesEndAt,
+            sales: {
+                paid: occupied - pending,
+                remaining: Math.max(0, Math.min(70, tournament.ticketLimit) - occupied),
+                limit: Math.min(70, tournament.ticketLimit),
+                threshold: tournament.bookingThreshold,
+                booked: Boolean(tournament.bookingOpenedAt),
+                open: now >= tournament.salesStartAt && now < tournament.salesEndAt,
+            },
         };
     }
 

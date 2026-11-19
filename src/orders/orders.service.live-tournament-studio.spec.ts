@@ -13,7 +13,10 @@ const day = (id: number, startsAt: string, endsAt: string) => ({
 });
 
 async function resolve(days: ReturnType<typeof day>[], now: string) {
-    const prisma = { liveTournamentDay: { findMany: jest.fn().mockResolvedValue(days) } };
+    const prisma = {
+        liveTournamentDay: { findMany: jest.fn().mockResolvedValue(days) },
+        liveTournament: { findMany: jest.fn().mockResolvedValue([]) },
+    };
     const result = await (OrdersService.prototype.resolveLiveTournamentStudioDay as any)
         .call({ prisma }, new Date(now));
     return { result, findMany: prisma.liveTournamentDay.findMany };
@@ -55,11 +58,30 @@ describe('resolveLiveTournamentStudioDay', () => {
         expect(result.selectionReason).toContain('预热展示');
     });
 
+    it('赛事尚未排期时仍返回赛事级售票预热入口', async () => {
+        const prisma = {
+            liveTournamentDay: { findMany: jest.fn().mockResolvedValue([]) },
+            liveTournament: { findMany: jest.fn().mockResolvedValue([{
+                id: 8,
+                title: '未排期赛事',
+                salesStartAt: new Date('2026-11-01T00:00:00.000Z'),
+                salesEndAt: new Date('2026-12-01T00:00:00.000Z'),
+            }]) },
+        };
+
+        const result = await (OrdersService.prototype.resolveLiveTournamentStudioDay as any)
+            .call({ prisma }, new Date('2026-11-19T08:00:00.000Z'));
+
+        expect(result.day).toBeNull();
+        expect(result.tournament.id).toBe(8);
+        expect(result.selectionReason).toContain('尚未排期');
+    });
+
     it('没有今日或未来的已发布场次时安全停止', async () => {
         const { result, findMany } = await resolve([], '2026-11-19T08:00:00.000Z');
 
         expect(result.day).toBeNull();
-        expect(result.message).toContain('今日暂无');
+        expect(result.message).toContain('暂无正在售票');
         expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
             where: expect.objectContaining({ tournament: { status: 'PUBLISHED' } }),
         }));

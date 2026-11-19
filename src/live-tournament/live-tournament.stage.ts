@@ -70,6 +70,7 @@ export async function getTournamentStage(db: Client, dayId: number, internal: bo
         sales: {
             paid: occupied - pending,
             remaining: Math.max(0, Math.min(70, tournament.ticketLimit) - occupied),
+            limit: Math.min(70, tournament.ticketLimit),
             threshold: tournament.bookingThreshold,
             booked: Boolean(tournament.bookingOpenedAt) && tournament.status === 'PUBLISHED',
             open: tournament.status === 'PUBLISHED' && now >= tournament.salesStartAt && now < tournament.salesEndAt,
