@@ -144,6 +144,19 @@ export class OrdersController {
         });
     }
 
+    @Post('store-dashboard')
+    async storeDashboard(@Req() req: any, @Body() body: { date?: string }) {
+        const userType = String(req.user?.userType || '').trim().toUpperCase();
+        const roleName = String(req.user?.roleName || '').trim().toUpperCase();
+        if (userType !== 'SUPER_ADMIN' && !['SUPER_ADMIN', 'STORE_MANAGER', '店长'].includes(roleName)) {
+            throw new ForbiddenException('仅店长或超级管理员可以查看');
+        }
+        if (body?.date !== undefined && (typeof body.date !== 'string' || !body.date)) {
+            throw new BadRequestException('统计日期格式无效');
+        }
+        return this.ordersService.getStoreDashboard(body?.date);
+    }
+
     /** 续单榜单 */
     @Post('renewals/leaderboard')
     @UseGuards(PermissionsGuard)

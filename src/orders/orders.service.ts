@@ -1,3 +1,4 @@
+import { getStoreDashboard } from './store-dashboard';
 import { canMemberEnterTournament, tournamentMemberEligibilitySelect } from '../live-tournament/live-tournament.eligibility';
 import { recordTournamentReminder, tournamentReminderCandidates, tournamentWechatScheduleRemark } from '../live-tournament/live-tournament.reminders';
 import { closeTournamentLeaderboard, publishTournamentRound } from '../live-tournament/live-tournament.scores';
@@ -5086,7 +5087,7 @@ export class OrdersService {
                     },
                     remark: dto?.remark ?? null,
                     at: now,
-                });
+                }, tx);
 
                 return;
             }
@@ -5164,7 +5165,7 @@ export class OrdersService {
                 targetUserIds: target,
                 remark: dto?.remark ?? null,
                 at: now,
-            });
+            }, tx);
 
             // 本轮仍是当前轮，确保订单状态保持待接单
             await tx.order.update({
@@ -9264,6 +9265,10 @@ export class OrdersService {
                 totalTips: round2(list.reduce((sum, it) => sum + Number(it.tipTotal || 0), 0)),
             },
         };
+    }
+
+    async getStoreDashboard(date?: string) {
+        return getStoreDashboard(this.prisma, date);
     }
 
     async getRenewalLeaderboard(params: {dimension?: string; startAt?: string; endAt?: string; keyword?: string; page?: number; limit?: number}) {
