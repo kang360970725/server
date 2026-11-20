@@ -4316,41 +4316,47 @@ export class OrdersService {
 
     async deleteOrder(orderId: number, operatorId: number, remark?: string) {
         if (!orderId) throw new BadRequestException('orderId 必填');
-
-        const order = await this.prisma.order.findUnique({
-            where: {id: orderId},
-            select: {
-                id: true,
-                autoSerial: true,
-                status: true,
-                isPaid: true,
-                orderSource: true,
-            },
-        });
-
-        if (!order) throw new NotFoundException('订单不存在');
-
-        if (String(order.status) !== OrderStatus.REFUNDED) {
-            throw new BadRequestException('仅已退款订单允许删除');
-        }
-
-        await this.prisma.order.delete({
-            where: {id: orderId},
-        });
-
-        if (operatorId) {
-            await this.prisma.userLog.create({
-                data: {
-                    userId: operatorId,
-                    action: 'DELETE_ORDER',
-                    targetType: 'ORDER',
-                    targetId: orderId,
-                    oldData: order as any,
-                    newData: null as any,
-                    remark: remark || '删除订单',
+        const order = await this.prisma.$transaction(async (tx) => {
+            await tx.$queryRawUnsafe('SELECT id FROM `Order` WHERE id = ? FOR UPDATE', orderId);
+            const lockedOrder = await tx.order.findUnique({
+                where: {id: orderId},
+                select: {
+                    id: true,
+                    autoSerial: true,
+                    status: true,
+                    isPaid: true,
+                    orderSource: true,
                 },
             });
-        }
+            if (!lockedOrder) throw new NotFoundException('订单不存在');
+            if (String(lockedOrder.status) !== OrderStatus.REFUNDED) {
+                throw new BadRequestException('仅已退款订单允许删除');
+            }
+            const pendingManualRefunds = await tx.orderRefund.count({
+                where: {orderId, status: 'MANUAL_REQUIRED'},
+            });
+            if (pendingManualRefunds > 0) throw new BadRequestException('人工退款尚未确认完成，暂不可删除订单');
+
+            const tournamentTicket = await tx.liveTournamentEntry.findUnique({
+                where: {orderId}, select: {id: true},
+            });
+            if (tournamentTicket) await voidTournamentTicket(tx, orderId);
+            await tx.order.delete({where: {id: orderId}});
+            if (operatorId) {
+                await tx.userLog.create({
+                    data: {
+                        userId: operatorId,
+                        action: 'DELETE_ORDER',
+                        targetType: 'ORDER',
+                        targetId: orderId,
+                        oldData: lockedOrder as any,
+                        newData: null as any,
+                        remark: remark || '删除订单',
+                    },
+                });
+            }
+            return lockedOrder;
+        });
 
         return {
             success: true,
@@ -6799,7 +6805,7 @@ export class OrdersService {
 
     async getMyLiveTournament(memberId: number, orderId: number) {
         const entry = await this.prisma.liveTournamentEntry.findFirst({
-            where: {orderId, memberId},
+            where: {orderId, memberId, activeMemberId: memberId, status: {not: 'VOID'}},
             include: {
                 rounds: {select: {roundNumber: true, publishedScore: true}},
                 tournament: {include: {days: {orderBy: {startsAt: 'asc'}, include: {
@@ -6808,6 +6814,8 @@ export class OrdersService {
             },
         });
         if (!entry) return null;
+        const order = await this.prisma.order.findUnique({where: {id: orderId}, select: {status: true}});
+        if (!order || order.status === OrderStatus.REFUNDED || order.status === OrderStatus.CANCELLED) return null;
         const member = await this.prisma.user.findUnique({
             where: {id: memberId}, select: {name: true, phone: true, ...tournamentMemberEligibilitySelect},
         });
