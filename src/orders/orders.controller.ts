@@ -415,6 +415,11 @@ export class OrdersController {
             case 'create': return this.ordersService.createLiveTournament(body);
             case 'generate-days': return this.ordersService.generateLiveTournamentDays(Number(body.tournamentId), body);
             case 'add-day': return this.ordersService.addLiveTournamentDay(Number(body.tournamentId), body);
+            case 'update-day-time': return this.ordersService.updateLiveTournamentDayTime(
+                Number(body.dayId),
+                Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub),
+                body,
+            );
             case 'publish': return this.ordersService.publishLiveTournament(Number(body.tournamentId));
             case 'roster': return this.ordersService.publishLiveTournamentRoster(Number(body.dayId), body.quotas);
             case 'entries': return this.ordersService.getLiveTournamentDayEntries(Number(body.dayId));

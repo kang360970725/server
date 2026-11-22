@@ -6720,6 +6720,115 @@ export class OrdersService {
         });
     }
 
+    async updateLiveTournamentDayTime(dayId: number, operatorId: number, body: any) {
+        if (![dayId, operatorId].every(id => Number.isSafeInteger(id) && id > 0)) {
+            throw new BadRequestException('场次或操作人无效');
+        }
+        const startsAt = tournamentDate(body?.startsAt);
+        const endsAt = tournamentDate(body?.endsAt);
+        const reason = tournamentText(body?.reason, '调整原因')!;
+        if (reason.length < 2 || startsAt >= endsAt || endsAt <= new Date()) {
+            throw new BadRequestException('请核对直播时间和调整原因');
+        }
+        const dateKey = new Date(startsAt.getTime() + 8 * 3600_000).toISOString().slice(0, 10);
+        const result = await this.prisma.$transaction(async tx => {
+            const reference = await tx.liveTournamentDay.findUnique({
+                where: {id: dayId}, select: {tournamentId: true},
+            });
+            if (!reference) throw new BadRequestException('直播场次不存在');
+            await tx.$queryRaw`SELECT id FROM LiveTournament WHERE id = ${reference.tournamentId} FOR UPDATE`;
+            await tx.$queryRaw`SELECT id FROM LiveTournamentDay WHERE id = ${dayId} FOR UPDATE`;
+            const day = await tx.liveTournamentDay.findUnique({
+                where: {id: dayId}, include: {tournament: true},
+            });
+            if (!day || day.tournament.status === 'CLOSED') {
+                throw new BadRequestException('当前赛事不可调整直播时间');
+            }
+            if (startsAt.getTime() === day.startsAt.getTime() && endsAt.getTime() === day.endsAt.getTime()) {
+                throw new BadRequestException('直播时间没有变化');
+            }
+            const startedEntries = await tx.liveTournamentEntry.count({
+                where: {
+                    dayId,
+                    activeMemberId: {not: null},
+                    OR: [
+                        {firstRoundStartedAt: {not: null}},
+                        {usedAt: {not: null}},
+                        {status: {in: ['ON_STAGE', 'SCORING', 'FINISHED']}},
+                    ],
+                },
+            });
+            if (startedEntries && startsAt.getTime() !== day.startsAt.getTime()) {
+                throw new BadRequestException('比赛已经开始，只能延长或缩短结束时间');
+            }
+            const sameDate = await tx.liveTournamentDay.findFirst({
+                where: {tournamentId: day.tournamentId, id: {not: dayId}, date: new Date(dateKey)},
+                select: {id: true},
+            });
+            const overlap = await tx.liveTournamentDay.findFirst({
+                where: {
+                    tournamentId: day.tournamentId,
+                    id: {not: dayId},
+                    startsAt: {lt: endsAt},
+                    endsAt: {gt: startsAt},
+                },
+                select: {id: true},
+            });
+            if (sameDate || overlap) throw new BadRequestException('调整后的时间与已有直播场次冲突');
+            const startChanged = startsAt.getTime() !== day.startsAt.getTime();
+            const scheduledEntries = await tx.liveTournamentEntry.findMany({
+                where: {dayId, activeMemberId: {not: null}, status: {in: ['BOOKED', 'QUEUED']}},
+                select: {orderId: true},
+            });
+            const updated = await tx.liveTournamentDay.update({
+                where: {id: dayId},
+                data: {date: new Date(dateKey), startsAt, endsAt},
+            });
+            if (startChanged && scheduledEntries.length) {
+                await tx.liveTournamentEntry.updateMany({
+                    where: {dayId, activeMemberId: {not: null}, status: {in: ['BOOKED', 'QUEUED']}},
+                    data: {preMatchReminderAt: null},
+                });
+            }
+            const bounds = await tx.liveTournamentDay.aggregate({
+                where: {tournamentId: day.tournamentId}, _min: {startsAt: true}, _max: {endsAt: true},
+            });
+            await tx.liveTournament.update({
+                where: {id: day.tournamentId}, data: {startsAt: bounds._min.startsAt, endsAt: bounds._max.endsAt},
+            });
+            await tx.userLog.create({
+                data: {
+                    userId: operatorId,
+                    action: 'LIVE_TOURNAMENT_UPDATE_DAY_TIME',
+                    targetType: 'LIVE_TOURNAMENT_DAY',
+                    targetId: dayId,
+                    oldData: {startsAt: day.startsAt.toISOString(), endsAt: day.endsAt.toISOString()} as any,
+                    newData: {startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString()} as any,
+                    remark: reason,
+                },
+            });
+            return {updated, orderIds: scheduledEntries.map(entry => entry.orderId), startChanged};
+        }, {isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted});
+        let notifiedOrders = 0;
+        const formatScheduleTime = (value: Date) => value.toLocaleString('zh-CN', {
+            timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+        });
+        const scheduleRemark = `直播调整为 ${formatScheduleTime(result.updated.startsAt)} 至 ${formatScheduleTime(result.updated.endsAt)}（北京时间），请按新时间参赛`;
+        for (const orderId of result.orderIds) {
+            try {
+                const notification = await this.miniSubscribeMessageService.pushOrderProgressMessage(
+                    orderId, scheduleRemark, '直播时间调整',
+                );
+                if (notification && 'stationNotificationId' in notification && notification.stationNotificationId) {
+                    notifiedOrders += 1;
+                }
+            } catch (error) {
+                this.logger.warn(`赛事时间调整通知失败 order=${orderId}: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        }
+        return {...result.updated, notifiedOrders, notificationTargets: result.orderIds.length};
+    }
+
     async publishLiveTournament(id: number) {
         return this.prisma.$transaction(async (tx) => {
             await tx.$queryRaw`SELECT id FROM LiveTournament WHERE id = ${id} FOR UPDATE`;
