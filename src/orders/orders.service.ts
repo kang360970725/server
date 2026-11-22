@@ -6605,6 +6605,42 @@ export class OrdersService {
         };
     }
 
+    async openLiveTournamentBooking(tournamentId: number, operatorId: number, reasonValue: unknown) {
+        if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0 ||
+            !Number.isSafeInteger(operatorId) || operatorId <= 0) {
+            throw new BadRequestException('赛事或操作人无效');
+        }
+        const reason = tournamentText(reasonValue, '提前开放原因')!;
+        return this.prisma.$transaction(async (tx) => {
+            await tx.$queryRaw`SELECT id FROM LiveTournament WHERE id = ${tournamentId} FOR UPDATE`;
+            const tournament = await tx.liveTournament.findUnique({where: {id: tournamentId}});
+            if (!tournament || tournament.status !== 'PUBLISHED') {
+                throw new BadRequestException('只有已发布赛事可以提前开放预约');
+            }
+            if (tournament.bookingOpenedAt) return {...tournament, idempotent: true};
+            const futureDays = await tx.liveTournamentDay.count({
+                where: {tournamentId, startsAt: {gt: new Date()}},
+            });
+            if (!futureDays) throw new BadRequestException('请先创建至少一个尚未开始的直播场次');
+            const openedAt = new Date();
+            const updated = await tx.liveTournament.update({
+                where: {id: tournamentId}, data: {bookingOpenedAt: openedAt},
+            });
+            await tx.userLog.create({
+                data: {
+                    userId: operatorId,
+                    action: 'LIVE_TOURNAMENT_OPEN_BOOKING',
+                    targetType: 'LIVE_TOURNAMENT',
+                    targetId: tournamentId,
+                    oldData: {bookingOpenedAt: null, bookingThreshold: tournament.bookingThreshold} as any,
+                    newData: {bookingOpenedAt: openedAt, manualOverride: true} as any,
+                    remark: reason,
+                },
+            });
+            return {...updated, idempotent: false};
+        }, {isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted});
+    }
+
     async createLiveTournament(body: any) {
         const title = tournamentText(body?.title, '赛事名称')!;
         const gameProjectId = Number(body?.gameProjectId);

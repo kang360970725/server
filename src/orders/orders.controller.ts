@@ -406,6 +406,11 @@ export class OrdersController {
                 return this.ordersService.updateLiveTournamentStage(Number(body.dayId), Number(body.entryId), body.action);
             case 'studio-entry': return this.ordersService.resolveLiveTournamentStudioDay();
             case 'studio-preheat': return this.ordersService.getLiveTournamentPreheat(Number(body.tournamentId));
+            case 'open-booking': return this.ordersService.openLiveTournamentBooking(
+                Number(body.tournamentId),
+                Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub),
+                body.reason,
+            );
             case 'list': return this.ordersService.listLiveTournaments();
             case 'create': return this.ordersService.createLiveTournament(body);
             case 'generate-days': return this.ordersService.generateLiveTournamentDays(Number(body.tournamentId), body);
