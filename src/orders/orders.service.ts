@@ -6468,7 +6468,7 @@ export class OrdersService {
     }
 
     async listLiveTournaments() {
-        return this.prisma.liveTournament.findMany({
+        const tournaments = await this.prisma.liveTournament.findMany({
             orderBy: {id: 'desc'},
             include: {days: {orderBy: {date: 'asc'}, include: {
                 quotas: true,
@@ -6477,6 +6477,22 @@ export class OrdersService {
                 }}}},
             }}},
         });
+        const providerIds = [...new Set(tournaments.flatMap(tournament =>
+            tournament.days.flatMap(day => day.quotas.map(quota => quota.providerId))))];
+        const providers = providerIds.length ? await this.prisma.user.findMany({
+            where: {id: {in: providerIds}},
+            select: {id: true, name: true, realName: true},
+        }) : [];
+        const names = new Map(providers.map(provider => [provider.id, provider.name || provider.realName]));
+        return tournaments.map(tournament => ({
+            ...tournament,
+            days: tournament.days.map(day => ({
+                ...day,
+                quotas: day.quotas.map(quota => ({
+                    ...quota, providerName: names.get(quota.providerId) || '未命名服务者',
+                })),
+            })),
+        }));
     }
 
     async resolveLiveTournamentStudioDay(now = new Date()) {
@@ -6720,6 +6736,54 @@ export class OrdersService {
         });
     }
 
+    async updateLiveTournamentDayCapacity(dayId: number, operatorId: number, body: any) {
+        const capacity = body?.capacity;
+        const reason = tournamentText(body?.reason, '调整原因')!;
+        if (![dayId, operatorId].every(id => Number.isSafeInteger(id) && id > 0) ||
+            !Number.isSafeInteger(capacity) || capacity < 1 || capacity > 70 || reason.length < 2) {
+            throw new BadRequestException('请核对场次、人数上限（1–70 人）和调整原因');
+        }
+        return this.prisma.$transaction(async tx => {
+            const reference = await tx.liveTournamentDay.findUnique({
+                where: {id: dayId}, select: {tournamentId: true},
+            });
+            if (!reference) throw new BadRequestException('直播场次不存在');
+            await tx.$queryRaw`SELECT id FROM LiveTournament WHERE id = ${reference.tournamentId} FOR UPDATE`;
+            await tx.$queryRaw`SELECT id FROM LiveTournamentDay WHERE id = ${dayId} FOR UPDATE`;
+            const day = await tx.liveTournamentDay.findUnique({
+                where: {id: dayId}, include: {tournament: true, quotas: true},
+            });
+            const now = new Date();
+            if (!day || day.tournament.status === 'CLOSED' || day.endsAt <= now) {
+                throw new BadRequestException('已结束的赛事或场次不可调整人数上限');
+            }
+            if (capacity === day.capacity) return day;
+            const entries = await tx.liveTournamentEntry.findMany({
+                where: {dayId, activeMemberId: {not: null}, status: {notIn: ['VOID', 'ABSENT']}},
+                select: {providerId: true},
+            });
+            if (capacity < entries.length) {
+                throw new BadRequestException(`当前已有 ${entries.length} 人占用席位，人数上限不能低于该人数`);
+            }
+            if (day.rosterPublishedAt && day.startsAt > now && !entries.some(entry => entry.providerId !== null)) {
+                const minimum = day.quotas.reduce((total, quota) => total + quota.minimum, 0);
+                const maximum = day.quotas.reduce((total, quota) => total + quota.maximum, 0);
+                if (capacity < minimum || capacity > maximum) {
+                    throw new BadRequestException(`当前转盘名单支持 ${minimum}–${maximum} 人，请先调整服务者配额`);
+                }
+            }
+            const updated = await tx.liveTournamentDay.update({where: {id: dayId}, data: {capacity}});
+            await tx.userLog.create({
+                data: {
+                    userId: operatorId, action: 'LIVE_TOURNAMENT_UPDATE_DAY_CAPACITY',
+                    targetType: 'LIVE_TOURNAMENT_DAY', targetId: dayId,
+                    oldData: {capacity: day.capacity}, newData: {capacity}, remark: reason,
+                },
+            });
+            return updated;
+        }, {isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted});
+    }
+
     async updateLiveTournamentDayTime(dayId: number, operatorId: number, body: any) {
         if (![dayId, operatorId].every(id => Number.isSafeInteger(id) && id > 0)) {
             throw new BadRequestException('场次或操作人无效');
@@ -6887,15 +6951,31 @@ export class OrdersService {
             orderBy: [{queuePosition: 'asc'}, {id: 'asc'}],
             include: {rounds: true},
         });
-        const completed = await this.prisma.order.findMany({
-            where: {id: {in: entries.map(entry => entry.orderId)}, status: OrderStatus.COMPLETED},
-            select: {id: true},
-        });
+        if (!entries.length) return [];
+        const [completed, members] = await Promise.all([
+            this.prisma.order.findMany({
+                where: {id: {in: entries.map(entry => entry.orderId)}, status: OrderStatus.COMPLETED},
+                select: {id: true},
+            }),
+            this.prisma.user.findMany({
+                where: {id: {in: [...new Set(entries.map(entry => entry.memberId))]}},
+                select: {id: true, avatar: true, memberProfile: {select: {memberCode: true}}},
+            }),
+        ]);
         const completedIds = new Set(completed.map(order => order.id));
+        const membersById = new Map(members.map(member => [member.id, member]));
         const statusOrder: Record<string, number> = {
             ON_STAGE: 0, QUEUED: 1, BOOKED: 2, SCORING: 3, FINISHED: 4, ABSENT: 5, UNBOOKED: 6, VOID: 7,
         };
-        return entries.map(entry => ({...entry, fulfilled: completedIds.has(entry.orderId)})).sort((a, b) => {
+        return entries.map(entry => {
+            const member = membersById.get(entry.memberId);
+            return {
+                ...entry,
+                memberAvatar: member?.avatar ?? null,
+                memberCode: member?.memberProfile?.memberCode ?? null,
+                fulfilled: completedIds.has(entry.orderId),
+            };
+        }).sort((a, b) => {
             const statusDifference = (statusOrder[a.status] ?? 99) - (statusOrder[b.status] ?? 99);
             if (statusDifference) return statusDifference;
             if (a.status === 'QUEUED') {
