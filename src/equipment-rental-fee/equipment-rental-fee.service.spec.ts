@@ -67,14 +67,14 @@ describe('EquipmentRentalFeeService', () => {
     expect(prisma.equipmentRentalContract.create).not.toHaveBeenCalled();
   });
 
-  it('rejects manual generation until the billing month has ended in Shanghai', async () => {
-    jest.useFakeTimers().setSystemTime(new Date('2026-11-30T15:59:59Z'));
+  it('allows manual generation at most seven calendar days early in Shanghai', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-23T15:59:59Z'));
     const prisma = { equipmentRentalContract: { findMany: jest.fn().mockResolvedValue([]) } } as any;
     const service = new EquipmentRentalFeeService(prisma);
     try {
-      await expect(service.generateBillsForMonth('2026-11', undefined, true)).rejects.toThrow('只能手动生成已结束月份');
+      await expect(service.generateBillsForMonth('2026-11', undefined, true)).rejects.toThrow('缴费日前 7 天');
       expect(prisma.equipmentRentalContract.findMany).not.toHaveBeenCalled();
-      jest.setSystemTime(new Date('2026-11-30T16:00:00Z'));
+      jest.setSystemTime(new Date('2026-11-23T16:00:00Z'));
       await expect(service.generateBillsForMonth('2026-11', undefined, true)).resolves.toMatchObject({ affected: 0 });
     } finally {
       jest.useRealTimers();
@@ -285,6 +285,25 @@ describe('EquipmentRentalFeeService', () => {
     expect(prisma.equipmentRentalBill.update).not.toHaveBeenCalled();
   });
 
+  async function mockPaymentSchedule(tx: any) {
+    const bill = await tx.equipmentRentalBill.findUnique();
+    Object.assign(bill, {
+      contractId: 1,
+      billingSlot: 0,
+      periodStart: new Date(bill.billMonth + '-01T00:00:00Z'),
+      periodEnd: new Date(bill.billMonth + '-01T00:00:00Z'),
+    });
+    bill.periodEnd.setUTCMonth(bill.periodEnd.getUTCMonth() + 1, 0);
+    bill.periodEnd.setUTCHours(23, 59, 59);
+    tx.equipmentRentalContract = {
+      findUnique: jest.fn().mockResolvedValue({
+        id: 1, status: 'ACTIVE', startDate: bill.periodStart, monthlyAmount: bill.amount,
+      }),
+    };
+    tx.equipmentRentalBill.findMany = jest.fn(({ where }) => where.billingSlot === -1 ? [] : [bill]);
+    return bill;
+  }
+
   it('allows rental confirmation to make available balance negative when total assets stay non-negative', async () => {
     const tx: any = {
       equipmentRentalBill: {
@@ -317,6 +336,7 @@ describe('EquipmentRentalFeeService', () => {
     } as any;
     const service = new EquipmentRentalFeeService(prisma);
 
+    await mockPaymentSchedule(tx);
     const result = await service.confirmMyBill(7, 11);
 
     expect(result).toMatchObject({ id: 11, status: 'PAID' });
@@ -367,8 +387,14 @@ describe('EquipmentRentalFeeService', () => {
     } as any;
     const service = new EquipmentRentalFeeService(prisma);
 
+    await mockPaymentSchedule(tx);
     await expect(service.confirmMyBill(7, 12)).rejects.toThrow('账户总资产不足');
     expect(tx.walletAccount.update).not.toHaveBeenCalled();
+    tx.equipmentRentalContract.findUnique.mockResolvedValue({
+      id: 1, status: 'ACTIVE', startDate: new Date('2026-07-01'), monthlyAmount: 100,
+    });
+    await expect(service.confirmMyBill(7, 12)).rejects.toThrow('账期或金额有差异');
+    expect(tx.walletTransaction.create).not.toHaveBeenCalled();
     expect(tx.walletTransaction.create).not.toHaveBeenCalled();
   });
 
@@ -398,6 +424,7 @@ describe('EquipmentRentalFeeService', () => {
     } as any;
     const service = new EquipmentRentalFeeService(prisma);
 
+    await mockPaymentSchedule(tx);
     const result = await service.confirmPaidByOtherChannel(13, 1, '微信收款码已收');
 
     expect(result).toMatchObject({ id: 13, status: 'PAID', walletTxId: null });
@@ -435,6 +462,7 @@ describe('EquipmentRentalFeeService', () => {
     const prisma = { $transaction: jest.fn((callback) => callback(tx)) } as any;
     const service = new EquipmentRentalFeeService(prisma);
 
+    await mockPaymentSchedule(tx);
     await service.confirmPaidByOtherChannel(14, 1, '线下实收调整', 88);
 
     expect(tx.equipmentRentalBill.update).toHaveBeenCalledWith(expect.objectContaining({

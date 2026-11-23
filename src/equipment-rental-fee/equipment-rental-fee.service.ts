@@ -280,9 +280,16 @@ export class EquipmentRentalFeeService {
     const nextEnd = data.endDate !== undefined ? data.endDate : this.getContractEndDate(existing);
     if (nextEnd && nextEnd.getTime() < nextStart.getTime()) throw new BadRequestException('结束日不能早于起租日');
 
+    const today = this.normalizeDate(new Date(Date.now() + 8 * 60 * 60 * 1000), '当前日期');
+    const cutoffChanged = (data.endDate !== undefined && +nextEnd !== +this.getContractEndDate(existing))
+      || (data.status === 'INACTIVE' && existing.status !== 'INACTIVE');
+    if (data.status === 'INACTIVE' && cutoffChanged && !nextEnd) {
+      throw new BadRequestException('停用租赁合同前，请填写实际截止日');
+    }
+
     return this.prisma.$transaction(async (tx) => {
       const updated = await (tx as any).equipmentRentalContract.update({
-        where: { id },
+        where: { id, updatedAt: existing.updatedAt },
         data,
         include: { user: { select: { id: true, name: true, phone: true, workMode: true } } },
       });
@@ -295,8 +302,24 @@ export class EquipmentRentalFeeService {
         newData: updated,
         remark: '编辑设备租赁配置',
       });
-      return updated;
-    });
+      const reconciliations = [];
+      if (cutoffChanged && nextEnd) {
+        const cutoffMonth = this.formatMonth(nextEnd);
+        const earlyBills = await tx.equipmentRentalBill.findMany({
+          where: { contractId: id, billMonth: { gte: cutoffMonth } },
+          select: { billMonth: true },
+        });
+        const months = new Set(earlyBills.map((bill) => bill.billMonth));
+        if (nextEnd <= today) months.add(cutoffMonth);
+        for (const month of months) {
+          const result = await this.reconcileContractMonth(tx, updated, month, operatorId, {
+            targeted: true, cutoffDate: month === cutoffMonth && nextEnd <= today ? nextEnd : undefined,
+          });
+          reconciliations.push(...result.reconciliations);
+        }
+      }
+      return { ...updated, reconciliations };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
   async listContracts(query: any) {
@@ -318,25 +341,36 @@ export class EquipmentRentalFeeService {
     return { list, total, page, limit };
   }
 
-  async generateBillsForMonth(monthInput: string, operatorId?: number, manual = Boolean(operatorId)) {
+  async generateBillsForMonth(monthInput: string, operatorId?: number, manual = Boolean(operatorId), contractId?: number) {
     const month = this.normalizeMonth(monthInput);
-    const currentShanghaiMonth = this.formatMonth(new Date(Date.now() + 8 * 60 * 60 * 1000));
-    if (manual && month >= currentShanghaiMonth) {
-      throw new BadRequestException('只能手动生成已结束月份的设备租赁账单');
+    const shanghaiNow = new Date(Date.now() + 8 * 60 * 60 * 1000);
+    const today = this.normalizeDate(shanghaiNow, '当前日期');
+    const dueDay = new Date(this.getMonthRange(month).end.getTime() + 1000);
+    if (manual && dueDay.getTime() - today.getTime() > 7 * 86_400_000) {
+      throw new BadRequestException('设备租赁账单最多可在缴费日前 7 天生成');
     }
-    const months = month >= CALENDAR_BILLING_TRANSITION_MONTH
+    const months = !contractId && month >= CALENDAR_BILLING_TRANSITION_MONTH
       ? [...new Set([LAST_LEGACY_SERVICE_MONTH, CALENDAR_BILLING_TRANSITION_MONTH, month])]
       : [month];
+    if (contractId !== undefined && (!Number.isSafeInteger(contractId) || contractId <= 0)) {
+      throw new BadRequestException('合同 ID 无效');
+    }
     const contracts = await (this.prisma as any).equipmentRentalContract.findMany({
-      where: {
+      where: contractId ? { id: contractId } : {
         user: { userType: UserType.STAFF },
         OR: [
           { status: 'ACTIVE', user: { staffEmploymentStatus: { in: [...BILLABLE_STAFF_STATUSES] } } },
+          { status: 'INACTIVE', endDate: { gte: this.getMonthRange(month).start } },
           { status: 'INACTIVE', bills: { some: { billingSlot: -1, billMonth: { in: [LAST_LEGACY_SERVICE_MONTH, CALENDAR_BILLING_TRANSITION_MONTH] } } } },
           { bills: { some: { billMonth: month, ...(operatorId ? {} : { billingSlot: { gte: 0 } }) } } },
         ],
       },
     });
+
+    if (contractId && !contracts.length) throw new NotFoundException('设备租赁合同不存在');
+    if (contractId && contracts[0].status === 'INACTIVE' && !this.getContractEndDate(contracts[0])) {
+      throw new BadRequestException('请先确认停用合同的实际截止日');
+    }
 
     let affected = 0;
     let correct = 0;
@@ -346,140 +380,165 @@ export class EquipmentRentalFeeService {
         await this.prisma.$transaction(async (db) => {
           const currentContract = await db.equipmentRentalContract.findUnique({ where: { id: contract.id } });
           if (!currentContract) return;
-          const segments = await this.getBillingSegments(db, currentContract, billingMonth);
-          const existingBills = await db.equipmentRentalBill.findMany({
-            where: {
-              contractId: contract.id,
-              billMonth: billingMonth,
-              ...(operatorId && billingMonth === month ? {} : { billingSlot: { gte: 0 } }),
-            },
-            include: {
-              user: { select: { id: true, name: true, phone: true } },
-              walletTx: {
-                select: {
-                  id: true,
-                  amount: true,
-                  sourceType: true,
-                  reversals: { select: { amount: true, direction: true, status: true } },
-                },
-              },
-            },
+          const result = await this.reconcileContractMonth(db, currentContract, billingMonth, operatorId, {
+            backfillOnly: billingMonth !== month, targeted: Boolean(contractId),
           });
-          const billsBySlot = new Map(existingBills.map((bill) => [bill.billingSlot, bill]));
-          const slots = new Set([...segments.map((segment) => segment.billingSlot), ...billsBySlot.keys()]);
-          for (const billingSlot of slots) {
-            const existing = billsBySlot.get(billingSlot);
-            const terms = billingSlot === -1
-              ? this.recalculateLegacyBill(currentContract, existing)
-              : segments[billingSlot];
-            if (billingMonth !== month && existing) continue;
-            if (!existing && currentContract.status === 'INACTIVE'
-              && (billingMonth > CALENDAR_BILLING_TRANSITION_MONTH || !this.getContractEndDate(currentContract))) continue;
-            const { periodStart, periodEnd, dueAt, amount } = terms ?? {
-              periodStart: existing.periodStart, periodEnd: existing.periodEnd, dueAt: existing.dueAt, amount: 0,
-            };
-            const overwrite = existing && !existing.walletTxId
-              && (existing.status === 'PENDING' || amount < Number(existing.amount)
-                || (existing.status === 'PAID' && Number(existing.amount) === 0 && !existing.confirmedAt));
-            if (existing && !overwrite) {
-              const currentAmount = this.toAmount(existing.amount);
-              const difference = round2(currentAmount - amount);
-              const refundedAmount = round2(
-                (existing.walletTx?.reversals || [])
-                  .filter((item: any) => item.direction === 'IN' && item.status !== 'REVERSED')
-                  .reduce((sum: number, item: any) => sum + Number(item.amount || 0), 0),
-              );
-              if (Math.abs(difference) < 0.005) {
-                correct += 1;
-              } else {
-                const adminPayLog = existing.walletTxId
-                  ? await db.userLog.findFirst({
-                      where: {
-                        targetType: 'EQUIPMENT_RENTAL_BILL',
-                        targetId: existing.id,
-                        action: 'EQUIPMENT_RENTAL_BILL_ADMIN_PAY',
-                      },
-                      select: { id: true },
-                    })
-                  : null;
-                const isSelfConfirmedPayment = Boolean(existing.walletTxId)
-                  && existing.walletTx?.sourceType !== 'EQUIPMENT_RENTAL_BILL_ADMIN_PAY'
-                  && !adminPayLog;
-                reconciliations.push({
-                  billId: existing.id,
-                  billMonth: billingMonth,
-                  userId: contract.userId,
-                  user: existing.user,
-                  currentAmount,
-                  correctAmount: amount,
-                  difference,
-                  refundedAmount,
-                  refundableAmount: round2(Math.max(0, Number(existing.paidAmount || 0))),
-                  canRefund: difference > 0 && isSelfConfirmedPayment && Number(existing.paidAmount || 0) > 0,
-                  reason: difference > 0
-                    ? (isSelfConfirmedPayment ? '重算金额低于已扣金额，可确认退还差额' : '仅服务者自行确认扣缴且存在钱包流水的账单可退费')
-                    : '重算金额高于当前账单，请人工核对后处理',
-                });
-              }
-              continue;
-            }
-            if (existing) {
-              const settled = existing.status !== 'PENDING' && (Number(existing.amount) > 0 || Boolean(existing.confirmedAt));
-              const paidAmount = settled ? amount : Math.min(amount, Number(existing.paidAmount));
-              const remainingAmount = round2(amount - paidAmount);
-              const updated = await db.equipmentRentalBill.update({
-                where: { id: existing.id, updatedAt: existing.updatedAt, AND: { walletTxId: null } },
-                data: {
-                  contractId: contract.id,
-                  periodStart,
-                  periodEnd,
-                  amount,
-                  paidAmount,
-                  remainingAmount,
-                  status: remainingAmount > 0 ? 'PENDING' : existing.status === 'WAIVED' ? 'WAIVED' : 'PAID',
-                  dueAt,
-                  generatedAt: new Date(),
-                },
-              });
-              await this.writeLogTx(db, {
-                operatorId,
-                action: 'EQUIPMENT_RENTAL_BILL_GENERATE_UPDATE',
-                targetId: existing.id,
-                oldData: existing,
-                newData: updated,
-                remark: `生成/更新设备租赁账单 ${billingMonth}`,
-              });
-            } else {
-              const created = await db.equipmentRentalBill.create({
-                data: {
-                  contractId: contract.id,
-                  userId: contract.userId,
-                  billMonth: billingMonth,
-                  billingSlot,
-                  periodStart,
-                  periodEnd,
-                  amount,
-                  paidAmount: 0,
-                  remainingAmount: amount,
-                  status: amount > 0 ? 'PENDING' : 'PAID',
-                  dueAt,
-                  generatedAt: new Date(),
-                },
-              });
-              await this.writeLogTx(db, {
-                operatorId,
-                action: 'EQUIPMENT_RENTAL_BILL_GENERATE_CREATE',
-                targetId: created.id,
-                newData: created,
-                remark: `生成设备租赁账单 ${billingMonth}`,
-              });
-            }
-            affected += 1;
-          }
+          affected += result.affected;
+          correct += result.correct;
+          reconciliations.push(...result.reconciliations);
         }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
       }
     }
     return { month, affected, correct, reconciliations };
+  }
+
+  private async reconcileContractMonth(
+    db: PrismaTx,
+    currentContract: Prisma.EquipmentRentalContractGetPayload<{}>,
+    billingMonth: string,
+    operatorId: number | undefined,
+    { backfillOnly = false, targeted = false, cutoffDate }: {
+      backfillOnly?: boolean; targeted?: boolean; cutoffDate?: Date;
+    } = {},
+  ) {
+    let affected = 0;
+    let correct = 0;
+    const reconciliations: any[] = [];
+    const segments = await this.getBillingSegments(db, currentContract, billingMonth, cutoffDate);
+    const existingBills = await db.equipmentRentalBill.findMany({
+      where: {
+        contractId: currentContract.id,
+        billMonth: billingMonth,
+        ...((operatorId || targeted) && !backfillOnly ? {} : { billingSlot: { gte: 0 } }),
+      },
+      include: {
+        user: { select: { id: true, name: true, phone: true } },
+        walletTx: {
+          select: {
+            id: true,
+            amount: true,
+            sourceType: true,
+            reversals: { select: { amount: true, direction: true, status: true } },
+          },
+        },
+      },
+    });
+    const billsBySlot = new Map(existingBills.map((bill) => [bill.billingSlot, bill]));
+    const slots = new Set([...segments.map((segment) => segment.billingSlot), ...billsBySlot.keys()]);
+    for (const billingSlot of slots) {
+      const existing = billsBySlot.get(billingSlot);
+      const terms = billingSlot === -1
+        ? this.recalculateLegacyBill(currentContract, existing)
+        : segments[billingSlot];
+      if (backfillOnly && existing) continue;
+      if (!targeted && !existing && currentContract.status === 'INACTIVE'
+        && !this.getContractEndDate(currentContract)) continue;
+      const { periodStart, periodEnd, dueAt, amount } = terms ?? {
+        periodStart: existing.periodStart, periodEnd: existing.periodEnd, dueAt: existing.dueAt, amount: 0,
+      };
+      const overwrite = existing && !existing.walletTxId
+        && (existing.status === 'PENDING' || amount < Number(existing.amount)
+          || (existing.status === 'PAID' && Number(existing.amount) === 0 && !existing.confirmedAt));
+      if (existing && (!overwrite || (targeted && existing.status !== 'PENDING' && Number(existing.paidAmount) > 0 && existing.status !== 'WAIVED'))) {
+        const currentAmount = this.toAmount(existing.amount);
+        const difference = round2(currentAmount - amount);
+        const refundedAmount = round2(
+          (existing.walletTx?.reversals || [])
+            .filter((item: any) => item.direction === 'IN' && item.status !== 'REVERSED')
+            .reduce((sum: number, item: any) => sum + Number(item.amount || 0), 0),
+        );
+        if (Math.abs(difference) < 0.005 && (!terms || (
+          +existing.periodStart === +periodStart && +existing.periodEnd === +periodEnd
+        ))) {
+          correct += 1;
+        } else {
+          const adminPayLog = existing.walletTxId
+            ? await db.userLog.findFirst({
+                where: {
+                  targetType: 'EQUIPMENT_RENTAL_BILL',
+                  targetId: existing.id,
+                  action: 'EQUIPMENT_RENTAL_BILL_ADMIN_PAY',
+                },
+                select: { id: true },
+              })
+            : null;
+          const isSelfConfirmedPayment = Boolean(existing.walletTxId)
+            && existing.walletTx?.sourceType !== 'EQUIPMENT_RENTAL_BILL_ADMIN_PAY'
+            && !adminPayLog;
+          reconciliations.push({
+            billId: existing.id,
+            billMonth: billingMonth,
+            userId: currentContract.userId,
+            user: existing.user,
+            currentAmount,
+            correctAmount: amount,
+            difference,
+            refundedAmount,
+            refundableAmount: round2(Math.max(0, Number(existing.paidAmount || 0))),
+            canRefund: difference > 0 && isSelfConfirmedPayment && Number(existing.paidAmount || 0) > 0,
+            reason: difference > 0
+              ? (isSelfConfirmedPayment ? '重算金额低于已扣金额，可确认退还差额' : '仅服务者自行确认扣缴且存在钱包流水的账单可退费')
+              : difference < 0 ? '重算金额高于当前账单，请人工核对后处理' : '计费区间有差异，请人工核对',
+          });
+        }
+        continue;
+      }
+      if (existing) {
+        const settled = existing.status !== 'PENDING' && (Number(existing.amount) > 0 || Boolean(existing.confirmedAt));
+        const paidAmount = settled ? amount : Math.min(amount, Number(existing.paidAmount));
+        const remainingAmount = round2(amount - paidAmount);
+        const updated = await db.equipmentRentalBill.update({
+          where: { id: existing.id, updatedAt: existing.updatedAt, AND: { walletTxId: null } },
+          data: {
+            contractId: currentContract.id,
+            periodStart,
+            periodEnd,
+            amount,
+            paidAmount,
+            remainingAmount,
+            status: remainingAmount > 0 ? 'PENDING' : existing.status === 'WAIVED' ? 'WAIVED' : 'PAID',
+            dueAt,
+            remark: amount > 0 && /^已作废[：:]/.test(existing.remark || '') ? null
+              : !terms && amount === 0 ? '已作废：计费区间超出合同有效期' : existing.remark,
+            generatedAt: new Date(),
+          },
+        });
+        await this.writeLogTx(db, {
+          operatorId,
+          action: 'EQUIPMENT_RENTAL_BILL_GENERATE_UPDATE',
+          targetId: existing.id,
+          oldData: existing,
+          newData: updated,
+          remark: `生成/更新设备租赁账单 ${billingMonth}`,
+        });
+      } else {
+        const created = await db.equipmentRentalBill.create({
+          data: {
+            contractId: currentContract.id,
+            userId: currentContract.userId,
+            billMonth: billingMonth,
+            billingSlot,
+            periodStart,
+            periodEnd,
+            amount,
+            paidAmount: 0,
+            remainingAmount: amount,
+            status: amount > 0 ? 'PENDING' : 'PAID',
+            dueAt,
+            generatedAt: new Date(),
+          },
+        });
+        await this.writeLogTx(db, {
+          operatorId,
+          action: 'EQUIPMENT_RENTAL_BILL_GENERATE_CREATE',
+          targetId: created.id,
+          newData: created,
+          remark: `生成设备租赁账单 ${billingMonth}`,
+        });
+      }
+      affected += 1;
+    }
+    return { affected, correct, reconciliations };
   }
 
   @Cron('0 10 1 * * *', { timeZone: 'Asia/Shanghai' })
@@ -497,6 +556,7 @@ export class EquipmentRentalFeeService {
     if (query?.billMonth) where.billMonth = this.normalizeMonth(query.billMonth);
     if (query?.status) where.status = String(query.status);
     if (query?.userId) where.userId = Number(query.userId);
+    if (query?.contractId) where.contractId = Number(query.contractId);
     if (query?.onlyRisk) where.status = 'PENDING';
 
     const { rows, total, stats, logs } = await this.prisma.$transaction(async (tx) => {
@@ -609,6 +669,38 @@ export class EquipmentRentalFeeService {
     });
   }
 
+  private async assertBillReadyForPayment(tx: Prisma.TransactionClient, bill: Prisma.EquipmentRentalBillGetPayload<{}>, cutoffDate?: Date) {
+    const contract = await tx.equipmentRentalContract.findUnique({ where: { id: bill.contractId } });
+    if (!contract || (contract.status === 'INACTIVE' && !this.getContractEndDate(contract))) {
+      throw new BadRequestException('设备租赁合同截止日待核对');
+    }
+    const today = this.normalizeDate(new Date(Date.now() + 8 * 60 * 60 * 1000), '当前日期');
+    if (!cutoffDate && this.normalizeDate(bill.periodEnd, '计费结束日') >= today
+      && (!this.getContractEndDate(contract) || +this.getContractEndDate(contract) > +today)) {
+      throw new BadRequestException('计费周期尚未结束，请到期后缴费');
+    }
+    const { start, end } = this.getMonthRange(bill.billMonth);
+    const bills = await tx.equipmentRentalBill.findMany({
+      where: { contractId: bill.contractId, periodStart: { lte: end }, periodEnd: { gte: start }, amount: { gt: 0 } },
+    });
+    const terms = await this.getBillingSegments(tx, contract, bill.billMonth, cutoffDate);
+    const matches = (row: typeof bill, term: { periodStart: Date; periodEnd: Date; amount: number }) =>
+      this.toDateOnlyString(row.periodStart) === this.toDateOnlyString(term.periodStart)
+      && this.toDateOnlyString(row.periodEnd) === this.toDateOnlyString(term.periodEnd)
+      && this.toAmount(row.amount) === term.amount;
+    const calendarBills = bills.filter((row) => row.billingSlot >= 0);
+    const legacyBills = bills.filter((row) => row.billingSlot === -1);
+    const legacyOverlap = legacyBills.some((row, index) => legacyBills.slice(index + 1)
+      .some((other) => row.periodStart <= other.periodEnd && row.periodEnd >= other.periodStart));
+    if (legacyOverlap || legacyBills.some((row) => !matches(row, this.recalculateLegacyBill(contract, row)))
+      || calendarBills.length !== terms.filter((term) => term.amount > 0).length
+      || terms.some((term) => term.amount > 0 && calendarBills.filter((row) => matches(row, term)).length !== 1)
+      || !this.toAmount(bill.remainingAmount)
+      || (bill.billingSlot === -1 && !matches(bill, this.recalculateLegacyBill(contract, bill)))) {
+      throw new BadRequestException('设备租赁账期或金额有差异，请先核准修复再缴费');
+    }
+  }
+
   private async payBillInTx(tx: any, bill: any, operatorId?: number, remark?: string) {
     const userId = Number(bill.userId);
     const amount = this.toAmount(bill.remainingAmount);
@@ -670,8 +762,9 @@ export class EquipmentRentalFeeService {
       const bill = await (tx as any).equipmentRentalBill.findUnique({ where: { id: billId } });
       if (!bill || Number(bill.userId) !== Number(userId)) throw new NotFoundException('设备租赁账单不存在');
       if (bill.status !== 'PENDING') throw new BadRequestException('该账单无需重复确认');
+      await this.assertBillReadyForPayment(tx, bill);
       return this.payBillInTx(tx, bill);
-    });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
   async payBillByAdmin(billId: number, operatorId?: number, remark?: string) {
@@ -681,8 +774,9 @@ export class EquipmentRentalFeeService {
       const bill = await (tx as any).equipmentRentalBill.findUnique({ where: { id } });
       if (!bill) throw new NotFoundException('设备租赁账单不存在');
       if (bill.status !== 'PENDING') throw new BadRequestException('该账单无需重复缴费');
+      await this.assertBillReadyForPayment(tx, bill);
       return this.payBillInTx(tx, bill, operatorId, String(remark || '').trim() || `管理员手动缴纳设备租赁费 ${bill.billMonth}`);
-    });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
   async prepareStaffExitSettlementTx(
@@ -784,6 +878,7 @@ export class EquipmentRentalFeeService {
       const bill = await (tx as any).equipmentRentalBill.findUnique({ where: { id: billId } });
       if (!bill || Number(bill.userId) !== Number(params.userId)) continue;
       if (bill.status !== 'PENDING' || Number(bill.remainingAmount || 0) <= 0) continue;
+      await this.assertBillReadyForPayment(tx, bill, params.cutoffDate);
       await this.payBillInTx(tx as any, bill, params.operatorId, '退店时自动结清设备使用费');
       paidBillIds.push(Number(bill.id));
     }
@@ -810,6 +905,7 @@ export class EquipmentRentalFeeService {
       const bill = await (tx as any).equipmentRentalBill.findUnique({ where: { id } });
       if (!bill) throw new NotFoundException('设备租赁账单不存在');
       if (bill.status !== 'PENDING') throw new BadRequestException('该账单无需重复确认');
+      await this.assertBillReadyForPayment(tx, bill);
 
       const amount = amountInput === undefined || amountInput === null || amountInput === ''
         ? this.toAmount(bill.remainingAmount)
@@ -836,7 +932,7 @@ export class EquipmentRentalFeeService {
         remark: normalizedRemark,
       });
       return updated;
-    });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   }
 
   async refundBill(billId: number, amountInput: any, remark?: string, operatorId?: number) {

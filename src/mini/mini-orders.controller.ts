@@ -27,6 +27,22 @@ export class MiniOrdersController {
     private readonly miniSubscribeMessageService: MiniSubscribeMessageService,
   ) {}
 
+  @Public()
+  @Get('live-tournament/promotions')
+  async liveTournamentPromotions() {
+    return miniOk(await this.ordersService.listPublicLiveTournamentPromotions());
+  }
+
+  @Public()
+  @Get('live-tournament')
+  async publicLiveTournament(@Query('tournamentId') tournamentId?: string) {
+    const id = tournamentId === undefined ? undefined : Number(tournamentId);
+    if (id !== undefined && (!Number.isSafeInteger(id) || id <= 0)) {
+      throw new BadRequestException('赛事无效');
+    }
+    return miniOk(await this.ordersService.getPublicLiveTournament(id));
+  }
+
   @Get('live-tournament/mine')
   async myLiveTournament(@Req() req: any, @Query('orderId') orderId: string) {
     const memberId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);

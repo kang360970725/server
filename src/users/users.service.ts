@@ -1355,6 +1355,91 @@ export class UsersService {
     };
   }
 
+  async reverseStaffExit(id: number, operatorId: number, actor: any) {
+    if (!operatorId) throw new ForbiddenException('无法确认操作人');
+    this.assertUserButtonPermission(actor, UserType.STAFF, 'exit', '当前角色无权撤销退店');
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${id} FOR UPDATE`;
+      const user = await tx.user.findUnique({ where: { id } });
+      if (user?.userType !== UserType.STAFF || user.staffEmploymentStatus !== StaffEmploymentStatus.EXITED) {
+        throw new BadRequestException('仅支持撤销已退店服务者的退店');
+      }
+      const exit = await tx.userLog.findFirst({
+        where: { targetType: 'USER', targetId: id, action: { in: ['STAFF_EXIT_SHOP', 'STAFF_REJOIN_SHOP', 'STAFF_EXIT_REVERSE', 'STAFF_ACTIVITY_AUTO_EXIT'] } },
+        orderBy: { id: 'desc' },
+      });
+      const details = exit?.newData as Record<string, unknown> | undefined;
+      const before = exit?.oldData as Record<string, unknown> | undefined;
+      const amount = Number(details?.refundDepositAmount);
+      if (exit?.action !== 'STAFF_EXIT_SHOP' || details?.addToBlacklist !== false
+        || details.mode !== 'RELEASE_TO_AVAILABLE'
+        || !Number.isFinite(amount) || amount < 0 || amount !== Number(before?.depositBalance)
+        || ['offlineFeeAmount', 'equipmentRentalFeeAmount', 'forfeitDepositAmount', 'depositTopUpForfeitAmount']
+          .some((key) => Number(details[key]) !== 0)) {
+        throw new BadRequestException('仅支持撤销未拉黑、未没收保证金且未结清费用的手动退店');
+      }
+      const exitDay = new Date(Math.floor((exit.createdAt.getTime() + 8 * 3600000) / 86400000) * 86400000);
+      const [equipmentContracts, offlineContracts] = await Promise.all([
+        tx.equipmentRentalContract.count({ where: { userId: id, status: 'INACTIVE', endDate: exitDay } }),
+        tx.offlineFeeContract.count({ where: { userId: id, status: 'INACTIVE', endDate: exitDay } }),
+      ]);
+      if (equipmentContracts || offlineContracts) {
+        throw new BadRequestException('退店涉及停用费用合同，请先人工核对合同与账期');
+      }
+      const withdrawal = await tx.walletWithdrawalRequest.findFirst({
+        where: { userId: id, OR: [
+          { status: { in: ['PENDING_REVIEW', 'APPROVED', 'PAYING'] } },
+          { createdAt: { gte: exit.createdAt }, OR: [
+            { status: { notIn: ['REJECTED', 'CANCELED'] } },
+            { transferStatus: { in: ['PROCESSING', 'WAIT_USER_CONFIRM', 'SUCCESS'] } },
+          ] },
+        ] },
+      });
+      if (withdrawal) throw new BadRequestException(`请先核对并关闭提现单 #${withdrawal.id}，确认资金已退回`);
+      const account = await tx.walletAccount.findUnique({ where: { userId: id } });
+      if (!account || Number(account.availableBalance) < amount || Number(account.depositBalance) !== 0
+        || Number(account.withdrawFrozenBalance) !== 0 || amount > Number(user.depositLimit)) {
+        throw new BadRequestException('余额、保证金或提现冻结状态有差异，请先人工核对');
+      }
+      if (amount > 0) {
+        const release = await tx.walletTransaction.findUnique({
+          where: { sourceType_sourceId: { sourceType: 'STAFF_EXIT_SHOP_RELEASE', sourceId: exit.id } },
+        });
+        const depositRelease = await tx.walletDepositTransaction.findFirst({
+          where: { userId: id, bizType: 'STAFF_EXIT_RELEASE', amount: -amount, createdAt: { gte: exit.createdAt } },
+        });
+        if (!depositRelease || release?.userId !== id || release.status !== 'AVAILABLE' || Number(release.amount) < amount) {
+          throw new BadRequestException('原保证金释放流水有差异，请先人工核对');
+        }
+        const after = await tx.walletAccount.update({
+          where: { userId: id },
+          data: { availableBalance: { decrement: amount }, depositBalance: { increment: amount } },
+        });
+        const remark = `撤销退店 #${exit.id}，恢复保证金`;
+        await tx.walletTransaction.create({ data: {
+          userId: id, direction: 'OUT', bizType: 'DEPOSIT_ADD', amount, status: 'AVAILABLE',
+          sourceType: 'STAFF_EXIT_REVERSE_DEPOSIT', sourceId: exit.id,
+          availableAfter: after.availableBalance, frozenAfter: after.frozenBalance, remark,
+        } });
+        await tx.walletDepositTransaction.create({ data: {
+          userId: id, amount, bizType: 'MANUAL_DEPOSIT', operatorId, remark,
+        } });
+      }
+      const now = new Date();
+      await tx.user.update({ where: { id }, data: {
+        status: UserStatus.ACTIVE, staffEmploymentStatus: StaffEmploymentStatus.ACTIVE,
+        staffExitedAt: null, staffCooldownUntil: null, staffExitLoginGraceUntil: null, canWithdraw: true,
+        activityAssessmentStartedAt: now, activityLastCompletedAt: null, activityNextChargeAt: null, activityTimerPaused: false,
+      } });
+      await tx.userLog.create({ data: {
+        userId: operatorId, targetType: 'USER', targetId: id, action: 'STAFF_EXIT_REVERSE',
+        oldData: { staffEmploymentStatus: user.staffEmploymentStatus },
+        newData: { staffEmploymentStatus: StaffEmploymentStatus.ACTIVE, exitLogId: exit.id, restoredDeposit: amount },
+      } });
+      return { restoredDeposit: amount };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }
+
   async exitStaffShop(id: number, dto: StaffExitDto, operatorId?: number, actor?: { userType?: UserType }) {
     if (dto?.mode === StaffExitMode.CLEAR_ALL) {
       return this.clearStaffAssets(
@@ -1906,17 +1991,9 @@ export class UsersService {
         : null;
 
     const nextStatus = String((updateUserDto as any)?.staffEmploymentStatus || oldUser?.staffEmploymentStatus || '');
-    if (oldUser.userType === UserType.STAFF && nextStatus === StaffEmploymentStatus.ACTIVE) {
-      if (oldUser.staffEmploymentStatus === StaffEmploymentStatus.BLACKLISTED) {
-        throw new BadRequestException('黑名单陪玩不支持再次入店');
-      }
-      if (
-        oldUser.staffEmploymentStatus === StaffEmploymentStatus.EXITED &&
-        oldUser.staffCooldownUntil &&
-        new Date(oldUser.staffCooldownUntil).getTime() > Date.now()
-      ) {
-        throw new BadRequestException('当前仍在退店冷却期内，不支持恢复正常状态');
-      }
+    if (oldUser.userType === UserType.STAFF && nextStatus !== oldUser.staffEmploymentStatus
+      && [StaffEmploymentStatus.EXITED, StaffEmploymentStatus.BLACKLISTED].some((status) => status === oldUser.staffEmploymentStatus)) {
+      throw new BadRequestException('已退店或拉黑的服务者需通过专用流程处理在店状态');
     }
 
     if (

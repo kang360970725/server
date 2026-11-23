@@ -63,7 +63,27 @@ describe('OrdersService customer identifier search', () => {
     expect(cutoff.getTime()).toBeGreaterThanOrEqual(before - 90 * 24 * 60 * 60 * 1000 - 1000);
   });
 
-  it('allows an old order lookup only through an exact full order serial', async () => {
+  it('searches archived orders across all history while retaining pagination', async () => {
+    const { service, prisma } = createService();
+    await service.listOrders({ status: 'ARCHIVED', keyword: '房间888', page: 2, limit: 20 });
+
+    const query = prisma.order.findMany.mock.calls[0][0];
+    expect(query).toMatchObject({ skip: 20, take: 20, where: { status: 'ARCHIVED' } });
+    expect(query.where.createdAt).toBeUndefined();
+    expect(prisma.order.count).toHaveBeenCalledWith({ where: query.where });
+  });
+
+  it('honors an explicit historical month when searching archived orders', async () => {
+    const { service, prisma } = createService();
+    await service.listOrders({ status: 'ARCHIVED', orderMonth: '2020-01' });
+
+    expect(prisma.order.findMany.mock.calls[0][0].where.createdAt).toEqual({
+      gte: new Date('2019-12-31T16:00:00Z'),
+      lt: new Date('2020-01-31T16:00:00Z'),
+    });
+  });
+
+  it('allows an old order lookup through an exact full order serial', async () => {
     const { service, prisma } = createService();
     await service.listOrders({ keyword: 'V01HSBMCM63ACH' });
     const where = prisma.order.findMany.mock.calls[0][0].where;

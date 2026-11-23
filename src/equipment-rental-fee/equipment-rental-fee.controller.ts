@@ -47,7 +47,7 @@ export class EquipmentRentalFeeController {
   @Permissions(FINANCE_EQUIPMENT_RENTAL_FEES_PAGE, FINANCE_RECORDS_PAGE)
   generateBills(@Body() body: any, @Req() req: any) {
     const operatorId = Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub);
-    return this.service.generateBillsForMonth(body?.month, Number.isFinite(operatorId) ? operatorId : undefined, true);
+    return this.service.generateBillsForMonth(body?.month, Number.isFinite(operatorId) ? operatorId : undefined, true, body?.contractId === undefined ? undefined : Number(body.contractId));
   }
 
   @Post('bills/waive')

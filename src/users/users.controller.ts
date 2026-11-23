@@ -221,6 +221,13 @@ export class UsersController {
     return this.usersService.exitStaffShop(id, dto, req.user.userId, req.user);
   }
 
+  @Post(':id/staff-exit-reverse')
+  @UseGuards(PermissionsGuard)
+  @Permissions('users:staff:exit:button')
+  reverseStaffExit(@Param('id', ParseIntPipe) id: number, @Request() req) {
+    return this.usersService.reverseStaffExit(id, req.user.userId, req.user);
+  }
+
   @Post(':id/staff-exit-preview')
   @UseGuards(PermissionsGuard)
   @Permissions(...UsersController.userManagePermissions)

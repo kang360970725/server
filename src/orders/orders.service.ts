@@ -3514,7 +3514,8 @@ export class OrdersService {
                 where.createdAt = {gte: start, lt: end};
             }
         }
-        if (!exactSerial) {
+        // 存单可能长期等待再次派单，按存单状态查询时仅应用用户指定的月份。
+        if (!exactSerial && where.status !== OrderStatus.ARCHIVED) {
             const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
             if (where.createdAt) {
                 const requestedStart = where.createdAt.gte instanceof Date ? where.createdAt.gte : cutoff;
@@ -7026,6 +7027,47 @@ export class OrdersService {
                 this.logger.warn(`赛事赛前提醒失败 entry=${id}: ${error instanceof Error ? error.message : String(error)}`);
             }
         }
+    }
+
+    async listPublicLiveTournamentPromotions() {
+        const now = new Date();
+        const tournaments = await this.prisma.liveTournament.findMany({
+            where: {
+                status: 'PUBLISHED', leaderboardLockedAt: null,
+                OR: [{endsAt: {gt: now}}, {endsAt: null, salesEndAt: {gt: now}}],
+            },
+            orderBy: {id: 'desc'},
+            select: {
+                id: true, title: true, salesStartAt: true, salesEndAt: true,
+                startsAt: true, endsAt: true,
+            },
+        });
+        return tournaments.map(({id, title, salesStartAt, salesEndAt, startsAt, endsAt}) => ({
+            id, title, startsAt, endsAt,
+            salesOpen: salesStartAt <= now && salesEndAt > now,
+        }));
+    }
+
+    async getPublicLiveTournament(tournamentId?: number) {
+        const tournament = await this.prisma.liveTournament.findFirst({
+            where: {id: tournamentId, status: {in: ['PUBLISHED', 'CLOSED']}},
+            orderBy: {id: 'desc'},
+            select: {
+                id: true, title: true, status: true, gameProjectId: true, salesStartAt: true, salesEndAt: true,
+                startsAt: true, endsAt: true, leaderboardLockedAt: true, leaderboardSnapshot: true,
+            },
+        });
+        if (!tournament) return null;
+        const now = new Date();
+        return {
+            id: tournament.id, title: tournament.title, gameProjectId: tournament.gameProjectId,
+            salesStartAt: tournament.salesStartAt, salesEndAt: tournament.salesEndAt,
+            startsAt: tournament.startsAt, endsAt: tournament.endsAt,
+            salesOpen: tournament.status === 'PUBLISHED' && now >= tournament.salesStartAt && now < tournament.salesEndAt,
+            closed: tournament.status === 'CLOSED' || Boolean(tournament.leaderboardLockedAt),
+            leaderboard: tournamentId === undefined ? undefined :
+                await readTournamentLeaderboard(this.prisma, tournament.id, tournament.leaderboardSnapshot),
+        };
     }
 
     async getMyLiveTournament(memberId: number, orderId: number) {
