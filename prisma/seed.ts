@@ -58,6 +58,8 @@ async function main() {
         { key: 'miniapp:home:page', name: '首页配置', module: 'miniapp', type: PermissionType.PAGE, parentKey: 'menu:miniapp-config' },
         { key: 'miniapp:customer-service:page', name: '客服二维码配置', module: 'miniapp', type: PermissionType.PAGE, parentKey: 'menu:miniapp-config' },
         { key: 'miniapp:protocols:page', name: '协议维护', module: 'miniapp', type: PermissionType.PAGE, parentKey: 'menu:miniapp-config' },
+        { key: 'live-tournament:view', name: '赛事管理（查看）', module: 'live-tournament', type: PermissionType.PAGE, parentKey: 'menu:ops' },
+        { key: 'live-tournament:operate', name: '赛事运营（含主播工作台）', module: 'live-tournament', type: PermissionType.BUTTON, parentKey: 'live-tournament:view' },
         { key: 'ops:promotion:page', name: '宝盒活动/推广运营', module: 'ops', type: PermissionType.PAGE, parentKey: 'menu:ops' },
         { key: 'chest:page', name: '宝盒活动兼容权限', module: 'ops', type: PermissionType.PAGE, parentKey: 'menu:ops' },
         { key: 'coupons:page', name: '优惠券管理', module: 'coupons', type: PermissionType.PAGE, parentKey: 'menu:ops' },
