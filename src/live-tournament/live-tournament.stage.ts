@@ -1,6 +1,7 @@
 import { canMemberEnterTournament, tournamentMemberEligibilitySelect } from './live-tournament.eligibility';
 import { BadRequestException } from '@nestjs/common';
 import { Prisma, LiveTournamentEntry } from '@prisma/client';
+import { readTournamentLeaderboard } from './live-tournament.scores';
 import { drawTournamentProvider } from './live-tournament.rules';
 
 type Client = Prisma.TransactionClient;
@@ -59,7 +60,7 @@ export async function getTournamentStage(db: Client, dayId: number, internal: bo
     const pending = counts.find(row => row.status === 'PENDING_PAYMENT')?._count._all ?? 0;
     const now = new Date();
     return {
-        leaderboard: tournament.leaderboardSnapshot, locked: Boolean(tournament.leaderboardLockedAt),
+        leaderboard: await readTournamentLeaderboard(db, tournament.id, tournament.leaderboardSnapshot), locked: Boolean(tournament.leaderboardLockedAt),
         title: tournament.title, current: player(current), next: player(next), providers,
         day: {
             id: day.id,

@@ -1,7 +1,7 @@
 import { getStoreDashboard } from './store-dashboard';
 import { canMemberEnterTournament, tournamentMemberEligibilitySelect } from '../live-tournament/live-tournament.eligibility';
 import { recordTournamentReminder, tournamentReminderCandidates, tournamentWechatScheduleRemark } from '../live-tournament/live-tournament.reminders';
-import { closeTournamentLeaderboard, publishTournamentRound } from '../live-tournament/live-tournament.scores';
+import { closeTournamentLeaderboard, publishTournamentRound, readTournamentLeaderboard } from '../live-tournament/live-tournament.scores';
 import { getTournamentStage, updateTournamentStage } from '../live-tournament/live-tournament.stage';
 import { adminRescheduleTournamentEntry, bookTournament, tournamentDate, tournamentText, updateTournamentQueue } from '../live-tournament/live-tournament.operations';
 import { activateTournamentTicket, lockTournamentTicket, prepareTournamentTicket, saveTournamentRound, voidTournamentTicket } from '../live-tournament/live-tournament.orders';
@@ -7069,7 +7069,7 @@ export class OrdersService {
             redeemed: Boolean(entry.usedAt), rounds: entry.rounds.filter(round => round.publishedScore),
             title: tournament.title, closed: tournament.status === 'CLOSED', bookingOpen: Boolean(tournament.bookingOpenedAt),
             bookingThreshold: tournament.bookingThreshold, paidTickets,
-            leaderboard: tournament.leaderboardSnapshot, providers: stage?.providers ?? [],
+            leaderboard: stage ? stage.leaderboard : await readTournamentLeaderboard(this.prisma, tournament.id, tournament.leaderboardSnapshot), providers: stage?.providers ?? [],
             days: tournament.days.map(day => ({
                 id: day.id, startsAt: day.startsAt, endsAt: day.endsAt,
                 remaining: Math.max(0, day.capacity - day._count.entries),

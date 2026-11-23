@@ -3,7 +3,20 @@ import { Prisma } from '@prisma/client';
 import { rankTournamentCompetitors, TournamentRoundScore } from './live-tournament.rules';
 
 type Tx = Prisma.TransactionClient;
-type PublicRow = { ticketId: number; rank: number };
+type PublicRow = { ticketId: number; rank: number | null; previousRank?: number | null };
+type StoredLeaderboard = { version?: number; overall?: PublicRow[] };
+const leaderboardVersion = 2;
+
+function storedLeaderboard(value: Prisma.JsonValue): StoredLeaderboard | null {
+    return value as StoredLeaderboard | null;
+}
+
+export async function readTournamentLeaderboard(tx: Tx, tournamentId: number, snapshot: Prisma.JsonValue) {
+    const stored = storedLeaderboard(snapshot);
+    if (!stored || stored.version === leaderboardVersion) return snapshot;
+    const previousRanks = new Map(stored.overall?.map(row => [row.ticketId, row.previousRank ?? null]));
+    return buildTournamentLeaderboard(tx, tournamentId, previousRanks);
+}
 
 export async function lockTournamentScoring(tx: Tx, tournamentId: number) {
     await tx.$queryRaw`SELECT id FROM LiveTournament WHERE id = ${tournamentId} FOR UPDATE`;
@@ -30,15 +43,10 @@ export async function publishTournamentRound(tx: Tx, entryId: number, roundNumbe
         forfeited: round.forfeited,
     };
     const previousScore = round.publishedScore as typeof publishedScore | null;
-    const storedSnapshot = event.leaderboardSnapshot as unknown as {
-        overall?: Array<PublicRow & { fastestScoreElapsedMs?: number | null }>;
-    } | null;
-    const needsUnifiedLeaderboardUpgrade = storedSnapshot?.overall?.some(row =>
-        !Object.prototype.hasOwnProperty.call(row, 'fastestScoreElapsedMs'),
-    ) ?? false;
+    const storedSnapshot = storedLeaderboard(event.leaderboardSnapshot);
     if (previousScore && Object.keys(publishedScore).every(key =>
         publishedScore[key as keyof typeof publishedScore] === previousScore[key as keyof typeof publishedScore]) &&
-        !needsUnifiedLeaderboardUpgrade) {
+        storedSnapshot?.version === leaderboardVersion) {
         return;
     }
     await tx.liveTournamentRound.update({
@@ -49,35 +57,56 @@ export async function publishTournamentRound(tx: Tx, entryId: number, roundNumbe
         await tx.liveTournamentEntry.update({ where: { id: entryId }, data: { status: 'FINISHED' } });
     }
 
+    const ranks = new Map(storedSnapshot?.overall?.map(row => [row.ticketId, row.rank]));
+    const snapshot = await buildTournamentLeaderboard(tx, event.id, ranks);
+    return tx.liveTournament.update({
+        where: { id: event.id }, data: { leaderboardSnapshot: snapshot },
+    });
+}
+
+async function buildTournamentLeaderboard(tx: Tx, tournamentId: number, previousRanks: Map<number, number | null>) {
     const entries = await tx.liveTournamentEntry.findMany({
-        where: { tournamentId: event.id, activeMemberId: { not: null }, usedAt: { not: null } },
+        where: { tournamentId, activeMemberId: { not: null }, usedAt: { not: null } },
         include: { rounds: true },
     });
     const contestants = entries.map(item => ({
         ticketId: item.id,
+        memberId: item.memberId,
         name: item.competitionName || item.gameNickname || '参赛选手',
         checkedInToStageAtMs: item.onStageAt?.getTime() ?? 0,
         publishedRounds: item.rounds.flatMap(result => {
             const score = result.publishedScore as unknown as (TournamentRoundScore & { forfeited: boolean }) | null;
             return score ? [{ ...score, roundNumber: result.roundNumber }] : [];
         }),
-    }));
-    const ranks = new Map(storedSnapshot?.overall?.map(row => [row.ticketId, row.rank]));
+    })).filter(item => item.publishedRounds.length > 0);
     const overall = rankTournamentCompetitors(contestants).map(row => ({
         ticketId: row.ticketId, name: row.name, rank: row.rank, points: row.totalPoints,
         played: row.publishedRounds.filter(item => !item.forfeited).length,
         fastestScoreElapsedMs: row.fastestFirstKill?.elapsed ?? null,
-        previousRank: ranks.get(row.ticketId) ?? null,
+        previousRank: row.rank === null ? null : previousRanks.get(row.ticketId) ?? null,
     }));
     const singles = contestants.flatMap(item => item.publishedRounds
         .filter(score => !score.forfeited && score.kills > 0)
-        .map(score => ({ ...score, name: item.name, ticketId: item.ticketId })));
-    const byKills = [...singles].sort((a, b) => b.kills - a.kills || a.ticketId - b.ticketId || a.roundNumber - b.roundNumber);
-    const byFirstKill = singles.filter(score => score.firstKillElapsedMs !== null)
-        .sort((a, b) => a.firstKillElapsedMs! - b.firstKillElapsedMs! || a.firstKillAtMs! - b.firstKillAtMs! || a.ticketId - b.ticketId);
-    return tx.liveTournament.update({
-        where: { id: event.id }, data: { leaderboardSnapshot: { overall, byKills, byFirstKill } },
-    });
+        .map(score => ({
+            ...score, name: item.name, ticketId: item.ticketId, memberId: item.memberId,
+            checkedInToStageAtMs: item.checkedInToStageAtMs,
+        })));
+    const byParticipation = (a: (typeof singles)[number], b: (typeof singles)[number]) =>
+        a.checkedInToStageAtMs - b.checkedInToStageAtMs || a.ticketId - b.ticketId || a.roundNumber - b.roundNumber;
+    function bestPerMember(sorted: typeof singles) {
+        const seen = new Set<number>();
+        return sorted.filter(row => {
+            const key = row.memberId ?? row.ticketId;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        }).map(({ memberId, checkedInToStageAtMs, ...row }, index) => ({ ...row, rank: index + 1 }));
+    }
+    const byKills = bestPerMember([...singles].sort((a, b) => b.kills - a.kills || byParticipation(a, b)));
+    const byFirstKill = bestPerMember(singles.filter(score => score.firstKillElapsedMs !== null)
+        .sort((a, b) => a.firstKillElapsedMs! - b.firstKillElapsedMs! ||
+            (a.firstKillAtMs ?? Infinity) - (b.firstKillAtMs ?? Infinity) || byParticipation(a, b)));
+    return { version: leaderboardVersion, overall, byKills, byFirstKill };
 }
 
 export async function closeTournamentLeaderboard(tx: Tx, tournamentId: number) {

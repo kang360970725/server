@@ -37,7 +37,6 @@ export function rankTournamentCompetitors<T extends TournamentCompetitor>(compet
                 fastestFirstKill: firstKills[0],
             };
         })
-        .filter((competitor) => competitor.totalPoints > 0)
         .sort((a, b) =>
             b.totalPoints - a.totalPoints ||
             b.bestKills - a.bestKills ||
@@ -46,7 +45,7 @@ export function rankTournamentCompetitors<T extends TournamentCompetitor>(compet
             a.checkedInToStageAtMs - b.checkedInToStageAtMs ||
             a.ticketId - b.ticketId,
         )
-        .map((competitor, index) => ({ ...competitor, rank: index + 1 }));
+        .map((competitor, index) => ({ ...competitor, rank: competitor.totalPoints > 0 ? index + 1 : null }));
 }
 
 export interface TournamentProviderQuota {
