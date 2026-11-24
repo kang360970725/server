@@ -24,7 +24,7 @@ const achievements = [
 ] as const;
 
 const memberThemes: Record<string, any> = {
-  V0:{code:'V0',name:'初见会员',primary:'#64748b',secondary:'#94a3b8',background:'#f5f7fa',card:'#ffffff',gradient:'linear-gradient(135deg,#475569 0%,#7c8999 55%,#a8b2bf 130%)'},
+  V0:{code:'V0',name:'初见会员',primary:'#5c70a8',secondary:'#957fb5',background:'#f6f7fc',card:'#ffffff',gradient:'linear-gradient(135deg,#35466f 0%,#6178aa 42%,#9188be 74%,#c1aecf 118%)'},
   V1:{code:'V1',name:'储值会员',primary:'#2563eb',secondary:'#38bdf8',background:'#f3f7ff',card:'#ffffff',gradient:'linear-gradient(135deg,#153c91 0%,#2563eb 55%,#38bdf8 130%)'},
   V2:{code:'V2',name:'黄金会员',primary:'#b7791f',secondary:'#f6c453',background:'#fffaf0',card:'#fffdf8',gradient:'linear-gradient(135deg,#775015 0%,#b7791f 42%,#f6c453 105%)'},
   V3:{code:'V3',name:'黑金会员',primary:'#8a6728',secondary:'#c49a4a',background:'#f7f4ed',card:'#fffefa',gradient:'linear-gradient(135deg,#111111 0%,#3b3121 50%,#c49a4a 125%)'},
