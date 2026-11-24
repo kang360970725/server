@@ -438,21 +438,17 @@ export class OrdersController {
 
     @Post('live-tournament/settle')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:detail:confirm-complete:button')
+    @Permissions('live-tournament:ticket-settle:button')
     async settleLiveTournamentTicket(@Body() body: any, @Req() req: any) {
-        this.assertButtonPermission(req?.user, 'live-tournament:operate', '当前角色无权操作赛事');
-        this.assertCustomerServiceOrFinanceAdmin(req?.user);
-        this.assertButtonPermission(req?.user, 'orders:detail:confirm-complete:button', '当前角色无权结算赛事订单');
+        this.assertButtonPermission(req?.user, 'live-tournament:ticket-settle:button', '当前角色无权结算赛事门票');
         return this.ordersService.settleLiveTournamentTicket(Number(body?.orderId), Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub));
     }
 
     @Post('live-tournament/score-publication')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:detail:confirm-complete:button')
+    @Permissions('live-tournament:score-publish:button')
     async publishLiveTournamentScore(@Body() body: any, @Req() req: any) {
-        this.assertButtonPermission(req?.user, 'live-tournament:operate', '当前角色无权操作赛事');
-        this.assertCustomerServiceOrFinanceAdmin(req?.user);
-        this.assertButtonPermission(req?.user, 'orders:detail:confirm-complete:button', '当前角色无权发布赛事成绩');
+        this.assertButtonPermission(req?.user, 'live-tournament:score-publish:button', '当前角色无权发布赛事成绩');
         return body?.action === 'lock'
             ? this.ordersService.lockLiveTournamentLeaderboard(Number(body.tournamentId))
             : this.ordersService.publishLiveTournamentRound(Number(body?.entryId), Number(body?.roundNumber));
@@ -460,11 +456,9 @@ export class OrdersController {
 
     @Post('live-tournament/round-score')
     @UseGuards(PermissionsGuard)
-    @Permissions('orders:detail:confirm-complete:button')
+    @Permissions('live-tournament:score-entry:button')
     async saveLiveTournamentRound(@Body() body: any, @Req() req: any) {
-        this.assertButtonPermission(req?.user, 'live-tournament:operate', '当前角色无权操作赛事');
-        this.assertCustomerServiceOrFinanceAdmin(req?.user);
-        this.assertButtonPermission(req?.user, 'orders:detail:confirm-complete:button', '当前角色无权录入赛事成绩');
+        this.assertButtonPermission(req?.user, 'live-tournament:score-entry:button', '当前角色无权录入赛事成绩');
         if (!Number.isSafeInteger(body?.orderId) || body.orderId <= 0 || !Number.isSafeInteger(body?.kills)) {
             throw new BadRequestException('请输入有效订单和击杀数');
         }
