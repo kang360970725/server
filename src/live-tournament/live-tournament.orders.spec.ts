@@ -25,6 +25,7 @@ function transaction() {
         user: { findUnique: jest.fn().mockResolvedValue({ userType: 'REGISTERED_USER' }) },
         liveTournamentEntry: {
             findUnique: jest.fn().mockResolvedValue({ tournamentId: 1 }),
+            findFirst: jest.fn().mockResolvedValue({ id: 1, tournamentId: 1 }),
             updateMany: jest.fn().mockResolvedValue({ count: 1 }),
             update: jest.fn(),
         },

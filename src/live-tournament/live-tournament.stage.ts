@@ -53,7 +53,7 @@ export async function getTournamentStage(db: Client, dayId: number, internal: bo
     const tournament = day.tournament;
     const counts = await db.liveTournamentEntry.groupBy({
         by: ['status'],
-        where: { tournamentId: tournament.id, activeMemberId: { not: null }, status: { not: 'VOID' } },
+        where: { tournamentId: tournament.id, isRevival: false, activeMemberId: { not: null }, status: { not: 'VOID' } },
         _count: { _all: true },
     });
     const occupied = counts.reduce((total, row) => total + row._count._all, 0);
@@ -136,9 +136,12 @@ export async function updateTournamentStage(db: Client, dayId: number, entryId: 
                 drawn: entries.filter(entry => entry.providerId === quota.providerId).length,
             }));
             const remaining = entries.filter(entry => ['QUEUED', 'ON_STAGE', 'BOOKED'].includes(entry.status) && entry.providerId === null).length;
+            const previousProviderId = entries
+                .filter(entry => entry.id !== current.id && entry.providerId !== null && entry.appearanceSequence !== null)
+                .sort((a, b) => b.appearanceSequence! - a.appearanceSequence! || b.id - a.id)[0]?.providerId ?? null;
             try {
                 data = {
-                    providerId: drawTournamentProvider(quotas, remaining),
+                    providerId: drawTournamentProvider(quotas, remaining, previousProviderId),
                     drawnAt: now,
                     firstRoundStartedAt: current.firstRoundStartedAt ?? now,
                 };

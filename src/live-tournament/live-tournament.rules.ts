@@ -58,6 +58,7 @@ export interface TournamentProviderQuota {
 export function drawTournamentProvider(
     quotas: readonly TournamentProviderQuota[],
     remainingDraws: number,
+    lastProviderId?: number | null,
 ): number {
     if (!Number.isSafeInteger(remainingDraws) || remainingDraws < 1) {
         throw new RangeError('没有剩余抽取次数');
@@ -75,9 +76,29 @@ export function drawTournamentProvider(
         throw new RangeError('剩余抽取次数与服务者保底或上限不匹配');
     }
 
-    const eligible = quotas.filter((quota) =>
-        quota.drawn < quota.maximum &&
-        (remainingDraws > remainingMinimum || quota.drawn < quota.minimum),
-    );
-    return eligible[randomInt(eligible.length)].providerId;
+    // Simulate every possible next draw. A candidate is valid only when the
+    // remaining draws can still satisfy every provider's minimum and maximum.
+    const feasible = quotas.filter((candidate) => {
+        if (candidate.drawn >= candidate.maximum) return false;
+        const after = quotas.map(quota => quota.providerId === candidate.providerId
+            ? {...quota, drawn: quota.drawn + 1}
+            : quota);
+        const drawsAfter = remainingDraws - 1;
+        const minimumAfter = after.reduce(
+            (total, quota) => total + Math.max(0, quota.minimum - quota.drawn), 0,
+        );
+        const capacityAfter = after.reduce(
+            (total, quota) => total + Math.max(0, quota.maximum - quota.drawn), 0,
+        );
+        return drawsAfter >= minimumAfter && drawsAfter <= capacityAfter;
+    });
+    if (!feasible.length) throw new RangeError('没有符合剩余配额的服务者');
+
+    // Prefer a different provider from the previous draw. Consecutive draws are
+    // allowed only when every alternative would make the remaining quota invalid.
+    const nonConsecutive = lastProviderId == null
+        ? feasible
+        : feasible.filter(quota => quota.providerId !== lastProviderId);
+    const pool = nonConsecutive.length ? nonConsecutive : feasible;
+    return pool[randomInt(pool.length)].providerId;
 }

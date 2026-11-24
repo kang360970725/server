@@ -392,16 +392,30 @@ export class MiniOrdersController {
     if (!orderIds.length) return new Map();
     const entries = await this.prisma.liveTournamentEntry.findMany({
       where: { memberId: userId, orderId: { in: orderIds } },
+      orderBy: { attemptNumber: 'asc' },
       select: {
+        id: true,
         orderId: true,
+        attemptNumber: true,
+        isRevival: true,
         status: true,
         day: { select: { startsAt: true } },
         tournament: { select: { title: true, status: true, bookingOpenedAt: true } },
       },
     });
-    return new Map(entries.map(entry => [entry.orderId, {
+    const selected = new Map<number, typeof entries[number]>();
+    entries.forEach(entry => {
+      const current = selected.get(entry.orderId);
+      const activeRevival = entry.isRevival && !['FINISHED', 'VOID'].includes(entry.status);
+      const currentActiveRevival = current?.isRevival && !['FINISHED', 'VOID'].includes(current.status);
+      if (!current || activeRevival || (!currentActiveRevival && entry.attemptNumber > current.attemptNumber)) {
+        selected.set(entry.orderId, entry);
+      }
+    });
+    return new Map([...selected.values()].map(entry => [entry.orderId, {
       title: entry.tournament.title,
       status: entry.status,
+      isRevival: entry.isRevival,
       closed: entry.tournament.status === 'CLOSED',
       bookingOpen: entry.tournament.status === 'PUBLISHED' && Boolean(entry.tournament.bookingOpenedAt),
       startsAt: entry.day?.startsAt ?? null,

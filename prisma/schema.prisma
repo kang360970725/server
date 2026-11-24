@@ -3006,8 +3006,15 @@ model LiveTournamentQuota {
 model LiveTournamentEntry {
   id                 Int                       @id @default(autoincrement())
   tournamentId       Int
-  orderId            Int                       @unique
+  orderId            Int
   memberId           Int
+  // One paid ticket may create multiple complete two-round attempts after revival.
+  attemptNumber      Int                       @default(1)
+  isRevival          Boolean                   @default(false)
+  revivalGrantedAt   DateTime?
+  revivalGrantedBy   Int?
+  revivalRevokedAt   DateTime?
+  revivalRevokedBy   Int?
   // Set to memberId while the ticket occupies the member's purchase slot.
   activeMemberId     Int?
   dayId              Int?
@@ -3033,11 +3040,27 @@ model LiveTournamentEntry {
   tournament         LiveTournament            @relation(fields: [tournamentId], references: [id])
   day                LiveTournamentDay?        @relation(fields: [dayId], references: [id])
   rounds             LiveTournamentRound[]
+  revivalSettlement  LiveTournamentRevivalSettlement?
 
+  @@unique([orderId, attemptNumber], map: "uq_live_tournament_order_attempt")
   @@index([tournamentId, activeMemberId], map: "idx_live_tournament_active_member")
   @@unique([dayId, appearanceSequence], map: "uq_live_tournament_day_appearance")
   @@index([dayId, status, queuePosition])
   @@index([tournamentId, memberId])
+}
+
+model LiveTournamentRevivalSettlement {
+  id          Int                 @id @default(autoincrement())
+  entryId     Int                 @unique
+  orderId     Int
+  providerId  Int
+  amount      Decimal             @db.Decimal(10, 1)
+  settledBy   Int
+  settledAt   DateTime            @default(now())
+  entry       LiveTournamentEntry @relation(fields: [entryId], references: [id])
+
+  @@index([orderId])
+  @@index([providerId, settledAt])
 }
 
 model LiveTournamentRound {

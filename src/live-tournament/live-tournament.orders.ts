@@ -30,7 +30,7 @@ export async function prepareTournamentTicket(tx: Transaction, input: {
     // Locking reads see tickets committed while this transaction waited for the event.
     const active = await tx.$queryRaw<{ activeMemberId: number }[]>`
         SELECT activeMemberId FROM LiveTournamentEntry
-        WHERE tournamentId = ${tournament.id} AND activeMemberId IS NOT NULL FOR UPDATE
+        WHERE tournamentId = ${tournament.id} AND isRevival = false AND activeMemberId IS NOT NULL FOR UPDATE
     `;
     const now = new Date();
     if (tournament.status !== 'PUBLISHED' || now < tournament.salesStartAt || now >= tournament.salesEndAt) {
@@ -53,7 +53,7 @@ export async function prepareTournamentTicket(tx: Transaction, input: {
 }
 
 export async function activateTournamentTicket(tx: Transaction, orderId: number) {
-    const ticket = await tx.liveTournamentEntry?.findUnique({ where: { orderId } });
+    const ticket = await tx.liveTournamentEntry?.findFirst({ where: { orderId, attemptNumber: 1 } });
     if (!ticket) return;
     await lockTournament(tx, ticket.tournamentId);
     const updated = await tx.liveTournamentEntry.updateMany({
@@ -63,7 +63,7 @@ export async function activateTournamentTicket(tx: Transaction, orderId: number)
     if (!updated.count) return;
     const paid = await tx.$queryRaw<{ id: number }[]>`
         SELECT id FROM LiveTournamentEntry
-        WHERE tournamentId = ${ticket.tournamentId} AND activeMemberId IS NOT NULL
+        WHERE tournamentId = ${ticket.tournamentId} AND isRevival = false AND activeMemberId IS NOT NULL
           AND status NOT IN ('PENDING_PAYMENT', 'VOID') FOR UPDATE
     `;
     const tournament = await tx.liveTournament.findUniqueOrThrow({ where: { id: ticket.tournamentId } });
@@ -85,13 +85,15 @@ export async function voidTournamentTicket(tx: Transaction, orderId: number) {
 export async function lockTournamentTicket(tx: Transaction, orderId: number) {
     if (!tx.liveTournamentEntry) return null;
     const rows = await tx.$queryRaw<{ id: number; usedAt: Date | null; status: string; firstRoundStartedAt: Date | null }[]>`
-        SELECT id, usedAt, status, firstRoundStartedAt FROM LiveTournamentEntry WHERE orderId = ${orderId} FOR UPDATE
+        SELECT id, usedAt, status, firstRoundStartedAt FROM LiveTournamentEntry
+        WHERE orderId = ${orderId} AND attemptNumber = 1 FOR UPDATE
     `;
     return rows[0] ?? null;
 }
 
 export async function saveTournamentRound(tx: Transaction, input: {
     orderId: number;
+    entryId?: number;
     roundNumber: number;
     kills: number;
     firstKillElapsedMs: number | null;
@@ -107,11 +109,21 @@ export async function saveTournamentRound(tx: Transaction, input: {
           !input.firstKillAt || !Number.isFinite(input.firstKillAt.getTime())) {
         throw new BadRequestException('请核对首杀时间和击杀数');
     }
-    const entry = await tx.liveTournamentEntry.findUnique({ where: { orderId: input.orderId }, select: { tournamentId: true } });
+    const entry = input.entryId
+        ? await tx.liveTournamentEntry.findFirst({
+            where: { id: input.entryId, orderId: input.orderId }, select: { id: true, tournamentId: true },
+        })
+        : await tx.liveTournamentEntry.findFirst({
+            where: { orderId: input.orderId, status: { not: 'VOID' } },
+            orderBy: { attemptNumber: 'desc' }, select: { id: true, tournamentId: true },
+        });
     if (!entry) throw new BadRequestException('赛事门票不存在');
     await lockTournamentScoring(tx, entry.tournamentId);
     await tx.$queryRaw`SELECT id FROM \`Order\` WHERE id = ${input.orderId} FOR UPDATE`;
-    const ticket = await lockTournamentTicket(tx, input.orderId);
+    const locked = await tx.$queryRaw<{ id: number; usedAt: Date | null; status: string; firstRoundStartedAt: Date | null }[]>`
+        SELECT id, usedAt, status, firstRoundStartedAt FROM LiveTournamentEntry WHERE id = ${entry.id} FOR UPDATE
+    `;
+    const ticket = locked[0] ?? null;
     if (!ticket || !['ON_STAGE', 'SCORING', 'FINISHED'].includes(ticket.status)) {
         throw new BadRequestException('当前参赛状态不可录分');
     }

@@ -18,14 +18,21 @@ export function tournamentText(value: unknown, label: string, optional = false) 
 
 export async function bookTournament(tx: Tx, memberId: number, input: Record<string, unknown>) {
     const orderId = Number(input.orderId);
+    const entryId = Number(input.entryId);
     const dayId = Number(input.dayId);
-    if (!Number.isSafeInteger(orderId) || orderId <= 0 || !Number.isSafeInteger(dayId) || dayId <= 0) {
+    if (!Number.isSafeInteger(orderId) || orderId <= 0 || !Number.isSafeInteger(dayId) || dayId <= 0 ||
+        (input.entryId !== undefined && (!Number.isSafeInteger(entryId) || entryId <= 0))) {
         throw new BadRequestException('请选择有效门票和时段');
     }
     await tx.$queryRaw`SELECT id FROM \`Order\` WHERE id = ${orderId} FOR UPDATE`;
     await tx.$queryRaw`SELECT id FROM LiveTournamentDay WHERE id = ${dayId} FOR UPDATE`;
     await tx.$queryRaw`SELECT id FROM LiveTournamentEntry WHERE orderId = ${orderId} FOR UPDATE`;
-    const ticket = await tx.liveTournamentEntry.findUnique({ where: { orderId }, include: { tournament: true } });
+    const ticket = input.entryId !== undefined
+        ? await tx.liveTournamentEntry.findFirst({ where: { id: entryId, orderId }, include: { tournament: true } })
+        : await tx.liveTournamentEntry.findFirst({
+            where: { orderId, activeMemberId: memberId, status: { not: 'VOID' } },
+            orderBy: { attemptNumber: 'desc' }, include: { tournament: true },
+        });
     if (!ticket || ticket.memberId !== memberId || ticket.activeMemberId !== memberId ||
         !['UNBOOKED', 'BOOKED', 'QUEUED', 'ABSENT'].includes(ticket.status) ||
         ticket.firstRoundStartedAt || ticket.usedAt || !ticket.tournament.bookingOpenedAt ||

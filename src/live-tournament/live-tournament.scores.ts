@@ -5,7 +5,7 @@ import { rankTournamentCompetitors, TournamentRoundScore } from './live-tourname
 type Tx = Prisma.TransactionClient;
 type PublicRow = { ticketId: number; rank: number | null; previousRank?: number | null };
 type StoredLeaderboard = { version?: number; overall?: PublicRow[] };
-const leaderboardVersion = 2;
+const leaderboardVersion = 3;
 
 function storedLeaderboard(value: Prisma.JsonValue): StoredLeaderboard | null {
     return value as StoredLeaderboard | null;
@@ -69,16 +69,26 @@ async function buildTournamentLeaderboard(tx: Tx, tournamentId: number, previous
         where: { tournamentId, activeMemberId: { not: null }, usedAt: { not: null } },
         include: { rounds: true },
     });
-    const contestants = entries.map(item => ({
+    const attempts = entries.map(item => ({
         ticketId: item.id,
         memberId: item.memberId,
+        isRevival: item.isRevival,
         name: item.competitionName || item.gameNickname || '参赛选手',
         checkedInToStageAtMs: item.onStageAt?.getTime() ?? 0,
         publishedRounds: item.rounds.flatMap(result => {
             const score = result.publishedScore as unknown as (TournamentRoundScore & { forfeited: boolean }) | null;
             return score ? [{ ...score, roundNumber: result.roundNumber }] : [];
         }),
-    })).filter(item => item.publishedRounds.length > 0);
+    })).filter(item => item.publishedRounds.length > 0 && (!item.isRevival || item.publishedRounds.length === 2));
+    // A revival is one complete two-round attempt. Select the best whole attempt for
+    // each member first, then build every board from that same attempt so scores from
+    // different attempts can never be combined.
+    const seenMembers = new Set<number>();
+    const contestants = rankTournamentCompetitors(attempts).filter(item => {
+        if (seenMembers.has(item.memberId)) return false;
+        seenMembers.add(item.memberId);
+        return true;
+    });
     const overall = rankTournamentCompetitors(contestants).map(row => ({
         ticketId: row.ticketId, name: row.name, rank: row.rank, points: row.totalPoints,
         played: row.publishedRounds.filter(item => !item.forfeited).length,
@@ -112,7 +122,13 @@ async function buildTournamentLeaderboard(tx: Tx, tournamentId: number, previous
 export async function closeTournamentLeaderboard(tx: Tx, tournamentId: number) {
     await lockTournamentScoring(tx, tournamentId);
     const unfinished = await tx.liveTournamentEntry.count({
-        where: { tournamentId, activeMemberId: { not: null }, status: { in: ['ON_STAGE', 'QUEUED', 'SCORING'] } },
+        where: {
+            tournamentId, activeMemberId: { not: null },
+            OR: [
+                { status: { in: ['ON_STAGE', 'QUEUED', 'SCORING'] } },
+                { isRevival: true, status: { notIn: ['FINISHED', 'VOID'] } },
+            ],
+        },
     });
     if (unfinished) throw new BadRequestException('请先处理候赛、在赛和待统计选手');
     const rounds = await tx.liveTournamentRound.findMany({

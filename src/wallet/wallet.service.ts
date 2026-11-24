@@ -2753,7 +2753,7 @@ export class WalletService {
                 sourceId: params.sourceId,
                 orderId: params.orderId ?? null,
                 dispatchId: params.dispatchId ?? null,
-                settlementId: params.settlementId ?? params.sourceId,
+                settlementId: params.settlementId === undefined ? params.sourceId : params.settlementId,
             },
             update: {
                 // ✅ 关键：bizType 必须允许被重算时更新，否则前端永远看不到区分
@@ -2769,7 +2769,7 @@ export class WalletService {
                 // 冗余字段对齐
                 orderId: params.orderId ?? null,
                 dispatchId: params.dispatchId ?? null,
-                settlementId: params.settlementId ?? params.sourceId,
+                settlementId: params.settlementId === undefined ? params.sourceId : params.settlementId,
             },
             select: { id: true, amount: true, status: true, direction: true, bizType: true },
         });

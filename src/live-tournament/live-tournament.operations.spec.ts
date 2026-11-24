@@ -18,6 +18,11 @@ function bookingTransaction(overrides = {}, occupied = 0) {
                 tournament: { bookingOpenedAt: new Date(), status: 'PUBLISHED' },
                 ...overrides,
             }),
+            findFirst: jest.fn().mockResolvedValue({
+                id: 10, tournamentId: 8, memberId: 3, activeMemberId: 3, status: 'UNBOOKED', dayId: null,
+                tournament: { bookingOpenedAt: new Date(), status: 'PUBLISHED' },
+                ...overrides,
+            }),
             update: jest.fn().mockResolvedValue({ id: 10 }),
         },
     };

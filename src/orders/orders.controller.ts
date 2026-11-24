@@ -432,6 +432,12 @@ export class OrdersController {
             case 'entries': return this.ordersService.getLiveTournamentDayEntries(Number(body.dayId));
             case 'queue': return this.ordersService.saveLiveTournamentQueue(Number(body.dayId), body.orderedIds, body.absentId);
             case 'reschedule-entry': return this.ordersService.adminRescheduleLiveTournamentEntry(Number(body.entryId), Number(body.targetDayId));
+            case 'grant-revival': return this.ordersService.grantLiveTournamentRevival(
+                Number(body.entryId), Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub),
+            );
+            case 'revoke-revival': return this.ordersService.revokeLiveTournamentRevival(
+                Number(body.entryId), Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub),
+            );
             default: throw new BadRequestException('未知赛事操作');
         }
     }
@@ -441,7 +447,11 @@ export class OrdersController {
     @Permissions('live-tournament:ticket-settle:button')
     async settleLiveTournamentTicket(@Body() body: any, @Req() req: any) {
         this.assertButtonPermission(req?.user, 'live-tournament:ticket-settle:button', '当前角色无权结算赛事门票');
-        return this.ordersService.settleLiveTournamentTicket(Number(body?.orderId), Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub));
+        return this.ordersService.settleLiveTournamentTicket(
+            Number(body?.orderId),
+            Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub),
+            body?.entryId === undefined ? undefined : Number(body.entryId),
+        );
     }
 
     @Post('live-tournament/score-publication')
@@ -459,11 +469,14 @@ export class OrdersController {
     @Permissions('live-tournament:score-entry:button')
     async saveLiveTournamentRound(@Body() body: any, @Req() req: any) {
         this.assertButtonPermission(req?.user, 'live-tournament:score-entry:button', '当前角色无权录入赛事成绩');
-        if (!Number.isSafeInteger(body?.orderId) || body.orderId <= 0 || !Number.isSafeInteger(body?.kills)) {
+        if (!Number.isSafeInteger(body?.orderId) || body.orderId <= 0 ||
+            (body?.entryId !== undefined && (!Number.isSafeInteger(body.entryId) || body.entryId <= 0)) ||
+            !Number.isSafeInteger(body?.kills)) {
             throw new BadRequestException('请输入有效订单和击杀数');
         }
         return this.ordersService.saveLiveTournamentRound({
             orderId: body.orderId,
+            entryId: body.entryId,
             roundNumber: body.roundNumber,
             kills: body.kills,
             forfeited: body.forfeited === true,

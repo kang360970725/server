@@ -5,6 +5,7 @@ import { closeTournamentLeaderboard, publishTournamentRound, readTournamentLeade
 import { getTournamentStage, updateTournamentStage } from '../live-tournament/live-tournament.stage';
 import { adminRescheduleTournamentEntry, bookTournament, tournamentDate, tournamentText, updateTournamentQueue } from '../live-tournament/live-tournament.operations';
 import { activateTournamentTicket, lockTournamentTicket, prepareTournamentTicket, saveTournamentRound, voidTournamentTicket } from '../live-tournament/live-tournament.orders';
+import { grantTournamentRevival, revokeTournamentRevival } from '../live-tournament/live-tournament.revivals';
 import {BadRequestException, ConflictException, Injectable, Logger, NotFoundException, ServiceUnavailableException} from '@nestjs/common';
 import {PrismaService} from '../prisma/prisma.service';
 import {CreateOrderDto} from './dto/create-order.dto';
@@ -3631,8 +3632,10 @@ export class OrdersService {
         const tournamentEntries = rows.length && this.prisma.liveTournamentEntry
             ? await this.prisma.liveTournamentEntry.findMany({
                 where: {orderId: {in: rows.map((row: any) => Number(row.id))}},
+                orderBy: {attemptNumber: 'asc'},
                 select: {
                     id: true, orderId: true, status: true, queuePosition: true, providerId: true,
+                    attemptNumber: true, isRevival: true,
                     competitionName: true, gameNickname: true,
                     tournament: {select: {title: true}},
                 },
@@ -4338,7 +4341,7 @@ export class OrdersService {
             });
             if (pendingManualRefunds > 0) throw new BadRequestException('人工退款尚未确认完成，暂不可删除订单');
 
-            const tournamentTicket = await tx.liveTournamentEntry.findUnique({
+            const tournamentTicket = await tx.liveTournamentEntry.findFirst({
                 where: {orderId}, select: {id: true},
             });
             if (tournamentTicket) await voidTournamentTicket(tx, orderId);
@@ -4385,7 +4388,7 @@ export class OrdersService {
 
         if (!order) throw new NotFoundException('订单不存在');
 
-        if (await this.prisma.liveTournamentEntry?.findUnique({where: {orderId}})) {
+        if (await this.prisma.liveTournamentEntry?.findFirst({where: {orderId}})) {
             throw new BadRequestException('赛事门票由现场转盘分配服务者');
         }
 
@@ -5933,7 +5936,7 @@ export class OrdersService {
             throw new BadRequestException('订单已退款，禁止重复退款');
         }
 
-        const tournamentEntry = await this.prisma.liveTournamentEntry?.findUnique({where: {orderId}});
+        const tournamentEntry = await this.prisma.liveTournamentEntry?.findFirst({where: {orderId, attemptNumber: 1}});
         if (tournamentEntry?.usedAt) throw new BadRequestException('已核销的赛事门票不可退款');
 
         const isReservedBalanceOrder = (order as any).balanceSettlementMode === 'RESERVE_CAPTURE';
@@ -6600,7 +6603,7 @@ export class OrdersService {
         if (!tournament || tournament.status !== 'PUBLISHED') throw new BadRequestException('赛事暂不可展示');
         const counts = await this.prisma.liveTournamentEntry.groupBy({
             by: ['status'],
-            where: { tournamentId, activeMemberId: { not: null }, status: { not: 'VOID' } },
+            where: { tournamentId, isRevival: false, activeMemberId: { not: null }, status: { not: 'VOID' } },
             _count: { _all: true },
         });
         const occupied = counts.reduce((total, row) => total + row._count._all, 0);
@@ -6950,21 +6953,27 @@ export class OrdersService {
         const entries = await this.prisma.liveTournamentEntry.findMany({
             where: {dayId, activeMemberId: {not: null}},
             orderBy: [{queuePosition: 'asc'}, {id: 'asc'}],
-            include: {rounds: true},
+            include: {rounds: true, revivalSettlement: true},
         });
         if (!entries.length) return [];
-        const [completed, members] = await Promise.all([
+        const orderIds = [...new Set(entries.map(entry => entry.orderId))];
+        const [completed, members, activeRevivals] = await Promise.all([
             this.prisma.order.findMany({
-                where: {id: {in: entries.map(entry => entry.orderId)}, status: OrderStatus.COMPLETED},
+                where: {id: {in: orderIds}, status: OrderStatus.COMPLETED},
                 select: {id: true},
             }),
             this.prisma.user.findMany({
                 where: {id: {in: [...new Set(entries.map(entry => entry.memberId))]}},
                 select: {id: true, avatar: true, memberProfile: {select: {memberCode: true}}},
             }),
+            this.prisma.liveTournamentEntry.findMany({
+                where: {orderId: {in: orderIds}, isRevival: true, status: {notIn: ['FINISHED', 'VOID']}},
+                select: {id: true, orderId: true, status: true, dayId: true, attemptNumber: true},
+            }),
         ]);
         const completedIds = new Set(completed.map(order => order.id));
         const membersById = new Map(members.map(member => [member.id, member]));
+        const activeRevivalByOrder = new Map(activeRevivals.map(entry => [entry.orderId, entry]));
         const statusOrder: Record<string, number> = {
             ON_STAGE: 0, QUEUED: 1, BOOKED: 2, SCORING: 3, FINISHED: 4, ABSENT: 5, UNBOOKED: 6, VOID: 7,
         };
@@ -6974,7 +6983,8 @@ export class OrdersService {
                 ...entry,
                 memberAvatar: member?.avatar ?? null,
                 memberCode: member?.memberProfile?.memberCode ?? null,
-                fulfilled: completedIds.has(entry.orderId),
+                fulfilled: entry.isRevival ? Boolean(entry.revivalSettlement) : completedIds.has(entry.orderId),
+                activeRevival: entry.isRevival ? null : activeRevivalByOrder.get(entry.orderId) ?? null,
             };
         }).sort((a, b) => {
             const statusDifference = (statusOrder[a.status] ?? 99) - (statusOrder[b.status] ?? 99);
@@ -7005,6 +7015,32 @@ export class OrdersService {
             );
         } catch {}
         return saved;
+    }
+
+    async grantLiveTournamentRevival(entryId: number, operatorId: number) {
+        if (![entryId, operatorId].every(id => Number.isSafeInteger(id) && id > 0)) {
+            throw new BadRequestException('参赛记录或操作人无效');
+        }
+        const revived = await this.prisma.$transaction(
+            tx => grantTournamentRevival(tx, entryId, operatorId),
+            {isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted},
+        );
+        try {
+            await this.miniSubscribeMessageService.pushOrderProgressMessage(
+                revived.orderId, '您已获得一次复活参赛机会，请进入赛事门票重新预约', '可重新预约',
+            );
+        } catch {}
+        return revived;
+    }
+
+    async revokeLiveTournamentRevival(entryId: number, operatorId: number) {
+        if (![entryId, operatorId].every(id => Number.isSafeInteger(id) && id > 0)) {
+            throw new BadRequestException('复活记录或操作人无效');
+        }
+        return this.prisma.$transaction(
+            tx => revokeTournamentRevival(tx, entryId, operatorId),
+            {isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted},
+        );
     }
 
     @Cron('0 * * * * *', {timeZone: 'Asia/Shanghai', waitForCompletion: true})
@@ -7071,8 +7107,9 @@ export class OrdersService {
     }
 
     async getMyLiveTournament(memberId: number, orderId: number) {
-        const entry = await this.prisma.liveTournamentEntry.findFirst({
+        const attempts = await this.prisma.liveTournamentEntry.findMany({
             where: {orderId, memberId, activeMemberId: memberId, status: {not: 'VOID'}},
+            orderBy: {attemptNumber: 'desc'},
             include: {
                 rounds: {select: {roundNumber: true, publishedScore: true}},
                 tournament: {include: {days: {orderBy: {startsAt: 'asc'}, include: {
@@ -7080,6 +7117,8 @@ export class OrdersService {
                 }}}},
             },
         });
+        const entry = attempts.find(item => item.isRevival && !['FINISHED', 'VOID'].includes(item.status))
+            ?? attempts[0];
         if (!entry) return null;
         const order = await this.prisma.order.findUnique({where: {id: orderId}, select: {status: true}});
         if (!order || order.status === OrderStatus.REFUNDED || order.status === OrderStatus.CANCELLED) return null;
@@ -7092,7 +7131,7 @@ export class OrdersService {
         });
         const {tournament} = entry;
         const paidTickets = await this.prisma.liveTournamentEntry.count({
-            where: {tournamentId: tournament.id, activeMemberId: {not: null}, status: {notIn: ['PENDING_PAYMENT', 'VOID']}},
+            where: {tournamentId: tournament.id, isRevival: false, activeMemberId: {not: null}, status: {notIn: ['PENDING_PAYMENT', 'VOID']}},
         });
         const today = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
         const rosterDay = tournament.days.find(day => day.date.toISOString().slice(0, 10) === today && day.rosterPublishedAt);
@@ -7101,8 +7140,12 @@ export class OrdersService {
         const canBook = canMemberEnterTournament(member) && tournament.status === 'PUBLISHED' && Boolean(tournament.bookingOpenedAt) &&
             !entry.firstRoundStartedAt && !entry.usedAt &&
             ['UNBOOKED', 'BOOKED', 'QUEUED', 'ABSENT'].includes(entry.status);
+        const leaderboard = stage ? stage.leaderboard : await readTournamentLeaderboard(this.prisma, tournament.id, tournament.leaderboardSnapshot);
+        const memberEntryIds = new Set(attempts.map(item => item.id));
+        const leaderboardEntryId = (leaderboard as any)?.overall?.find((row: any) => memberEntryIds.has(row.ticketId))?.ticketId ?? null;
         return {
             id: entry.id, orderId, status: entry.status, dayId: entry.dayId,
+            isRevival: entry.isRevival, attemptNumber: entry.attemptNumber, leaderboardEntryId,
             appearanceSequence: entry.appearanceSequence, queuePosition: entry.queuePosition,
             contactName: entry.contactName || wechat?.nickname || member?.name, contactPhone: entry.contactPhone || member?.phone,
             gameAccountId: entry.gameAccountId, gameNickname: entry.gameNickname,
@@ -7111,7 +7154,7 @@ export class OrdersService {
             redeemed: Boolean(entry.usedAt), rounds: entry.rounds.filter(round => round.publishedScore),
             title: tournament.title, closed: tournament.status === 'CLOSED', bookingOpen: Boolean(tournament.bookingOpenedAt),
             bookingThreshold: tournament.bookingThreshold, paidTickets,
-            leaderboard: stage ? stage.leaderboard : await readTournamentLeaderboard(this.prisma, tournament.id, tournament.leaderboardSnapshot), providers: stage?.providers ?? [],
+            leaderboard, providers: stage?.providers ?? [],
             days: tournament.days.map(day => ({
                 id: day.id, startsAt: day.startsAt, endsAt: day.endsAt,
                 remaining: Math.max(0, day.capacity - day._count.entries),
@@ -7134,16 +7177,20 @@ export class OrdersService {
 
     }
 
-    async settleLiveTournamentTicket(orderId: number, operatorId: number) {
+    async settleLiveTournamentTicket(orderId: number, operatorId: number, entryId?: number) {
         if (![orderId, operatorId].every(id => Number.isSafeInteger(id) && id > 0)) {
             throw new BadRequestException('订单或操作人无效');
+        }
+        if (entryId !== undefined && (!Number.isSafeInteger(entryId) || entryId <= 0)) {
+            throw new BadRequestException('参赛记录无效');
         }
         return this.prisma.$transaction(async (tx) => {
             await tx.$queryRaw`SELECT id FROM \`Order\` WHERE id = ${orderId} FOR UPDATE`;
             const order = await tx.order.findUnique({where: {id: orderId}, include: {project: true}});
-            const ticket = await tx.liveTournamentEntry.findUnique({
-                where: {orderId}, include: {tournament: true, rounds: true},
-            });
+            if (entryId) await tx.$queryRaw`SELECT id FROM LiveTournamentEntry WHERE id = ${entryId} FOR UPDATE`;
+            const ticket = entryId
+                ? await tx.liveTournamentEntry.findFirst({where: {id: entryId, orderId}, include: {tournament: true, rounds: true}})
+                : await tx.liveTournamentEntry.findFirst({where: {orderId, attemptNumber: 1}, include: {tournament: true, rounds: true}});
             if (!order || !ticket || !ticket.usedAt || !ticket.providerId || ticket.status !== 'FINISHED' ||
                 !order.isPaid || order.status === OrderStatus.REFUNDED || order.status === OrderStatus.CANCELLED) {
                 throw new BadRequestException('请先确认门票有效且两局结果均已发布');
@@ -7155,6 +7202,36 @@ export class OrdersService {
             if (!first?.publishedAt || !firstScore || firstScore.forfeited || typeof firstScore.kills !== 'number' ||
                 !second?.publishedAt || !secondScore || typeof secondScore.kills !== 'number') {
                 throw new BadRequestException('须有有效首局成绩，并发布第二局成绩或弃权结果');
+            }
+            if (ticket.isRevival) {
+                const existing = await tx.liveTournamentRevivalSettlement.findUnique({where: {entryId: ticket.id}});
+                if (existing) return {orderId, entryId: ticket.id, settlementId: existing.id, idempotent: true};
+                const fee = Number(ticket.tournament.providerFee);
+                const settlement = await tx.liveTournamentRevivalSettlement.create({
+                    data: {entryId: ticket.id, orderId, providerId: ticket.providerId, amount: fee, settledBy: operatorId},
+                });
+                const freezeInfo = (await this.buildSettlementFreezeInfoByUserTx(tx, order, [ticket.providerId]))
+                    .get(ticket.providerId);
+                await this.wallet.syncSettlementEarningByFinalEarnings({
+                    userId: ticket.providerId,
+                    finalEarnings: fee,
+                    unlockAt: freezeInfo?.freezeEndAt ?? new Date(),
+                    sourceType: 'LIVE_TOURNAMENT_REVIVAL_SETTLEMENT',
+                    sourceId: settlement.id,
+                    orderId,
+                    dispatchId: null,
+                    settlementId: null,
+                }, tx as any);
+                await tx.userLog.create({data: {
+                    userId: operatorId,
+                    action: 'LIVE_TOURNAMENT_REVIVAL_SETTLE',
+                    targetType: 'LIVE_TOURNAMENT_ENTRY',
+                    targetId: ticket.id,
+                    oldData: null as any,
+                    newData: {settlementId: settlement.id, fee, providerId: ticket.providerId} as any,
+                    remark: '直播挑战赛复活场固定服务费',
+                }});
+                return {orderId, entryId: ticket.id, settlementId: settlement.id, idempotent: false};
             }
             if (order.status === OrderStatus.COMPLETED && order.currentDispatchId) {
                 const existing = await tx.orderSettlement.findFirst({
@@ -9819,7 +9896,7 @@ export class OrdersService {
                 scope,
             });
 
-            if (await tx.liveTournamentEntry?.findUnique({where: {orderId}, select: {id: true}})) {
+            if (await tx.liveTournamentEntry?.findFirst({where: {orderId}, select: {id: true}})) {
                 throw new BadRequestException('赛事门票使用固定服务费，不能按普通订单规则重算');
             }
 

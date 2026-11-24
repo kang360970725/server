@@ -44,3 +44,43 @@ it('publishes positive scores with rank movement and lists zero-score tickets in
         expect.objectContaining({ ticketId: 2, rank: 2, firstKillElapsedMs: 65_000 }),
     ]);
 });
+
+it('uses one member best complete attempt across every leaderboard', async () => {
+    const score = (kills: number, elapsed: number) => ({kills, firstKillElapsedMs: elapsed, firstKillAtMs: elapsed, forfeited: false});
+    const tx = {
+        $queryRaw: jest.fn(),
+        liveTournament: {
+            findUnique: jest.fn().mockResolvedValue({id: 1, status: 'PUBLISHED', leaderboardSnapshot: null}),
+            update: jest.fn(),
+        },
+        liveTournamentEntry: {
+            findUnique: jest.fn().mockResolvedValue({tournamentId: 1}),
+            findUniqueOrThrow: jest.fn().mockResolvedValue({
+                usedAt: new Date(), status: 'SCORING', rounds: [{roundNumber: 2, kills: 5}],
+            }),
+            findMany: jest.fn().mockResolvedValue([
+                {
+                    id: 1, memberId: 9, isRevival: false, competitionName: '选手', onStageAt: new Date(1),
+                    rounds: [
+                        {roundNumber: 1, publishedScore: score(8, 10_000)},
+                        {roundNumber: 2, publishedScore: score(0, 0)},
+                    ],
+                },
+                {
+                    id: 2, memberId: 9, isRevival: true, competitionName: '选手', onStageAt: new Date(2),
+                    rounds: [
+                        {roundNumber: 1, publishedScore: score(5, 20_000)},
+                        {roundNumber: 2, publishedScore: score(5, 30_000)},
+                    ],
+                },
+            ]),
+            update: jest.fn(),
+        },
+        liveTournamentRound: {update: jest.fn()},
+    };
+    await publishTournamentRound(tx as any, 2, 2);
+    const snapshot = tx.liveTournament.update.mock.calls[0][0].data.leaderboardSnapshot;
+    expect(snapshot.overall).toEqual([expect.objectContaining({ticketId: 2, points: 10})]);
+    expect(snapshot.byKills).toEqual([expect.objectContaining({ticketId: 2, kills: 5})]);
+    expect(snapshot.byFirstKill).toEqual([expect.objectContaining({ticketId: 2, firstKillElapsedMs: 20_000})]);
+});
