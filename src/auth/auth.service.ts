@@ -9,7 +9,7 @@ import type { StringValue } from 'ms';
 import { PrismaService } from '../prisma.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
-import { PlayerWorkStatus, StaffEmploymentStatus, UserStatus, UserType } from '@prisma/client';
+import { PlayerWorkStatus, StaffEmploymentStatus, UserStatus } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { isDispatchMonitoredStaff, isStaffUser } from '../common/utils/staff-role-scope.util';
 import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
@@ -32,18 +32,6 @@ export class AuthService {
       code,
       message,
     };
-  }
-
-  private canAccessAdminPortal(userType: unknown) {
-    const allowedUserTypes = new Set<UserType>([
-      UserType.SUPER_ADMIN,
-      UserType.ADMIN,
-      UserType.STAFF,
-      UserType.CUSTOMER_SERVICE,
-      UserType.OPERATION,
-      UserType.FINANCE,
-    ]);
-    return allowedUserTypes.has(userType as UserType);
   }
 
   private getStaffExitBaseAt(user: any) {
@@ -283,12 +271,6 @@ export class AuthService {
 // 查到 user 之后，校验密码之前或之后都可以
     if (user.status === UserStatus.DISABLED) {
       return this.buildLoginFailure('ACCOUNT_DISABLED', '账号已禁用，请联系管理员');
-    }
-    if (!options?.mini && !this.canAccessAdminPortal(user.userType)) {
-      return this.buildLoginFailure(
-        'ADMIN_LOGIN_FORBIDDEN',
-        '该账号为注册用户，请通过小程序登录',
-      );
     }
     const loginLock = await this.enforceStaffExitLoginLock(user);
     user = loginLock.user;

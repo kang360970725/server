@@ -2,7 +2,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PassportStrategy } from '@nestjs/passport';
 import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
-import {PlayerWorkStatus, StaffEmploymentStatus, UserStatus, UserType} from '@prisma/client';
+import {PlayerWorkStatus, StaffEmploymentStatus, UserStatus} from '@prisma/client';
 import { isDispatchMonitoredStaff, isStaffUser } from '../common/utils/staff-role-scope.util';
 import { StaffRuleEngineService } from '../system-config/staff-rule-engine.service';
 
@@ -177,9 +177,6 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
     if (!user) throw new UnauthorizedException('用户不存在');
     if (user.status === UserStatus.DISABLED) throw new ForbiddenException('账号已禁用，请联系管理员');
-    if (!payload?.mini && user.userType === UserType.REGISTERED_USER) {
-      throw new ForbiddenException('注册用户无管理后台访问权限');
-    }
     user = await this.enforceStaffExitAccessLock(user);
     user = await this.autoFreezeDormantStaffIfNeeded(user);
     if (!payload?.mini && isDispatchMonitoredStaff(user) && String(user?.staffEmploymentStatus || '') === StaffEmploymentStatus.FROZEN) {

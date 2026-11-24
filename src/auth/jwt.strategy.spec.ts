@@ -1,8 +1,7 @@
-import { ForbiddenException } from '@nestjs/common';
 import { UserStatus, UserType } from '@prisma/client';
 import { JwtStrategy } from './jwt.strategy';
 
-describe('JwtStrategy admin portal isolation', () => {
+describe('JwtStrategy registered user compatibility', () => {
   let strategy: JwtStrategy;
   let prisma: any;
 
@@ -24,10 +23,12 @@ describe('JwtStrategy admin portal isolation', () => {
     strategy = new JwtStrategy(prisma, {} as any);
   });
 
-  it('invalidates an existing non-mini token owned by a registered user', async () => {
-    await expect(strategy.validate({ sub: 20, mini: false })).rejects.toThrow(
-      new ForbiddenException('注册用户无管理后台访问权限'),
-    );
+  it('temporarily accepts an existing token without the mini claim', async () => {
+    await expect(strategy.validate({ sub: 20 })).resolves.toMatchObject({
+      userId: 20,
+      userType: UserType.REGISTERED_USER,
+      permissions: [],
+    });
   });
 
   it('continues accepting the registered user mini-program token', async () => {

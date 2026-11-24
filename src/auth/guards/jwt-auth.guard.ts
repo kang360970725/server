@@ -29,15 +29,16 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
             return super.handleRequest(err, user, info, context);
         }
 
+        const req = context.switchToHttp().getRequest();
+        const path = String(req?.route?.path || req?.url || '').trim();
+        const isMiniRoute = path.startsWith('/mini/') || String(req?.originalUrl || '').startsWith('/mini/');
         const payload = {
             sub: Number(user?.id || user?.userId),
             phone: String(user?.phone || '').trim(),
             name: String(user?.name || '').trim(),
+            mini: isMiniRoute,
         };
         if (payload.sub) {
-            const req = context.switchToHttp().getRequest();
-            const path = String(req?.route?.path || req?.url || '').trim();
-            const isMiniRoute = path.startsWith('/mini/') || String(req?.originalUrl || '').startsWith('/mini/');
             const refreshedToken = jwt.sign(payload, process.env.JWT_SECRET || 'your-secret-key', {
                 expiresIn: isMiniRoute
                     ? AuthService.MINI_ACCESS_TOKEN_EXPIRES_IN
