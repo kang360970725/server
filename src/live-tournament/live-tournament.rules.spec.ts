@@ -24,4 +24,18 @@ describe('tournament provider draw', () => {
         ];
         expect(drawTournamentProvider(quotas, 1, 2)).toBe(2);
     });
+
+    it('hard-excludes the provider being replaced during a redraw', () => {
+        const quotas = [
+            {providerId: 1, minimum: 0, maximum: 2, drawn: 0},
+            {providerId: 2, minimum: 0, maximum: 2, drawn: 0},
+        ];
+        expect(drawTournamentProvider(quotas, 1, null, [1])).toBe(2);
+    });
+
+    it('rejects a redraw when no different provider can satisfy the quota', () => {
+        const quotas = [{providerId: 1, minimum: 0, maximum: 2, drawn: 0}];
+        expect(() => drawTournamentProvider(quotas, 1, null, [1]))
+            .toThrow('暂无其他符合配额的服务者');
+    });
 });

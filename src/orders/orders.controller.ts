@@ -403,9 +403,15 @@ export class OrdersController {
             case 'stage': return this.ordersService.getLiveTournamentStage(Number(body.dayId), true);
             case 'stage-enter':
             case 'stage-draw':
+            case 'stage-redraw':
             case 'stage-start':
             case 'stage-finish':
-                return this.ordersService.updateLiveTournamentStage(Number(body.dayId), Number(body.entryId), body.action);
+                return this.ordersService.updateLiveTournamentStage(
+                    Number(body.dayId),
+                    Number(body.entryId),
+                    body.action,
+                    Number(req?.user?.id ?? req?.user?.userId ?? req?.user?.sub),
+                );
             case 'studio-entry': return this.ordersService.resolveLiveTournamentStudioDay();
             case 'studio-preheat': return this.ordersService.getLiveTournamentPreheat(Number(body.tournamentId));
             case 'open-booking': return this.ordersService.openLiveTournamentBooking(

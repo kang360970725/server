@@ -79,7 +79,13 @@ export async function getTournamentStage(db: Client, dayId: number, internal: bo
     };
 }
 
-export async function updateTournamentStage(db: Client, dayId: number, entryId: number, action: string) {
+export async function updateTournamentStage(
+    db: Client,
+    dayId: number,
+    entryId: number,
+    action: string,
+    operatorId?: number,
+) {
     const ref = await db.liveTournamentDay.findUnique({ where: { id: dayId }, select: { tournamentId: true } });
     if (!ref) throw new BadRequestException('赛事时段不可用');
     await db.$queryRaw`SELECT id FROM LiveTournament WHERE id = ${ref.tournamentId} FOR UPDATE`;
@@ -120,9 +126,12 @@ export async function updateTournamentStage(db: Client, dayId: number, entryId: 
             };
             break;
         }
-        case 'stage-draw': {
+        case 'stage-draw':
+        case 'stage-redraw': {
             if (!current || current.id !== entryId) throw new BadRequestException('请先确认选手上场');
-            if (current.providerId !== null) {
+            const redrawing = action === 'stage-redraw';
+            if (redrawing && current.providerId === null) throw new BadRequestException('请先完成首次抽取');
+            if (!redrawing && current.providerId !== null) {
                 if (!current.firstRoundStartedAt) {
                     await db.liveTournamentEntry.updateMany({
                         where: { id: entryId, dayId, status: 'ON_STAGE', activeMemberId: { not: null }, firstRoundStartedAt: null },
@@ -131,20 +140,44 @@ export async function updateTournamentStage(db: Client, dayId: number, entryId: 
                 }
                 return;
             }
+            const previousProviderIdForEntry = redrawing ? current.providerId : null;
             const quotas = day.quotas.map(quota => ({
                 ...quota,
-                drawn: entries.filter(entry => entry.providerId === quota.providerId).length,
+                // A redraw replaces the current assignment, so release the old
+                // provider's quota before calculating the new result.
+                drawn: entries.filter(entry => entry.id !== (redrawing ? current.id : -1) && entry.providerId === quota.providerId).length,
             }));
-            const remaining = entries.filter(entry => ['QUEUED', 'ON_STAGE', 'BOOKED'].includes(entry.status) && entry.providerId === null).length;
+            const remaining = entries.filter(entry => ['QUEUED', 'ON_STAGE', 'BOOKED'].includes(entry.status) && entry.providerId === null).length
+                + (redrawing ? 1 : 0);
             const previousProviderId = entries
                 .filter(entry => entry.id !== current.id && entry.providerId !== null && entry.appearanceSequence !== null)
                 .sort((a, b) => b.appearanceSequence! - a.appearanceSequence! || b.id - a.id)[0]?.providerId ?? null;
             try {
+                const providerId = drawTournamentProvider(
+                    quotas,
+                    remaining,
+                    previousProviderId,
+                    previousProviderIdForEntry === null ? [] : [previousProviderIdForEntry],
+                );
                 data = {
-                    providerId: drawTournamentProvider(quotas, remaining, previousProviderId),
+                    providerId,
                     drawnAt: now,
                     firstRoundStartedAt: current.firstRoundStartedAt ?? now,
                 };
+                if (redrawing) {
+                    if (!operatorId) throw new BadRequestException('操作人信息已失效，请重新登录');
+                    await db.userLog.create({
+                        data: {
+                            userId: operatorId,
+                            action: 'LIVE_TOURNAMENT_PROVIDER_REDRAW',
+                            targetType: 'LIVE_TOURNAMENT_ENTRY',
+                            targetId: entryId,
+                            oldData: { providerId: previousProviderIdForEntry },
+                            newData: { providerId, dayId },
+                            remark: '直播赛事临时更换服务者',
+                        },
+                    });
+                }
             } catch (error) {
                 if (!(error instanceof RangeError)) throw error;
                 throw new BadRequestException(error.message);

@@ -24,6 +24,7 @@ function stageTransaction(status: string, providerId: number | null = null) {
             findMany: jest.fn().mockResolvedValue([{ id: 7, name: '服务者', staffRating: { name: '超凡入圣' } }]),
             findUnique: jest.fn().mockResolvedValue({ userType: 'REGISTERED_USER', memberProfile: null }),
         },
+        userLog: { create: jest.fn().mockResolvedValue({ id: 1 }) },
     };
 }
 
@@ -46,6 +47,30 @@ it('assigns a permanent appearance sequence when the next player enters the stag
     expect(tx.liveTournamentEntry.updateMany).toHaveBeenCalledWith(expect.objectContaining({
         data: expect.objectContaining({ status: 'ON_STAGE', appearanceSequence: 4, queuePosition: null }),
     }));
+});
+
+it('replaces the current provider and records an audit log', async () => {
+    const tx = stageTransaction('ON_STAGE', 7);
+    tx.liveTournamentDay.findUnique.mockResolvedValue({
+        rosterPublishedAt: new Date(),
+        quotas: [
+            { providerId: 7, minimum: 0, maximum: 2 },
+            { providerId: 8, minimum: 0, maximum: 2 },
+        ],
+        entries: [],
+        tournament: { id: 1, title: '赛事', status: 'PUBLISHED', ticketLimit: 70 },
+        tournamentId: 1,
+    });
+    await updateTournamentStage(tx as any, 1, 12, 'stage-redraw', 99);
+    expect(tx.liveTournamentEntry.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({ providerId: 8, drawnAt: expect.any(Date) }),
+    }));
+    expect(tx.userLog.create).toHaveBeenCalledWith({ data: expect.objectContaining({
+        userId: 99,
+        action: 'LIVE_TOURNAMENT_PROVIDER_REDRAW',
+        oldData: { providerId: 7 },
+        newData: { providerId: 8, dayId: 1 },
+    }) });
 });
 
 it('keeps the game ID and contact information out of public projection', async () => {

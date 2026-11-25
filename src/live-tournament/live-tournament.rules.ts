@@ -59,6 +59,7 @@ export function drawTournamentProvider(
     quotas: readonly TournamentProviderQuota[],
     remainingDraws: number,
     lastProviderId?: number | null,
+    excludedProviderIds: readonly number[] = [],
 ): number {
     if (!Number.isSafeInteger(remainingDraws) || remainingDraws < 1) {
         throw new RangeError('没有剩余抽取次数');
@@ -78,7 +79,9 @@ export function drawTournamentProvider(
 
     // Simulate every possible next draw. A candidate is valid only when the
     // remaining draws can still satisfy every provider's minimum and maximum.
+    const excluded = new Set(excludedProviderIds);
     const feasible = quotas.filter((candidate) => {
+        if (excluded.has(candidate.providerId)) return false;
         if (candidate.drawn >= candidate.maximum) return false;
         const after = quotas.map(quota => quota.providerId === candidate.providerId
             ? {...quota, drawn: quota.drawn + 1}
@@ -92,7 +95,9 @@ export function drawTournamentProvider(
         );
         return drawsAfter >= minimumAfter && drawsAfter <= capacityAfter;
     });
-    if (!feasible.length) throw new RangeError('没有符合剩余配额的服务者');
+    if (!feasible.length) throw new RangeError(excluded.size
+        ? '暂无其他符合配额的服务者，无法重新抽取'
+        : '没有符合剩余配额的服务者');
 
     // Prefer a different provider from the previous draw. Consecutive draws are
     // allowed only when every alternative would make the remaining quota invalid.

@@ -6461,11 +6461,11 @@ export class OrdersService {
         return getTournamentStage(this.prisma, dayId, internal);
     }
 
-    async updateLiveTournamentStage(dayId: number, entryId: number, action: string) {
+    async updateLiveTournamentStage(dayId: number, entryId: number, action: string, operatorId?: number) {
         if (![dayId, entryId].every(id => Number.isSafeInteger(id) && id > 0)) {
             throw new BadRequestException('请选择有效选手和直播时段');
         }
-        await this.prisma.$transaction(tx => updateTournamentStage(tx, dayId, entryId, action), {
+        await this.prisma.$transaction(tx => updateTournamentStage(tx, dayId, entryId, action, operatorId), {
             isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
         });
         return this.getLiveTournamentStage(dayId, true);
