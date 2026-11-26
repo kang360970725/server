@@ -7098,6 +7098,9 @@ export class OrdersService {
                 const order = orderById.get(entry.orderId);
                 return {
                     ...entry,
+                    // attemptNumber counts the original attempt as 1, while
+                    // revivalNumber counts only granted revival attempts.
+                    revivalNumber: entry.isRevival ? Math.max(1, entry.attemptNumber - 1) : 0,
                     memberCode: member?.memberProfile?.memberCode ?? null,
                     memberNickname: binding?.nickname || member?.name || entry.contactName || entry.competitionName || '未命名会员',
                     memberAvatar: binding?.avatarUrl || member?.avatar || null,

@@ -32,7 +32,7 @@ it('lists tournament registrations with member, order and booking metadata', asy
 
     expect(result).toMatchObject({total: 1, page: 1, pageSize: 20});
     expect(result.list[0]).toMatchObject({
-        id: 21, memberCode: 'M15001521', memberNickname: '微信昵称', memberAvatar: 'wechat-avatar',
+        id: 21, revivalNumber: 1, memberCode: 'M15001521', memberNickname: '微信昵称', memberAvatar: 'wechat-avatar',
         orderNo: 'V202611260001', booked: true, bookedAt,
     });
 });
