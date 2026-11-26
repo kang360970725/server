@@ -71,7 +71,7 @@ export async function bookTournament(tx: Tx, memberId: number, input: Record<str
         data: {
             ...game, dayId, contactName: (wechat?.nickname || member.name)?.slice(0, 100), contactPhone: member.phone,
             ...(changingDay || ticket.status === 'UNBOOKED' || ticket.status === 'ABSENT'
-                ? { status: 'BOOKED', checkedInAt: null, queuePosition: null } : {}),
+                ? { status: 'BOOKED', checkedInAt: null, queuePosition: null, bookedAt: new Date() } : {}),
             ...(changingDay ? { rescheduledAt: new Date(), preMatchReminderAt: null } : {}),
         },
     });
@@ -125,7 +125,7 @@ export async function adminRescheduleTournamentEntry(tx: Tx, entryId: number, ta
             dayId: targetDayId,
             status: targetQueued ? 'QUEUED' : 'BOOKED',
             queuePosition: targetQueued ? (lastTarget?._max.queuePosition ?? 0) + 1 : null,
-            checkedInAt: targetQueued ? new Date() : null,
+            checkedInAt: targetQueued ? new Date() : null, bookedAt: new Date(),
             rescheduledAt: new Date(), preMatchReminderAt: null,
         },
     });

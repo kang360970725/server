@@ -6996,6 +6996,120 @@ export class OrdersService {
         });
     }
 
+    async listLiveTournamentRegistrations(tournamentId: number, query: any) {
+        if (!Number.isSafeInteger(tournamentId) || tournamentId <= 0) {
+            throw new BadRequestException('请选择有效赛事');
+        }
+        const page = Math.max(1, Number.parseInt(String(query?.page ?? 1), 10) || 1);
+        const pageSize = Math.min(100, Math.max(10, Number.parseInt(String(query?.pageSize ?? 20), 10) || 20));
+        const keyword = String(query?.keyword ?? '').trim().slice(0, 100);
+        const bookingStatus = String(query?.bookingStatus ?? 'ALL');
+        const entryStatus = String(query?.entryStatus ?? 'ALL');
+        const revivalStatus = String(query?.revivalStatus ?? 'ALL');
+        const allowedStatuses = new Set(['UNBOOKED', 'BOOKED', 'QUEUED', 'ON_STAGE', 'SCORING', 'FINISHED', 'ABSENT', 'VOID']);
+
+        let matchingMemberIds: number[] = [];
+        let matchingOrderIds: number[] = [];
+        if (keyword) {
+            const numericId = /^\d+$/.test(keyword) ? Number(keyword) : 0;
+            const [members, orders] = await Promise.all([
+                this.prisma.user.findMany({
+                    where: {OR: [
+                        ...(numericId > 0 ? [{id: numericId}] : []),
+                        {name: {contains: keyword}},
+                        {memberProfile: {is: {memberCode: {contains: keyword}}}},
+                        {wechatBindings: {some: {platform: 'MINIAPP', nickname: {contains: keyword}}}},
+                    ]},
+                    select: {id: true}, take: 200,
+                }),
+                this.prisma.order.findMany({
+                    where: {autoSerial: {contains: keyword}}, select: {id: true}, take: 200,
+                }),
+            ]);
+            matchingMemberIds = members.map(item => item.id);
+            matchingOrderIds = orders.map(item => item.id);
+        }
+
+        const filters: Prisma.LiveTournamentEntryWhereInput[] = [{
+            OR: [
+                {isRevival: false, status: {notIn: ['PENDING_PAYMENT', 'VOID']}},
+                {isRevival: true},
+            ],
+        }];
+        if (keyword) filters.push({OR: [
+            ...(matchingMemberIds.length ? [{memberId: {in: matchingMemberIds}}] : []),
+            ...(matchingOrderIds.length ? [{orderId: {in: matchingOrderIds}}] : []),
+            ...(/^\d+$/.test(keyword) && Number(keyword) > 0
+                ? [{memberId: Number(keyword)}, {orderId: Number(keyword)}]
+                : []),
+        ]});
+        if (bookingStatus === 'BOOKED') filters.push({dayId: {not: null}, status: {not: 'VOID'}});
+        if (bookingStatus === 'UNBOOKED') filters.push({dayId: null});
+        if (entryStatus !== 'ALL' && allowedStatuses.has(entryStatus)) filters.push({status: entryStatus as any});
+        if (revivalStatus === 'ORIGINAL') filters.push({isRevival: false});
+        if (revivalStatus === 'REVIVAL') filters.push({isRevival: true, revivalRevokedAt: null});
+        if (revivalStatus === 'REVOKED') filters.push({isRevival: true, revivalRevokedAt: {not: null}});
+
+        const where: Prisma.LiveTournamentEntryWhereInput = {tournamentId, AND: filters};
+        const [total, entries] = await this.prisma.$transaction([
+            this.prisma.liveTournamentEntry.count({where}),
+            this.prisma.liveTournamentEntry.findMany({
+                where,
+                orderBy: [{createdAt: 'desc'}, {id: 'desc'}],
+                skip: (page - 1) * pageSize,
+                take: pageSize,
+                select: {
+                    id: true, orderId: true, memberId: true, attemptNumber: true, isRevival: true,
+                    revivalGrantedAt: true, revivalRevokedAt: true, dayId: true, status: true,
+                    createdAt: true, bookedAt: true, rescheduledAt: true, competitionName: true,
+                    gameNickname: true, contactName: true,
+                    day: {select: {startsAt: true, endsAt: true}},
+                },
+            }),
+        ]);
+        if (!entries.length) return {list: [], total, page, pageSize};
+
+        const memberIds = [...new Set(entries.map(entry => entry.memberId))];
+        const orderIds = [...new Set(entries.map(entry => entry.orderId))];
+        const [members, bindings, orders] = await Promise.all([
+            this.prisma.user.findMany({
+                where: {id: {in: memberIds}},
+                select: {id: true, name: true, avatar: true, memberProfile: {select: {memberCode: true}}},
+            }),
+            this.prisma.userWechatBinding.findMany({
+                where: {userId: {in: memberIds}, platform: 'MINIAPP'},
+                orderBy: {updatedAt: 'desc'},
+                select: {userId: true, nickname: true, avatarUrl: true},
+            }),
+            this.prisma.order.findMany({
+                where: {id: {in: orderIds}},
+                select: {id: true, autoSerial: true, orderTime: true, currentDispatch: {select: {assignedAt: true}}},
+            }),
+        ]);
+        const memberById = new Map(members.map(member => [member.id, member]));
+        const bindingByMemberId = new Map<number, typeof bindings[number]>();
+        for (const binding of bindings) if (!bindingByMemberId.has(binding.userId)) bindingByMemberId.set(binding.userId, binding);
+        const orderById = new Map(orders.map(order => [order.id, order]));
+
+        return {
+            list: entries.map(entry => {
+                const member = memberById.get(entry.memberId);
+                const binding = bindingByMemberId.get(entry.memberId);
+                const order = orderById.get(entry.orderId);
+                return {
+                    ...entry,
+                    memberCode: member?.memberProfile?.memberCode ?? null,
+                    memberNickname: binding?.nickname || member?.name || entry.contactName || entry.competitionName || '未命名会员',
+                    memberAvatar: binding?.avatarUrl || member?.avatar || null,
+                    orderNo: order?.autoSerial ?? null,
+                    registeredAt: order?.currentDispatch?.assignedAt || order?.orderTime || entry.createdAt,
+                    booked: entry.dayId !== null && entry.status !== 'VOID',
+                };
+            }),
+            total, page, pageSize,
+        };
+    }
+
     async saveLiveTournamentQueue(dayId: number, orderedIds: number[], absentId?: number) {
         if (!Array.isArray(orderedIds) || orderedIds.some(id => !Number.isSafeInteger(id) || id <= 0)) {
             throw new BadRequestException('请选择有效的参赛选手');

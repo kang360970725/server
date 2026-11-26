@@ -3028,6 +3028,9 @@ model LiveTournamentEntry {
   appearanceSequence Int?
   queuePosition      Int?
   checkedInAt        DateTime?
+  // Latest successful booking or rescheduling time. Kept separate from updatedAt
+  // because scoring and stage operations also update the entry.
+  bookedAt           DateTime?
   onStageAt          DateTime?
   firstRoundStartedAt DateTime?
   usedAt             DateTime?

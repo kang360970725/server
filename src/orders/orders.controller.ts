@@ -396,7 +396,7 @@ export class OrdersController {
     @UseGuards(PermissionsGuard)
     @Permissions('live-tournament:view', 'live-tournament:operate')
     async liveTournamentOperations(@Body() body: any, @Req() req: any) {
-        if (body?.action !== 'list' && body?.action !== 'entries') {
+        if (!['list', 'entries', 'registrations'].includes(body?.action)) {
             this.assertButtonPermission(req?.user, 'live-tournament:operate', '当前角色无权操作赛事');
         }
         switch (body?.action) {
@@ -436,6 +436,7 @@ export class OrdersController {
             case 'publish': return this.ordersService.publishLiveTournament(Number(body.tournamentId));
             case 'roster': return this.ordersService.publishLiveTournamentRoster(Number(body.dayId), body.quotas);
             case 'entries': return this.ordersService.getLiveTournamentDayEntries(Number(body.dayId));
+            case 'registrations': return this.ordersService.listLiveTournamentRegistrations(Number(body.tournamentId), body);
             case 'queue': return this.ordersService.saveLiveTournamentQueue(Number(body.dayId), body.orderedIds, body.absentId);
             case 'reschedule-entry': return this.ordersService.adminRescheduleLiveTournamentEntry(Number(body.entryId), Number(body.targetDayId));
             case 'grant-revival': return this.ordersService.grantLiveTournamentRevival(
