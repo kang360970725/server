@@ -6958,7 +6958,7 @@ export class OrdersService {
         });
         if (!entries.length) return [];
         const orderIds = [...new Set(entries.map(entry => entry.orderId))];
-        const [completed, members, activeRevivals] = await Promise.all([
+        const [completed, members, activeRevivals, finishedAttempts] = await Promise.all([
             this.prisma.order.findMany({
                 where: {id: {in: orderIds}, status: OrderStatus.COMPLETED},
                 select: {id: true},
@@ -6971,10 +6971,19 @@ export class OrdersService {
                 where: {orderId: {in: orderIds}, isRevival: true, status: {notIn: ['FINISHED', 'VOID']}},
                 select: {id: true, orderId: true, status: true, dayId: true, attemptNumber: true},
             }),
+            this.prisma.liveTournamentEntry.findMany({
+                where: {orderId: {in: orderIds}, status: 'FINISHED'},
+                orderBy: [{attemptNumber: 'desc'}, {id: 'desc'}],
+                select: {id: true, orderId: true, attemptNumber: true},
+            }),
         ]);
         const completedIds = new Set(completed.map(order => order.id));
         const membersById = new Map(members.map(member => [member.id, member]));
         const activeRevivalByOrder = new Map(activeRevivals.map(entry => [entry.orderId, entry]));
+        const latestFinishedByOrder = new Map<number, typeof finishedAttempts[number]>();
+        for (const attempt of finishedAttempts) {
+            if (!latestFinishedByOrder.has(attempt.orderId)) latestFinishedByOrder.set(attempt.orderId, attempt);
+        }
         const statusOrder: Record<string, number> = {
             ON_STAGE: 0, QUEUED: 1, BOOKED: 2, SCORING: 3, FINISHED: 4, ABSENT: 5, UNBOOKED: 6, VOID: 7,
         };
@@ -6985,7 +6994,11 @@ export class OrdersService {
                 memberAvatar: member?.avatar ?? null,
                 memberCode: member?.memberProfile?.memberCode ?? null,
                 fulfilled: entry.isRevival ? Boolean(entry.revivalSettlement) : completedIds.has(entry.orderId),
-                activeRevival: entry.isRevival ? null : activeRevivalByOrder.get(entry.orderId) ?? null,
+                // Expose the active revival on every attempt row. The admin UI
+                // can then allow another revival from a finished revival while
+                // still suppressing duplicate grants when a newer attempt exists.
+                activeRevival: activeRevivalByOrder.get(entry.orderId) ?? null,
+                canGrantRevival: !activeRevivalByOrder.has(entry.orderId) && latestFinishedByOrder.get(entry.orderId)?.id === entry.id,
             };
         }).sort((a, b) => {
             const statusDifference = (statusOrder[a.status] ?? 99) - (statusOrder[b.status] ?? 99);

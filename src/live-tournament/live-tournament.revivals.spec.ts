@@ -25,6 +25,29 @@ describe('live tournament revival', () => {
         })});
     });
 
+    it('creates the next revival from a completed revival attempt', async () => {
+        const original = {id: 10, orderId: 20, attemptNumber: 1, isRevival: false, status: 'FINISHED'};
+        const source = {
+            id: 11, tournamentId: 3, orderId: 20, memberId: 7, attemptNumber: 2, isRevival: true,
+            status: 'FINISHED', usedAt: new Date(), contactName: '会员', contactPhone: '13800000000',
+            gameAccountId: 'game-7', gameNickname: '选手', gameRank: '钻石', competitionName: '蓝猫',
+            tournament: {status: 'PUBLISHED', leaderboardLockedAt: null},
+            rounds: [{publishedAt: new Date()}, {publishedAt: new Date()}],
+        };
+        const tx = {
+            $queryRaw: jest.fn(),
+            liveTournamentEntry: {
+                findUnique: jest.fn().mockResolvedValueOnce({tournamentId: 3, orderId: 20}).mockResolvedValueOnce(source),
+                findMany: jest.fn().mockResolvedValue([original, source]),
+                create: jest.fn().mockImplementation(({data}) => ({id: 12, ...data})),
+            },
+            userLog: {create: jest.fn()},
+        };
+        await expect(grantTournamentRevival(tx as any, 11, 2)).resolves.toMatchObject({
+            id: 12, attemptNumber: 3, isRevival: true, status: 'UNBOOKED',
+        });
+    });
+
     it('revokes an unstarted booked revival and releases its queue position', async () => {
         const entry = {
             id: 12, tournamentId: 3, orderId: 20, dayId: 5, queuePosition: 2,
