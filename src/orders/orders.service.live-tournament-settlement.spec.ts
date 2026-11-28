@@ -57,6 +57,7 @@ it.each([false, true])('settles one full fixed fee and reuses the batch on retry
 });
 
 it('settles a revival independently without creating another order dispatch', async () => {
+    const settledAt = new Date('2026-11-28T08:00:00.000Z');
     const entry = {
         id: 22, orderId: 12, usedAt: new Date(), status: 'FINISHED', providerId: 9, isRevival: true,
         tournament: {providerFee: '36.5'},
@@ -65,7 +66,7 @@ it('settles a revival independently without creating another order dispatch', as
             {roundNumber: 2, publishedScore: {kills: 1, forfeited: false}, publishedAt: new Date()},
         ],
     };
-    const settlement = {id: 5, entryId: 22, orderId: 12, providerId: 9, amount: '36.5'};
+    const settlement = {id: 5, entryId: 22, orderId: 12, providerId: 9, amount: '36.5', settledAt};
     const tx = {
         $queryRaw: jest.fn(),
         order: {findUnique: jest.fn().mockResolvedValue({id: 12, isPaid: true, status: 'COMPLETED'})},
@@ -88,6 +89,7 @@ it('settles a revival independently without creating another order dispatch', as
         orderId: 12, entryId: 22, settlementId: 5, idempotent: true,
     });
     expect(service.wallet.syncSettlementEarningByFinalEarnings).toHaveBeenCalledTimes(1);
+    expect(service.buildSettlementFreezeInfoByUserTx).toHaveBeenCalledWith(tx, expect.any(Object), [9], settledAt);
     expect(service.wallet.syncSettlementEarningByFinalEarnings).toHaveBeenCalledWith(expect.objectContaining({
         userId: 9, finalEarnings: 36.5, sourceType: 'LIVE_TOURNAMENT_REVIVAL_SETTLEMENT', sourceId: 5,
     }), tx);

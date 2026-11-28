@@ -1007,7 +1007,7 @@ export class OrdersService {
         return this.normalizeSettlementFreezeDays(rule?.settlementFreezeRegularDays, 7);
     }
 
-    private async buildSettlementFreezeInfoByUserTx(tx: any, order: any, userIds: number[]) {
+    private async buildSettlementFreezeInfoByUserTx(tx: any, order: any, userIds: number[], freezeStartAt?: Date) {
         const uniqueUserIds = Array.from(new Set(userIds.map((id) => Number(id || 0)).filter((id) => id > 0)));
         const config = await this.staffRuleEngineService.getConfig();
         const users = uniqueUserIds.length
@@ -1027,6 +1027,7 @@ export class OrdersService {
                 userId,
                 computeSettlementFreezeTime({
                     order,
+                    freezeStartAt,
                     freezeDaysConfig: {
                         experienceDays: this.getExperienceFreezeDaysFromRule(rule),
                         regularDays: this.getRegularFreezeDaysFromRule(rule),
@@ -7327,7 +7328,12 @@ export class OrdersService {
                 const settlement = await tx.liveTournamentRevivalSettlement.create({
                     data: {entryId: ticket.id, orderId, providerId: ticket.providerId, amount: fee, settledBy: operatorId},
                 });
-                const freezeInfo = (await this.buildSettlementFreezeInfoByUserTx(tx, order, [ticket.providerId]))
+                const freezeInfo = (await this.buildSettlementFreezeInfoByUserTx(
+                    tx,
+                    order,
+                    [ticket.providerId],
+                    settlement.settledAt,
+                ))
                     .get(ticket.providerId);
                 await this.wallet.syncSettlementEarningByFinalEarnings({
                     userId: ticket.providerId,

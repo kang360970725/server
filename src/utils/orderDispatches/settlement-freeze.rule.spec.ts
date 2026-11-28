@@ -37,4 +37,20 @@ describe('computeSettlementFreezeTime', () => {
     expect(experience.freezeEndAt.toISOString()).toBe('2026-08-06T00:00:00.000Z');
     expect(regular.freezeDays).toBe(7);
   });
+
+  it('uses an explicit settlement time when the business flow has no dispatch', () => {
+    const freezeStartAt = new Date('2026-11-28T08:00:00.000Z');
+    const result = computeSettlementFreezeTime({
+      order: {...buildOrder('REGULAR'), dispatches: []},
+      freezeStartAt,
+      freezeDaysConfig: {regularDays: 7},
+    });
+    expect(result.freezeStartAt).toEqual(freezeStartAt);
+    expect(result.freezeEndAt).toEqual(new Date('2026-12-05T08:00:00.000Z'));
+  });
+
+  it('fails clearly when neither a completed dispatch nor an explicit time exists', () => {
+    expect(() => computeSettlementFreezeTime({order: {...buildOrder('REGULAR'), dispatches: []}}))
+      .toThrow('缺少结算冻结起始时间');
+  });
 });

@@ -5,6 +5,7 @@
  */
 export function computeSettlementFreezeTime(params: {
     order: any;
+    freezeStartAt?: Date;
     freezeDaysConfig?: {
         experienceDays?: number;
         regularDays?: number;
@@ -39,8 +40,14 @@ export function computeSettlementFreezeTime(params: {
     );
 
 
-    let freezeStartAt = undefined;
-    if (completedDispatch) freezeStartAt = new Date(completedDispatch.completedAt || completedDispatch.acceptedAllAt)
+    const freezeStartAt = params.freezeStartAt
+        ? new Date(params.freezeStartAt)
+        : completedDispatch
+            ? new Date(completedDispatch.completedAt || completedDispatch.acceptedAllAt)
+            : null;
+    if (!freezeStartAt || !Number.isFinite(freezeStartAt.getTime())) {
+        throw new Error('缺少结算冻结起始时间');
+    }
 
     // 2️⃣ 冻结天数判定（集中规则）
     let freezeDays = configuredRegularDays;
